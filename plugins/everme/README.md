@@ -25,7 +25,7 @@ evercli plugin install codex
 That single command:
 
 1. Registers this marketplace via
-   `codex plugin marketplace add EverMind-AI/EverMe --sparse plugins/codex-marketplace`.
+   `codex plugin marketplace add EverMind-AI/EverMe`.
    Codex's own CLI writes `[marketplaces.everme]` into `~/.codex/config.toml`
    (carrying its `source_type` / `source` / `last_updated` fields) — evercli
    does NOT overwrite this section.
