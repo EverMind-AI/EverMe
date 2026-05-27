@@ -1,0 +1,20 @@
+{
+  "name": "everme",
+  "interface": {
+    "displayName": "EverMe"
+  },
+  "plugins": [
+    {
+      "name": "everme",
+      "source": {
+        "source": "local",
+        "path": "./plugins/everme"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
