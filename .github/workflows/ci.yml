@@ -175,7 +175,8 @@ jobs:
 
       - name: Private key check
         run: |
-          if grep -R --exclude-dir=.git -n "BEGIN .*PRIVATE KEY" .; then
+          # ci.yml is excluded so the pattern string doesn't self-match.
+          if grep -R --exclude-dir=.git --exclude-dir=node_modules --exclude=ci.yml -n "BEGIN .*PRIVATE KEY" .; then
             echo "::error::Private key material detected"
             exit 1
           fi
