@@ -21,7 +21,8 @@ Codex variants differ in what the LLM-facing tool layer surfaces:
   functions.
 - **Codex CLI** (the `codex` terminal command) — has been observed to
   expose both Resources and Tools to the LLM in practice, so
-  `tools/call mem_save_turn` may also work there.
+  write-side tools such as `mem_save_fact` / `mem_save_turn` may also
+  work there.
 
 This skill is written assuming the **Resources** path because it works
 on both. The memory server is configured under
@@ -58,13 +59,21 @@ Two URIs are available:
    Quote relevant fragments inline when answering.
 
 3. **User shares a new fact, preference, or decision**:
-   try `tools/call mem_save_turn` if your Codex variant exposes MCP
-   Tools to you. If your tool surface only carries Resources (which is
-   the common Codex App behavior), there's no Resource equivalent to
-   write back — quietly acknowledge "I'll remember that for this
-   session" and let the user know cross-session persistence may need
-   another client (Claude Code, Cursor, or the EverMe web UI). A
-   notify-hook auto-save path for Codex App is tracked as V1.2 work.
+   try `tools/call mem_save_fact` if your Codex variant exposes MCP
+   Tools to you. Pass either `fact` or a `messages[]` array containing
+   only `user` / `assistant` roles. Do not use `mem_save_turn` for
+   durable facts; it records conversation trajectories and does not
+   update the long-term profile. If your tool surface only carries
+   Resources (which is the common Codex App behavior), there's no
+   Resource equivalent to write back — quietly acknowledge "I'll
+   remember that for this session" and let the user know cross-session
+   persistence may need another EverMe-enabled client.
+
+4. **You want to preserve a full conversation trajectory**:
+   use `tools/call mem_save_turn` when Tools are available, especially
+   when preserving assistant tool calls and tool results. Prefer the
+   `messages[]` form for complete user → assistant → tool → assistant
+   round trips.
 
 ## When NOT to call these resources
 
@@ -84,10 +93,10 @@ Two URIs are available:
 
 - **Recall is reliable, save is variant-dependent.** Reading
   `mem://profile` / `mem://search` works on every Codex build that
-  bridges MCP Resources to the LLM. Writing via `mem_save_turn`
-  requires the variant to also bridge MCP Tools — Codex CLI has been
-  observed to do this; Codex App typically doesn't. Always attempt
-  Tools and gracefully degrade.
+  bridges MCP Resources to the LLM. Writing via `mem_save_fact` or
+  `mem_save_turn` requires the variant to also bridge MCP Tools —
+  Codex CLI has been observed to do this; Codex App typically doesn't.
+  Always attempt Tools and gracefully degrade.
 - The MCP server uses credentials written by `evercli plugin install
   codex` into `~/.codex/config.toml`. If recall returns 401 or empty
   results across sessions, run `evercli plugin install codex` again to

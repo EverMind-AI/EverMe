@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "everme": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/scripts/mcp-server.js"],
+      "env": {}
+    }
+  }
+}

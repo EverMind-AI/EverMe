@@ -1,0 +1,44 @@
+{
+  "name": "@everme/agent-sdk",
+  "version": "0.3.2",
+  "type": "module",
+  "description": "Shared core for EverMe AI-agent plugins. HTTP client, search/context, agent-memory writes, redaction, prompt helpers. Host-agnostic — paired with @everme/openclaw, @everme/claude-code, @everme/memory-mcp, …",
+  "license": "Apache-2.0",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js"
+  },
+  "files": [
+    "index.js",
+    "src/",
+    "LICENSE",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "test": "node --test tests/client.test.js tests/config.test.js tests/messages.test.js tests/agent-memory.test.js tests/personal-memory.test.js"
+  },
+  "keywords": [
+    "evermind",
+    "everme",
+    "memory",
+    "ai",
+    "agent",
+    "sdk"
+  ],
+  "homepage": "https://everme.evermind.ai",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/EverMind-AI/EverMe.git",
+    "directory": "plugins/agent-sdk"
+  },
+  "bugs": {
+    "url": "https://github.com/EverMind-AI/EverMe/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  }
+}

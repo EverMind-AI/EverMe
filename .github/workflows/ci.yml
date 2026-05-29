@@ -1,0 +1,242 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  checks: write
+  pull-requests: write
+
+jobs:
+  # ── Layer 1: Fast Gate ─────────────────────────────────────────────
+  fast-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: cli/go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: plugins/package-lock.json
+
+      - name: Build CLI
+        working-directory: cli
+        run: go build ./...
+
+      - name: Vet CLI
+        working-directory: cli
+        run: go vet ./...
+
+      - name: Check CLI formatting
+        working-directory: cli
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "$unformatted"
+            echo "::error::Unformatted Go files detected; run 'gofmt -w .'"
+            exit 1
+          fi
+
+      - name: Check go.mod tidiness
+        working-directory: cli
+        run: |
+          go mod tidy
+          if ! git diff --quiet go.mod go.sum; then
+            echo "::error::go.mod or go.sum is not tidy. Run 'go mod tidy' and commit the changes."
+            git diff go.mod go.sum
+            exit 1
+          fi
+
+      - name: Install plugin workspace
+        working-directory: plugins
+        run: npm ci
+
+      - name: Validate package manifests
+        working-directory: plugins
+        run: |
+          node -e 'for (const f of ["package.json","agent-sdk/package.json","memory-mcp/package.json","openclaw/package.json","claude-code/package.json","cli/package.json"]) JSON.parse(require("fs").readFileSync(f,"utf8"))'
+          node -e 'JSON.parse(require("fs").readFileSync("everme/.codex-plugin/plugin.json","utf8"))'
+
+  # ── Layer 2: Quality Gate ──────────────────────────────────────────
+  cli-test:
+    needs: fast-gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: cli/go.mod
+      - name: Run CLI tests
+        working-directory: cli
+        run: go test -race -count=1 -timeout=5m ./...
+
+  plugin-test:
+    needs: fast-gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: plugins/package-lock.json
+      - name: Install
+        working-directory: plugins
+        run: npm ci
+      - name: Run plugin tests
+        working-directory: plugins
+        run: npm test --workspaces --if-present
+
+  coverage:
+    needs: fast-gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: cli/go.mod
+      - name: CLI coverage
+        working-directory: cli
+        run: |
+          go test -coverprofile=coverage.txt -covermode=atomic ./...
+          total="$(go tool cover -func=coverage.txt | awk '/^total:/ {print $3}')"
+          echo "## Coverage" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "CLI total coverage: **${total:-n/a}**" >> "$GITHUB_STEP_SUMMARY"
+
+  # ── Layer 3: Packaging & Security Gate ─────────────────────────────
+  package-smoke:
+    needs: [cli-test, plugin-test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: cli/go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: plugins/package-lock.json
+      - name: Build CLI binary
+        working-directory: cli
+        run: make build
+      - name: CLI version smoke
+        run: ./cli/_output/evercli --version
+      - name: Install plugin workspace
+        working-directory: plugins
+        run: npm ci
+      - name: npm wrapper smoke
+        run: |
+          mkdir -p plugins/cli/bin
+          cp cli/_output/evercli plugins/cli/bin/evercli
+          node plugins/cli/scripts/run.js --version
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: cli/go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: plugins/package-lock.json
+
+      - name: Build artifact check
+        run: |
+          forbidden="$(find . \
+            -path './.git' -prune -o \
+            \( \
+              -path './cli/_output' -o \
+              -path './cli/dist' -o \
+              -path './plugins/node_modules' -o \
+              -name '*.tar.gz' -o \
+              -name '*.zip' -o \
+              -name '.env' -o \
+              -name '.env.*' \
+            \) -print)"
+          if [ -n "$forbidden" ]; then
+            echo "$forbidden"
+            echo "::error::Generated artifacts or local env files are present"
+            exit 1
+          fi
+
+      - name: Private key check
+        run: |
+          if grep -R --exclude-dir=.git -n "BEGIN .*PRIVATE KEY" .; then
+            echo "::error::Private key material detected"
+            exit 1
+          fi
+
+      - name: Internal reference check
+        run: |
+          # Catch leftover internal infra hostnames, maintainer-identifying
+          # strings, and personal-email TLDs. The check runs on the publish
+          # tree, so any hit is a real regression to clean up before merge.
+          # ci.yml itself is excluded so the pattern string doesn't self-match.
+          if grep -R --exclude-dir=.git --exclude-dir=node_modules --exclude=ci.yml -nE \
+            "gitlab\.com|npc-work|shanda|liutong|alwaysday1|liutongs-mbp|@(qq|163|126|sina|gmail|hotmail|outlook)\.com" \
+            .; then
+            echo "::error::Internal repository, maintainer identity, or personal-email reference detected"
+            exit 1
+          fi
+
+      - name: govulncheck
+        continue-on-error: true
+        working-directory: cli
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+      - name: npm audit
+        working-directory: plugins
+        run: |
+          npm ci
+          npm audit --audit-level=moderate
+
+  # ── Results Gate (single required check for branch protection) ─────
+  results:
+    if: ${{ always() }}
+    needs: [fast-gate, cli-test, plugin-test, coverage, package-smoke, security]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Evaluate results
+        run: |
+          echo "## CI Results" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Layer | Job | Status |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|-----|--------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| L1 | fast-gate | ${{ needs.fast-gate.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| L2 | cli-test | ${{ needs.cli-test.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| L2 | plugin-test | ${{ needs.plugin-test.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| L2 | coverage | ${{ needs.coverage.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| L3 | package-smoke | ${{ needs.package-smoke.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| L3 | security | ${{ needs.security.result }} |" >> "$GITHUB_STEP_SUMMARY"
+
+          FAILED=0
+          for result in \
+            "${{ needs.fast-gate.result }}" \
+            "${{ needs.cli-test.result }}" \
+            "${{ needs.plugin-test.result }}" \
+            "${{ needs.coverage.result }}" \
+            "${{ needs.package-smoke.result }}" \
+            "${{ needs.security.result }}"; do
+            if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then
+              FAILED=1
+            fi
+          done
+
+          if [ "$FAILED" = "1" ]; then
+            echo "::error::One or more CI jobs failed; see table above"
+            exit 1
+          fi

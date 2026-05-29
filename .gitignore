@@ -1,1 +1,30 @@
 .DS_Store
+
+# Local environment and secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Logs and runtime state
+*.log
+logs/
+
+# Go CLI build artifacts
+cli/_output/
+cli/dist/
+cli/coverage.out
+
+# Source distribution tarballs (make dist)
+/dist/
+
+# Node/plugin build artifacts
+plugins/node_modules/
+plugins/**/node_modules/
+plugins/**/coverage/
+plugins/**/.nyc_output/
+plugins/**/*.tgz
+
+# Editor state
+.idea/
+.vscode/

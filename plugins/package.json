@@ -1,0 +1,20 @@
+{
+  "name": "everme-plugins-workspace",
+  "private": true,
+  "description": "npm workspace root for EverMe agent plugins. Each subpackage publishes independently; this workspace exists so the SDK is symlinked for local development without `npm pack` round-trips.",
+  "workspaces": [
+    "agent-sdk",
+    "memory-mcp",
+    "openclaw",
+    "claude-code",
+    "cli"
+  ],
+  "scripts": {
+    "test": "npm test --workspaces --if-present",
+    "test:sdk": "npm test --workspace @everme/agent-sdk",
+    "test:mcp": "npm test --workspace @everme/memory-mcp",
+    "test:openclaw": "npm test --workspace @everme/openclaw",
+    "test:claude-code": "npm test --workspace @everme/claude-code",
+    "test:cli": "npm test --workspace @everme/cli"
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "id": "@everme/openclaw",
+  "name": "EverMe Memory Plugin",
+  "description": "Real-time memory retrieval and persistence backed by the EverMe cloud (cold-start memory uploaded by evercli)",
+  "version": "0.3.2",
+  "kind": "context-engine",
+  "contextEngine": true,
+  "main": "./index.js",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "apiBase": {
+        "type": "string",
+        "description": "EverMe API base URL. Defaults to env EVERME_API_BASE.",
+        "default": ""
+      },
+      "agentId": {
+        "type": "string",
+        "description": "EverMe agentId (agt_...). Defaults to env EVERME_AGENT_ID. Written by `evercli plugin install`.",
+        "default": ""
+      },
+      "agentToken": {
+        "type": "string",
+        "description": "EverMe agentToken (evt_...). Defaults to env EVERME_AGENT_TOKEN. NEVER log or echo.",
+        "default": ""
+      },
+      "topK": {
+        "type": "integer",
+        "description": "Maximum memory rows to retrieve per turn",
+        "default": 5
+      },
+      "flushEveryTurns": {
+        "type": "integer",
+        "description": "How many turns between auto-flush calls. 1 (default) = flush every turn so short sessions still produce agent_case/agent_skill. Larger values trade extraction freshness for fewer upstream LLM extract calls but lose extraction entirely on sessions that never reach the threshold. Set both flushEveryTurns and flushMaxBytes to 0 to disable runtime writes.",
+        "default": 1
+      },
+      "flushMaxBytes": {
+        "type": "integer",
+        "description": "Legacy switch. Set both flushEveryTurns and flushMaxBytes to 0 to disable runtime writes; realtime writes do not buffer by byte size.",
+        "default": 65536
+      }
+    }
+  }
+}

@@ -1,0 +1,55 @@
+{
+  "name": "@everme/cli",
+  "version": "0.2.2",
+  "description": "EverMe CLI — npm wrapper that downloads and runs the platform-native evercli binary on first use.",
+  "license": "Apache-2.0",
+  "bin": {
+    "evercli": "scripts/run.js"
+  },
+  "scripts": {
+    "postinstall": "node scripts/install.js",
+    "test": "node --test tests/install.test.js"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "scripts/install.js",
+    "scripts/install-wizard.js",
+    "scripts/run.js",
+    "sha256sums.txt",
+    "LICENSE",
+    "README.md"
+  ],
+  "keywords": [
+    "evermind",
+    "everme",
+    "cli",
+    "memory",
+    "ai",
+    "agent"
+  ],
+  "homepage": "https://everme.evermind.ai",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/EverMind-AI/EverMe.git",
+    "directory": "plugins/cli"
+  },
+  "bugs": {
+    "url": "https://github.com/EverMind-AI/EverMe/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
+  "dependencies": {}
+}
