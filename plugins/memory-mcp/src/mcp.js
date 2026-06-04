@@ -37,11 +37,19 @@ const { version: PKG_VERSION } = createRequire(import.meta.url)("../package.json
 // MUST give the host a concrete value to pass — never tell it to call
 // the tool with no arguments.
 export const EVERME_MCP_INSTRUCTIONS = [
-  "EverMe memory is connected. Follow this protocol on every conversation:",
-  "1. At the START of the first user message, call `mem_context` passing the user's first request verbatim as the `query` — this loads relevant user profile, preferences, and prior context.",
-  "2. When the user states a durable fact about themselves (a preference, habit, trait, or decision), call `mem_save_fact` so it lands in their long-term profile.",
-  "3. When you want to record the conversation trajectory itself (so future sessions learn how a task was solved), call `mem_save_turn`.",
-  "4. When the user asks about prior conversations or what was previously discussed, call `mem_search` with a specific query.",
+  "EverMe memory is connected. Act on this protocol AUTONOMOUSLY: call these",
+  "tools yourself the moment a trigger below fires — never wait for the user to",
+  "ask you to \"remember\" or \"recall\".",
+  "1. START of a session — on the first user message, call `mem_context` passing that message as the `query`. Loads the user's profile, preferences, and relevant prior context. Call it ONCE per session, not on every turn.",
+  "2. The user states a durable fact about themselves (a preference, habit, trait, or decision) — call `mem_save_fact` so it lands in their long-term profile.",
+  "3. You want to record how a task was solved (so future sessions can reuse the approach) — call `mem_save_turn` with the trajectory.",
+  "4. The user references earlier conversations or decisions — call `mem_search` with a SHORT query (a few keywords or one short phrase naming the topic).",
+  "",
+  "Keep the `mem_search` query short: a few keywords, NOT the whole",
+  "conversation or the full user message pasted in — a long query searches",
+  "worse and bloats the request. Rely on the default topK of 5; only raise it",
+  "if a first search genuinely missed. Read the profile once per session",
+  "rather than re-fetching it every turn.",
   "",
   "If your host exposes MCP Resources (rather than Tools) to you, the same",
   "read data is available at these URIs — read them via `resources/read`:",
@@ -111,11 +119,26 @@ export function createMcpServer({ logger } = {}) {
         name: "mem_search",
         description:
           "Search EverMe memory for entries relevant to a free-text query. " +
-          "Returns the top-K matching entries (episodic, profile, agent_memory).",
+          "Returns the top-K matching entries (episodic, profile, agent_memory) " +
+          "rendered as markdown.\n\n" +
+          "Call this proactively — without being asked — whenever the user " +
+          "references prior conversations or earlier decisions (\"what did we " +
+          "say about X\", \"remember when…\", \"like last time\").\n\n" +
+          "Keep `query` SHORT: a few keywords or one short phrase naming the " +
+          "topic. Do NOT paste in the whole conversation, the full user " +
+          "message, or long passages — a long query searches worse and bloats " +
+          "the request. Rely on the default topK of 5; only raise it if a " +
+          "first search genuinely missed.",
         inputSchema: {
           type: "object",
           properties: {
-            query: { type: "string", description: "Free-text query" },
+            query: {
+              type: "string",
+              description:
+                "Short free-text query — a few keywords or one short phrase " +
+                "naming the topic to recall. Keep it concise; do not pass the " +
+                "whole conversation or a long passage.",
+            },
             topK: { type: "integer", description: "Max entries to return", default: 5 },
           },
           required: ["query"],
@@ -124,8 +147,14 @@ export function createMcpServer({ logger } = {}) {
       {
         name: "mem_context",
         description:
-          "Fetch a pre-rendered memory context block for a query. Use this " +
-          "when you want a single string ready to splice into a system prompt.",
+          "Fetch a pre-rendered memory context block for a query — a single " +
+          "string ready to splice into a system prompt.\n\n" +
+          "Call this proactively at the START of a session, before answering " +
+          "the first user message. Pass that message as the query to satisfy " +
+          "the schema; the server binds the agent from auth and returns the " +
+          "user's profile and currently relevant context (the query itself " +
+          "does not filter the block). Call it ONCE per session rather than " +
+          "every turn.",
         inputSchema: {
           type: "object",
           properties: {
@@ -139,6 +168,9 @@ export function createMcpServer({ logger } = {}) {
         description:
           "Persist a conversation trajectory in realtime via /mem/agent-memory. " +
           "Does not create /mem/sources. Use sessionKey as conversationId.\n\n" +
+          "Call this proactively — without being asked — when a task has been " +
+          "solved in a way worth reusing, so future sessions can learn the " +
+          "approach.\n\n" +
           "Two input forms:\n" +
           "  1. Single message — pass role + text (legacy); for assistant " +
           "messages that invoked tools, ALSO pass toolCalls so the tool round-" +
@@ -250,9 +282,10 @@ export function createMcpServer({ logger } = {}) {
         description:
           "Persist a durable fact about the USER (a preference, habit, " +
           "trait, or decision) via the long-term PROFILE write path — the " +
-          "block loaded at the start of every session. Use this when the " +
-          "user says something true about themselves that should outlive " +
-          "this conversation (\"I love summer\", \"I take my coffee iced\", " +
+          "block loaded at the start of every session.\n\n" +
+          "Call this proactively, without being asked, the moment the user " +
+          "states something true about themselves that should outlive this " +
+          "conversation (\"I love summer\", \"I take my coffee iced\", " +
           "\"sign my docs as Alice\").\n\n" +
           "This is the profile-producing sibling of mem_save_turn. They are " +
           "NOT interchangeable: mem_save_turn records conversation " +
@@ -458,7 +491,7 @@ export function createMcpServer({ logger } = {}) {
   // Codex App (≥ v0.128, observed via real install on 2026-05-26)
   // bridges MCP to the LLM only through resources/read — it does NOT
   // expose tools/call as model-callable functions. So even though our
-  // three tools are registered and visible in Codex's /mcp panel, the
+  // four tools are registered and visible in Codex's /mcp panel, the
   // LLM can't invoke them. The Resources surface below gives the same
   // read-side data via URIs Codex's bridge can actually carry.
   //

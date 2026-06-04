@@ -26,11 +26,12 @@ const mcpEntryName = "everme-memory"
 const backupSuffix = "-bak"
 
 // mcpWriter is the Writer implementation for hosts whose plugin slot is
-// an MCP-server map. Today that's only Claude Code (top-level
-// `mcpServers.<name>` in ~/.claude.json); OpenClaw moved to an
-// in-process context-engine plugin and owns its own writer in
-// openclaw.go. The path is still parameterised so a future MCP-style
-// host can drop in with just a new path constant.
+// a top-level `mcpServers.<name>` JSON map. Cursor, Claude Desktop, and
+// Gemini CLI all share this exact shape, so they reuse this writer with
+// only a host-specific config path (see cursor.go / claude_desktop.go /
+// gemini.go). OpenClaw moved to an in-process context-engine plugin and
+// owns its own writer in openclaw.go. The path is parameterised so a
+// future MCP-style host can drop in with just a new path constant.
 type mcpWriter struct {
 	platform    Platform
 	serversPath []string // map keys to walk to reach the servers map

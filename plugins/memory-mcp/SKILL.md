@@ -17,17 +17,34 @@ When this plugin is loaded, the host has these MCP tools available:
 
 # Recommended usage
 
-## Before answering a user prompt
+**Call these tools autonomously — the moment a trigger fires, not only
+when the user explicitly asks you to "remember" or "recall".** Each
+tool's MCP `description` also carries its trigger, so hosts that don't
+surface the server `instructions` still get the same guidance.
 
-Call `mem_context` with the user's question. Splice the returned
-markdown text into your reasoning context (or the system prompt
-addition). This is the cheapest, server-assembled retrieval path.
+## At the start of a session — `mem_context`
+
+Call `mem_context` once with the user's first message as the `query`,
+before answering it. Splice the returned markdown text into your
+reasoning context (or the system prompt addition). The server already
+returns a trimmed, relevance-ranked block, so call it **once per
+session**, not on every turn.
 
 ```ts
 const res = await tools.mem_context({ query: userPrompt });
 const text = res.content?.[0]?.text || "";
 if (text) systemAddition += "\n" + text;
 ```
+
+## When the user references prior context — `mem_search`
+
+Call `mem_search` when the user points back at earlier conversations or
+decisions ("what did we say about X", "remember when…", "like last
+time"). **Keep `query` short** — a few keywords or one short phrase
+naming the topic; do NOT paste in the whole conversation or the full
+user message, a long query searches worse and bloats the request. Rely
+on the default `topK` of 5; only raise it if a first search genuinely
+missed.
 
 ## To save durable facts
 

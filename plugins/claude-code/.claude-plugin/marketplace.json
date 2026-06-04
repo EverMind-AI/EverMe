@@ -10,7 +10,7 @@
       "name": "everme",
       "source": "./",
       "description": "Automatic memory recall for Claude Code through the EverMe gateway. Saves and recalls per-session context using your EverMe account credentials.",
-      "version": "0.3.2",
+      "version": "0.3.3",
       "homepage": "https://everme.evermind.ai",
       "license": "Apache-2.0"
     }

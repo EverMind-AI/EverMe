@@ -1,6 +1,6 @@
 {
   "name": "@everme/agent-sdk",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "type": "module",
   "description": "Shared core for EverMe AI-agent plugins. HTTP client, search/context, agent-memory writes, redaction, prompt helpers. Host-agnostic — paired with @everme/openclaw, @everme/claude-code, @everme/memory-mcp, …",
   "license": "Apache-2.0",

@@ -17,6 +17,14 @@ mem_save_turn      realtime write to /mem/agent-memory (no /mem/sources record)
 mem_save_fact      durable user fact write to personal/profile memory
 ```
 
+Each tool's MCP `description` carries its own trigger so the host LLM
+calls it **autonomously** (load context at session start, recall on a
+back-reference, save a stated fact) without the user having to ask. The
+server also advertises the same protocol via MCP `instructions` for
+hosts that surface it. `mem_search` is guided to keep its `query` short
+— a few keywords, not the whole conversation pasted in — and to use the
+default `topK` (5), so requests stay small and search quality stays high.
+
 Read-only MCP resources are also exposed for hosts that support
 `resources/read`: `mem://profile` and `mem://search?q={query}&topK={topK}`.
 The public MCP contract is documented in

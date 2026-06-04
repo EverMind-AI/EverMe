@@ -26,11 +26,12 @@ try {
 }
 
 describe("mcp instructions", { skip: !sdkAvailable && "SDK not installed" }, () => {
-  test("EVERME_MCP_INSTRUCTIONS references all three tools", async () => {
+  test("EVERME_MCP_INSTRUCTIONS references all four tools", async () => {
     const { EVERME_MCP_INSTRUCTIONS } = await import("../src/mcp.js");
     assert.ok(EVERME_MCP_INSTRUCTIONS, "instructions string must be non-empty");
     assert.ok(EVERME_MCP_INSTRUCTIONS.includes("mem_context"), "must reference mem_context");
     assert.ok(EVERME_MCP_INSTRUCTIONS.includes("mem_save_turn"), "must reference mem_save_turn");
+    assert.ok(EVERME_MCP_INSTRUCTIONS.includes("mem_save_fact"), "must reference mem_save_fact");
     assert.ok(EVERME_MCP_INSTRUCTIONS.includes("mem_search"), "must reference mem_search");
   });
 

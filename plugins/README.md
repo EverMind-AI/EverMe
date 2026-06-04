@@ -58,8 +58,15 @@ A single multi-host package would couple unrelated host integrations, and a Clau
 | Claude Code | `@everme/claude-code` | ✅ | UserPromptSubmit hook (auto) | Stop + SessionEnd hooks (auto) |
 | OpenClaw | `@everme/openclaw` | ✅ | `assemble` lifecycle (auto) | `afterTurn` lifecycle (auto) |
 | Cursor | `@everme/memory-mcp` | ✅ via MCP | model-driven (`mem_search` tool) | model-driven (`mem_save_turn` tool; SDK-side `buffer.flush()` on session end) |
+| Claude Desktop | `@everme/memory-mcp` | ✅ via MCP | same as Cursor | same as Cursor |
+| Codex | `@everme/memory-mcp` | ✅ via MCP (CLI) / Resources (App) | model-driven (`mem_search` tool / `mem://search`) | model-driven (`mem_save_turn`; Codex App is recall-only) |
+| Hermes | `@everme/memory-mcp` | ✅ via MCP | same as Cursor | same as Cursor |
 | Cline | `@everme/memory-mcp` | ✅ via MCP | same as Cursor | same as Cursor |
 | Generic MCP host | `@everme/memory-mcp` | ✅ via MCP | same as Cursor | same as Cursor |
+| Gemini CLI | `@everme/memory-mcp` | ✅ via MCP | same as Cursor | same as Cursor |
+| opencode | `@everme/memory-mcp` | ✅ via MCP | same as Cursor | same as Cursor |
+
+> One-command `evercli plugin install <host>` covers **claude-code, openclaw, cursor, claude-desktop, codex, hermes, gemini, opencode**. Cline and generic MCP hosts also work but need manual `mcpServers` wiring — no dedicated `evercli` installer for them yet.
 
 ### Roadmap
 
@@ -68,7 +75,6 @@ A single multi-host package would couple unrelated host integrations, and a Clau
 | Continue.dev | `@everme/continue` if Continue grows a per-plugin hook API beyond MCP | They currently rely on context providers — different contract from MCP |
 | JetBrains AI | `@everme/jetbrains` | JetBrains has its own plugin SDK; needs Kotlin/Java glue |
 | Aider | TBD | Look at whether their lifecycle hooks are first-class enough |
-| Hermes | TBD | Investigate when the runtime stabilises |
 | VS Code Copilot | Out of scope | Copilot doesn't expose a plugin/MCP surface |
 
 When a new host's plugin contract justifies its own package, we add a sibling here. Until then we route through `@everme/memory-mcp` if the host speaks MCP, or skip if it doesn't.
@@ -78,7 +84,7 @@ When a new host's plugin contract justifies its own package, we add a sibling he
 ```bash
 cd everme/plugins
 npm install                     # symlinks @everme/agent-sdk into all dependents
-npm test --workspaces           # runs all 4 packages' tests (54 total)
+npm test --workspaces           # runs all 5 workspaces' tests (137 total)
 npm test --workspace @everme/agent-sdk     # just the SDK
 ```
 

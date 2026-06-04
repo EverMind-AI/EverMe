@@ -170,6 +170,36 @@ describe("inject-memories.js: UserPromptSubmit hook contract", () => {
     assert.match(parsed.systemMessage, /Recalling 1 relevant memory/);
   });
 
+  test("over-long prompt is truncated to the backend query limit", async () => {
+    const before = backend.calls.length;
+    // A huge paste (log dump / whole file) must not go to /mem/search
+    // verbatim: the backend (BizMemory.Search) rejects query > 1024 runes
+    // with ErrValidation, so an uncapped prompt would make recall fail.
+    // The SDK's searchMemory clamps the query at 1024 chars (mirroring
+    // MaxSearchQueryRunes); this is the end-to-end guard that the CC
+    // recall path stays under that bound. Keep this fixture longer.
+    const longPrompt = "word ".repeat(1000); // 5000 chars
+    assert.ok(longPrompt.length > 1024, "fixture must exceed the cap");
+    const { code, stderr } = await runHook(
+      "inject-memories.js",
+      { prompt: longPrompt, transcript_path: "/tmp/x.jsonl" },
+      { ...FAKE_CREDS, EVERME_API_BASE: backend.url },
+    );
+    assert.equal(code, 0, `expected exit 0, stderr=${stderr}`);
+    const searchCalls = backend.calls.slice(before).filter((c) => c.path.endsWith("/mem/search"));
+    assert.equal(searchCalls.length, 1, "exactly one /mem/search call");
+    assert.equal(searchCalls[0].body.query.length, 1024, "query capped at MAX_QUERY_CHARS");
+    assert.ok(
+      searchCalls[0].body.query.length <= 1024,
+      "query must not exceed the backend's MaxSearchQueryRunes (1024)",
+    );
+    assert.equal(
+      searchCalls[0].body.query,
+      longPrompt.slice(0, 1024),
+      "query must be the prompt's leading 1024 chars, not the whole paste",
+    );
+  });
+
   test("missing prompt → exit 0 silently, no backend call", async () => {
     const before = backend.calls.length;
     // Simulate the OpenClaw-style bug: CC ships a new schema and our

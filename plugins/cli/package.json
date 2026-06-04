@@ -1,6 +1,6 @@
 {
   "name": "@everme/cli",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "EverMe CLI — npm wrapper that downloads and runs the platform-native evercli binary on first use.",
   "license": "Apache-2.0",
   "bin": {

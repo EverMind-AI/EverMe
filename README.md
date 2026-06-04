@@ -76,9 +76,12 @@ evercli auth login
 
 # 3. Plug your Agent into EverMe — pick one or more:
 evercli plugin install claude-code
+evercli plugin install claude-desktop
 evercli plugin install codex
 evercli plugin install cursor
+evercli plugin install gemini
 evercli plugin install hermes
+evercli plugin install opencode
 evercli plugin install openclaw
 
 # 4. Verify

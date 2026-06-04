@@ -11,8 +11,9 @@ to give Codex persistent cross-session memory **recall**.
 - **Skill** — `everme-memory`, tells Codex when to read those resources so
   recall happens without explicit prompting.
 
-> **Write side**: the MCP server also exposes `mem_save_turn` as an MCP
-> Tool, but Codex's current LLM tool surface is biased toward Resources;
+> **Write side**: the MCP server also exposes `mem_save_fact` (user
+> profile facts) and `mem_save_turn` (conversation trajectories) as MCP
+> Tools, but Codex's current LLM tool surface is biased toward Resources;
 > automatic save from inside Codex is not guaranteed in this iteration.
 > Save reliably from Claude Code, Cursor, or the EverMe web UI.
 

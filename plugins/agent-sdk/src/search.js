@@ -17,6 +17,17 @@
 
 const noop = { info() {}, warn() {} };
 
+// Mirror the backend's max search-query limit: /mem/search rejects a
+// query longer than 1024 runes with a validation error.
+// Callers hand us raw user prompts that can be huge pastes (a log dump, a
+// whole file), so we clamp here — the single chokepoint to /mem/search —
+// and every surface (MCP mem_search, OpenClaw assemble, Claude Code hook)
+// stays under the limit instead of silently failing recall. We count JS
+// string length (UTF-16 units), which is always >= the rune count, so a
+// 1024-char slice can never exceed 1024 runes. Keep in sync with the Go
+// constant.
+export const QUERY_MAX_CHARS = 1024;
+
 /**
  * @param {object} client createClient() result
  * @param {object} params { query, topK?, rankBy?, filter?, memoryTypes? }
@@ -40,7 +51,7 @@ const noop = { info() {}, warn() {} };
  */
 export async function searchMemory(client, params, log = noop) {
   const body = {
-    query: String(params.query || ""),
+    query: String(params.query || "").slice(0, QUERY_MAX_CHARS),
     topK: params.topK ?? 5,
     ...(params.rankBy ? { rankBy: params.rankBy } : {}),
     ...(params.filter ? { filter: params.filter } : {}),

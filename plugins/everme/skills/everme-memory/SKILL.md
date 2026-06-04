@@ -34,7 +34,7 @@ Two URIs are available:
 | URI | What it returns | When to read |
 |---|---|---|
 | `mem://profile` | The user's persistent profile + currently relevant memories, rendered as markdown. Equivalent to a zero-query context lookup. | **At the start of every conversation**, before responding to the first user message. Splice the returned markdown into your reasoning context so you know who you're talking to. |
-| `mem://search?q={query}&topK={topK}` | Search results across episodic memories, profile entries, recent raw messages, and agent cases/skills, rendered as markdown. `topK` defaults to 5; omit when unsure. | **When the user references prior context** ("what did we say about X", "remember when…", "based on what we decided last week…"). |
+| `mem://search?q={query}&topK={topK}` | Search results across episodic memories, profile entries, recent raw messages, and agent cases/skills, rendered as markdown. Keep `q` **short** — a few keywords or one short phrase, not a long passage; `topK` defaults to 5, omit it. | **When the user references prior context** ("what did we say about X", "remember when…", "based on what we decided last week…"). |
 
 > **Discoverability gotcha on Codex App.** Codex App's
 > `list_mcp_resources` returns only static resources — it surfaces
@@ -48,15 +48,20 @@ Two URIs are available:
 
 ## Recommended protocol
 
+Act on these triggers **autonomously** — read/save the moment a trigger
+fires, don't wait for the user to ask you to "remember" or "recall".
+
 1. **First user message of a session**:
    read `mem://profile` via `resources/read`. Use the returned markdown
    silently — don't quote it back to the user verbatim, just let it
    shape your responses (preferred coffee, project context, naming
-   conventions, etc.).
+   conventions, etc.). Read it **once per session**, not every turn.
 
 2. **User references prior context**:
-   read `mem://search?q=<their topic>` to fetch matching memories.
-   Quote relevant fragments inline when answering.
+   read `mem://search?q=<their topic>` to fetch matching memories. Keep
+   `q` short — a few keywords or one short phrase naming the topic, not
+   the whole conversation pasted in; omit `topK` (default 5). Quote
+   relevant fragments inline when answering.
 
 3. **User shares a new fact, preference, or decision**:
    try `tools/call mem_save_fact` if your Codex variant exposes MCP

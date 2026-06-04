@@ -50,6 +50,9 @@ async function main() {
   let count = 0;
   let degraded = null;
   try {
+    // The raw prompt can be a huge paste; the SDK's searchMemory clamps
+    // the query to the backend's MaxSearchQueryRunes limit, so we pass it
+    // through as-is rather than capping here too.
     const res = await searchMemories(prompt, { topK: TOP_K });
     // EverOS frequently returns score=null on episodic hits (decoded as
     // 0 over the wire) — that's "unscored", not "score zero". Treat

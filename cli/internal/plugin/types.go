@@ -27,6 +27,8 @@ const (
 	PlatformClaudeDesktop Platform = "claude-desktop"
 	PlatformCodex         Platform = "codex"
 	PlatformHermes        Platform = "hermes"
+	PlatformGemini        Platform = "gemini"
+	PlatformOpenCode      Platform = "opencode"
 )
 
 // Detection is the result of inspecting the local filesystem for one

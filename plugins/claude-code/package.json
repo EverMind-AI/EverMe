@@ -1,6 +1,6 @@
 {
   "name": "@everme/claude-code",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "type": "module",
   "description": "EverMe native plugin for Claude Code — automatic memory recall via SessionStart/UserPromptSubmit/Stop/SessionEnd hooks, plus /recall slash + bundled MCP server.",
   "license": "Apache-2.0",
@@ -21,7 +21,7 @@
     "README.md"
   ],
   "dependencies": {
-    "@everme/agent-sdk": "^0.3.2"
+    "@everme/agent-sdk": "^0.3.3"
   },
   "keywords": [
     "evermind",

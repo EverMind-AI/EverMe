@@ -8,8 +8,9 @@ import (
 // registry is the central catalogue of supported platforms. Tests inject
 // their own via NewServiceWithRegistry, but production code goes through
 // DefaultRegistry which carries the V1 install matrix (Claude Code +
-// OpenClaw + Cursor + Claude Desktop + Codex + Hermes). Windsurf /
-// VS Code Copilot / Cline are V1.1 candidates. A V2 Hermes track —
+// OpenClaw + Cursor + Claude Desktop + Codex + Hermes + Gemini CLI +
+// opencode). Windsurf / VS Code Copilot / Cline are V1.1 candidates. A
+// V2 Hermes track —
 // native Python MemoryProvider via `pip install everme-hermes` — is
 // deferred and orthogonal to the V1.x MCP path landed in hermes.go.
 type registry struct {
@@ -37,11 +38,19 @@ type registry struct {
 //     The plugin source is installed separately via
 //     `openclaw plugins install @everme/openclaw`.
 //
-//   - PlatformCursor / PlatformClaudeDesktop → mcpWriter
-//     Both hosts read MCP servers from a top-level `mcpServers.<name>`
+//   - PlatformCursor / PlatformClaudeDesktop / PlatformGemini → mcpWriter
+//     All three hosts read MCP servers from a top-level `mcpServers.<name>`
 //     JSON map, so the writer is the shared mcpWriter parameterised by
 //     platform. Only the config file location is host-specific (see
-//     cursor.go / claude_desktop.go).
+//     cursor.go / claude_desktop.go / gemini.go).
+//
+//   - PlatformOpenCode → opencodeWriter
+//     opencode reads MCP servers from a top-level `mcp.<name>` map in
+//     ~/.config/opencode/opencode.json, but with a divergent entry shape
+//     (type:"local", command argv array, `environment` not `env`,
+//     enabled). A small custom writer reuses mcp.go's JSON / atomic-write
+//     / TOCTOU / upsert helpers. Install-only (no Preparer/Verifier). See
+//     opencode.go.
 //
 //   - PlatformCodex → codexWriter
 //     Codex App + Codex CLI both consume ~/.codex/config.toml, so a
@@ -68,6 +77,8 @@ func DefaultRegistry() *registry {
 			PlatformClaudeDesktop: claudeDesktopDetector{},
 			PlatformCodex:         codexDetector{},
 			PlatformHermes:        hermesDetector{},
+			PlatformGemini:        geminiDetector{},
+			PlatformOpenCode:      opencodeDetector{},
 		},
 		writers: map[Platform]Writer{
 			PlatformClaudeCode:    newClaudeCodeWriter(),
@@ -76,6 +87,8 @@ func DefaultRegistry() *registry {
 			PlatformClaudeDesktop: newClaudeDesktopWriter(),
 			PlatformCodex:         newCodexWriter(),
 			PlatformHermes:        newHermesWriter(),
+			PlatformGemini:        newGeminiWriter(),
+			PlatformOpenCode:      newOpenCodeWriter(),
 		},
 	}
 }
