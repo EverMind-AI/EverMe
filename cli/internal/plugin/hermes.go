@@ -1,55 +1,21 @@
-// Package plugin — Hermes support.
+// Package plugin — Hermes support (provider mode).
 //
-// Hermes (NousResearch/hermes-agent, Python) reads MCP servers from
-// `mcp_servers.<name>` in ~/.hermes/config.yaml. We upsert the
-// `everme` entry there directly via yaml.v3, mirroring exactly what
-// Hermes's own `_save_mcp_server(name, dict)` catalog-install helper
-// does in hermes_cli/mcp_config.py — same on-disk shape, same effect.
+// Hermes (NousResearch/hermes-agent, Python) supports native memory
+// providers discovered from $HERMES_HOME/plugins/<name>/ (upgrade-safe,
+// user-level). evercli installs the EverMe MemoryProvider there:
 //
-// Why not shell out to `hermes mcp add`:
-//
-//	The CLI's `--args` / `--env` flags are argparse nargs="*". When the
-//	value list contains a dash-leading element (we need `-y` for
-//	`npx -y @everme/memory-mcp`), argparse rejects it as an unknown
-//	option — confirmed against Hermes v0.14.0 / hermes_cli/main.py
-//	mcp_add_p. Repeating `--args=-y --args=@everme/memory-mcp` doesn't
-//	help either: the second `--args` clobbers the first. Catalog
-//	manifests dodge this by writing the dict straight into the YAML
-//	(see optional-mcps/n8n/manifest.yaml's `transport.args: [...]`
-//	pipeline through `_save_mcp_server`), and every third-party
-//	hermes MCP plugin we surveyed (e.g. hermes-n8n-mcp) tells users
-//	to paste a `mcp_servers:` YAML block into config.yaml by hand.
-//	evercli automates that paste.
-//
-// Entry name is `everme` (not `everme-memory` like Cursor / Claude
-// Desktop / Claude Code), because Hermes prefixes MCP tools as
-// `mcp_<server>_<tool>` and `mcp_everme_mem_context` reads cleaner
-// than `mcp_everme-memory_mem_context` in tool catalogs and prompts.
-//
-// Wire model:
-//
-//	detector
-//	  → Installed iff `hermes` CLI is on PATH or ~/.hermes/ exists.
-//	  → HasEverMeEntry := config.yaml has mcp_servers.everme with a non-empty map.
-//
-//	writer.Plan
-//	  → snapshot ~/.hermes/config.yaml (mtime/size) for TOCTOU; parse YAML;
-//	    decide WillCreate / WillReplace.
-//
-//	writer.Commit (after backend mints a fresh evt)
-//	  → upsert mcp_servers.everme = {command, args, env{API_BASE, AGENT_ID, AGENT_TOKEN}};
-//	    every other top-level key (agent, memory, model, …) and every
-//	    sibling mcp_servers entry round-trips verbatim.
+//	writer.Commit
+//	  → writeProviderFiles($HERMES_HOME/plugins/everme/)  (embedded python)
+//	  → writeEvermeEnv($HERMES_HOME/everme.env, 0600)      (evt credentials)
+//	  → config.yaml: memory.provider=everme                (activate provider)
+//	  → delete mcp_servers.everme                          (supersede V1.x MCP)
 //
 //	writer.Verify
-//	  → re-read the file, assert mcp_servers.everme is present and non-empty.
+//	  → plugins/everme/__init__.py exists AND memory.provider==everme.
 //
-// Trade-off — comment loss:
-//
-//	yaml.v3 unmarshal into map[string]any loses comments and source-order.
-//	Hermes regenerates its commented config on `hermes config migrate`
-//	if a user complains. The load-bearing contract we own is the entry
-//	shape; cosmetic round-trip is V1.1's problem if it surfaces.
+// This replaces the prior MCP-mode install (mcp_servers.everme), which
+// depended on the model voluntarily calling mem_save_* tools. The provider
+// captures every turn via framework hooks (sync_turn / on_session_end).
 package plugin
 
 import (
@@ -68,9 +34,9 @@ import (
 	"evercli/internal/output"
 )
 
-// hermesMcpEntryName is the key under `mcp_servers` that EverMe owns
-// in ~/.hermes/config.yaml. See the file-level comment for why this
-// is `everme` and not `everme-memory`.
+// hermesMcpEntryName is the legacy mcp_servers key the V1.x MCP install
+// owned. Provider mode no longer writes it; the const is retained only so
+// removeLegacyMcpEntry can delete a leftover entry during migration.
 const hermesMcpEntryName = "everme"
 
 // hermesCommand resolves the `hermes` CLI. EVERCLI_HERMES_CMD lets tests
@@ -84,9 +50,8 @@ func hermesCommand() string {
 }
 
 // hermesHome resolves the Hermes home directory using the priority chain
-// mandated by Hermes maintainers (docs/mcp-codex-hermes-iteration-plan-
-// 2026-05-26.md §C.4): installer code MUST NOT hard-guess `~/.hermes`
-// when a user has overridden the location. Order:
+// mandated by Hermes maintainers: installer code MUST NOT hard-guess
+// `~/.hermes` when a user has overridden the location. Order:
 //
 //  1. EVERCLI_HERMES_CONFIG_DIR  — test / advanced override; if set,
 //     wins outright. Same env var the Detector / Writer use to pin
@@ -197,8 +162,8 @@ func (hermesDetector) Detect(_ context.Context) (*Detection, error) {
 		return d, err
 	}
 	d.ConfigExists = exists
-	if exists {
-		d.HasEverMeEntry = hermesHasEverMeEntry(cfg)
+	if home, herr := hermesHome(); herr == nil {
+		d.HasEverMeEntry = hermesProviderInstalled(home, cfg)
 	}
 	return d, nil
 }
@@ -207,8 +172,8 @@ func (hermesDetector) Detect(_ context.Context) (*Detection, error) {
 
 // hermesWriter implements Writer + Verifier. It does NOT implement
 // Preparer: unlike Codex's marketplace step, Hermes has no out-of-band
-// registration phase — `mcp_servers.everme` IS the install, and it
-// lands atomically in Commit.
+// registration phase — the embedded Python provider IS the install, and
+// it lands atomically in Commit.
 type hermesWriter struct{}
 
 func newHermesWriter() *hermesWriter { return &hermesWriter{} }
@@ -244,7 +209,7 @@ func (*hermesWriter) Plan(_ context.Context, configPath string) (*WritePlan, err
 		return nil, err
 	}
 	plan.WillCreate = !exists
-	plan.WillReplace = hermesHasEverMeEntry(cfg)
+	plan.WillReplace = hermesProviderInstalled(parent, cfg)
 	if exists {
 		plan.BackupPath = abs + backupSuffix
 		if info, statErr := os.Stat(abs); statErr == nil {
@@ -253,18 +218,17 @@ func (*hermesWriter) Plan(_ context.Context, configPath string) (*WritePlan, err
 		}
 	}
 
-	plan.PreviewEntry = buildEntry(
-		"https://api.everme.evermind.ai",
-		"agt_<assigned-on-commit>",
-		"evt_<assigned-on-commit>",
-	)
+	plan.PreviewEntry = map[string]interface{}{
+		"memory.provider": "everme",
+		"plugins/everme/": "<embedded python provider>",
+		"everme.env":      "EVERME_AGENT_TOKEN=<assigned-on-commit>",
+	}
 	return plan, nil
 }
 
-// Commit upserts mcp_servers.everme, preserving every other key in
-// the file. The atomic write goes through writeFileAtomic (shared
-// with the JSON / TOML writers) so a crash between marshal and rename
-// leaves the original file intact.
+// Commit writes the embedded Python provider, credentials env file, and
+// updates config.yaml to provider-mode: sets memory.provider=everme and
+// removes the legacy mcp_servers.everme entry.
 func (*hermesWriter) Commit(_ context.Context, plan *WritePlan, params WriteParams) (*WriteResult, error) {
 	if plan == nil {
 		return nil, output.Internal(fmt.Errorf("nil plan"))
@@ -273,33 +237,41 @@ func (*hermesWriter) Commit(_ context.Context, plan *WritePlan, params WritePara
 		return nil, err
 	}
 
+	home := filepath.Dir(plan.ConfigPath)
+
+	// 1. Materialize the embedded Python provider into $HERMES_HOME/plugins/everme/.
+	if err := writeProviderFiles(filepath.Join(home, "plugins")); err != nil {
+		return nil, err
+	}
+
+	// 2. Write credentials to $HERMES_HOME/everme.env (0600).
+	if err := writeEvermeEnv(filepath.Join(home, "everme.env"), params); err != nil {
+		return nil, err
+	}
+
+	// 3. Update config.yaml: set memory.provider=everme, drop legacy mcp_servers.everme.
 	cfg, exists, err := readHermesConfig(plan.ConfigPath)
 	if err != nil {
 		return nil, err
 	}
-
 	wroteBackup := ""
 	if exists && plan.BackupPath != "" {
-		raw, err := os.ReadFile(plan.ConfigPath)
-		if err != nil {
-			return nil, output.IOErr(plan.ConfigPath, "read-for-backup", err)
+		raw, rerr := os.ReadFile(plan.ConfigPath)
+		if rerr != nil {
+			return nil, output.IOErr(plan.ConfigPath, "read-for-backup", rerr)
 		}
-		if err := os.WriteFile(plan.BackupPath, raw, 0o600); err != nil {
-			return nil, output.IOErr(plan.BackupPath, "write-backup", err)
+		if werr := os.WriteFile(plan.BackupPath, raw, 0o600); werr != nil {
+			return nil, output.IOErr(plan.BackupPath, "write-backup", werr)
 		}
 		wroteBackup = plan.BackupPath
 	}
-
 	if cfg == nil {
 		cfg = map[string]interface{}{}
 	}
-	if err := upsertHermesEntry(cfg, params); err != nil {
-		return nil, output.Invalid(
-			fmt.Sprintf("config at %s has a shape collision under mcp_servers: %v", plan.ConfigPath, err),
-			"Fix the config file's shape manually (mcp_servers exists with a non-object value), then retry install",
-		)
+	if err := setMemoryProvider(cfg, "everme"); err != nil {
+		return nil, err
 	}
-
+	removeLegacyMcpEntry(cfg)
 	if err := writeHermesConfig(plan.ConfigPath, cfg); err != nil {
 		return nil, err
 	}
@@ -312,28 +284,67 @@ func (*hermesWriter) Commit(_ context.Context, plan *WritePlan, params WritePara
 	}, nil
 }
 
-// Verify re-reads the on-disk YAML and asserts mcp_servers.everme is
-// present and non-empty. Mirrors codexWriter.Verify in catching
-// round-trip serialisation bugs without leaking the token value
-// through WriteResult.
-//
-// It does NOT probe the running Hermes process — Hermes caches MCP
-// config and may need a `hermes mcp test everme` or fresh session to
-// pick up the change. We only validate the file shape, which is the
-// contract we own.
+// writeEvermeEnv writes the three EVERME_* credentials as KEY=VALUE lines
+// at mode 0600. The provider's config.py reads this file (priority 3).
+func writeEvermeEnv(path string, params WriteParams) error {
+	body := fmt.Sprintf(
+		"EVERME_API_BASE=%s\nEVERME_AGENT_ID=%s\nEVERME_AGENT_TOKEN=%s\n",
+		params.APIBaseURL, params.AgentID, params.AgentToken,
+	)
+	if err := writeFileAtomic(path, []byte(body), 0o600); err != nil {
+		return output.IOErr(path, "write-everme-env", err)
+	}
+	return nil
+}
+
+// setMemoryProvider sets cfg.memory.provider = name, preserving other
+// memory.* keys. Refuses to overwrite if memory is a non-map.
+func setMemoryProvider(cfg map[string]interface{}, name string) error {
+	var mem map[string]interface{}
+	if raw, present := cfg["memory"]; present && raw != nil {
+		m, ok := raw.(map[string]interface{})
+		if !ok {
+			return output.Invalid(
+				fmt.Sprintf("memory has type %T; expected an object — fix config manually", raw), "")
+		}
+		mem = m
+	} else {
+		mem = map[string]interface{}{}
+	}
+	cfg["memory"] = mem
+	mem["provider"] = name
+	return nil
+}
+
+// removeLegacyMcpEntry deletes mcp_servers.everme (the V1.x MCP-mode
+// entry) since the provider supersedes it. Sibling MCP servers and the
+// mcp_servers map itself round-trip untouched.
+func removeLegacyMcpEntry(cfg map[string]interface{}) {
+	servers, ok := cfg["mcp_servers"].(map[string]interface{})
+	if !ok {
+		return
+	}
+	delete(servers, hermesMcpEntryName)
+}
+
+// Verify re-reads the on-disk YAML and asserts the provider mode is
+// correctly installed: plugins/everme/__init__.py exists and
+// memory.provider=everme is set in config.yaml.
 func (*hermesWriter) Verify(_ context.Context, result *WriteResult) error {
 	if result == nil {
 		return output.Internal(fmt.Errorf("nil result"))
 	}
+	home := filepath.Dir(result.ConfigPath)
 	cfg, exists, err := readHermesConfig(result.ConfigPath)
 	if err != nil {
 		return err
 	}
 	if !exists {
-		return output.IOErr(result.ConfigPath, "verify", fmt.Errorf("config file is missing after Commit"))
+		return output.IOErr(result.ConfigPath, "verify", fmt.Errorf("config file missing after Commit"))
 	}
-	if !hermesHasEverMeEntry(cfg) {
-		return output.IOErr(result.ConfigPath, "verify", fmt.Errorf("mcp_servers.%s missing or empty", hermesMcpEntryName))
+	if !hermesProviderInstalled(home, cfg) {
+		return output.IOErr(result.ConfigPath, "verify",
+			fmt.Errorf("provider not installed: plugins/everme or memory.provider=everme missing"))
 	}
 	return nil
 }
@@ -397,63 +408,16 @@ func writeHermesConfig(path string, cfg map[string]interface{}) error {
 	return nil
 }
 
-// hermesHasEverMeEntry reports whether mcp_servers.everme exists with
-// a non-empty EVERME_AGENT_TOKEN in its env map. Mirrors
-// codexHasEverMeEntry — a bare scaffold (entry present but no token,
-// or no env at all) is treated as "not yet configured" so the
-// detector tells the cmd layer to (re)install rather than skip. The
-// token presence check catches three otherwise-silent failure modes
-// at detection time:
-//
-//   - Hand-written stubs (user pasted a yaml block from a README but
-//     forgot the credentials section).
-//   - Stale entries left after backend agent disconnect (token would
-//     no longer auth, but the entry shape is intact).
-//   - Partial installs from an earlier evercli crash between yaml
-//     write and backend mint.
-//
-// "Non-empty token" is the same contract codex.go enforces and is
-// sufficient for install/skip routing; it does NOT validate the
-// token is still alive on the backend — that's `evercli doctor`'s job.
-func hermesHasEverMeEntry(cfg map[string]interface{}) bool {
-	if cfg == nil {
+// hermesProviderInstalled reports whether the EverMe provider is wired:
+// the plugin package exists AND config.yaml selects memory.provider=everme.
+func hermesProviderInstalled(home string, cfg map[string]interface{}) bool {
+	if _, err := os.Stat(filepath.Join(home, "plugins", "everme", "__init__.py")); err != nil {
 		return false
 	}
-	servers, ok := cfg["mcp_servers"].(map[string]interface{})
+	mem, ok := cfg["memory"].(map[string]interface{})
 	if !ok {
 		return false
 	}
-	entry, ok := servers[hermesMcpEntryName].(map[string]interface{})
-	if !ok {
-		return false
-	}
-	env, ok := entry["env"].(map[string]interface{})
-	if !ok {
-		return false
-	}
-	tok, _ := env["EVERME_AGENT_TOKEN"].(string)
-	return tok != ""
-}
-
-// upsertHermesEntry sets cfg.mcp_servers.everme = buildEntry(...),
-// preserving every other key in cfg and every other key under
-// mcp_servers. Returns an error if mcp_servers exists with a non-map
-// type (refuse to silently destroy user data — see the same rationale
-// in mcp.go's ensureServersMap).
-func upsertHermesEntry(cfg map[string]interface{}, params WriteParams) error {
-	var servers map[string]interface{}
-	if raw, present := cfg["mcp_servers"]; present && raw != nil {
-		m, ok := raw.(map[string]interface{})
-		if !ok {
-			return fmt.Errorf(
-				"mcp_servers has type %T; expected an object — refuse to overwrite, please fix the config manually",
-				raw)
-		}
-		servers = m
-	} else {
-		servers = map[string]interface{}{}
-	}
-	cfg["mcp_servers"] = servers
-	servers[hermesMcpEntryName] = buildEntry(params.APIBaseURL, params.AgentID, params.AgentToken)
-	return nil
+	prov, _ := mem["provider"].(string)
+	return prov == "everme"
 }

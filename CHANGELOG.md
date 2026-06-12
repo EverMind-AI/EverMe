@@ -9,6 +9,20 @@ the open-source home for EverMe CLI and agent plugins.
 
 ### CLI
 
+- Rework `evercli plugin install hermes` to install a native Hermes
+  `MemoryProvider` plugin instead of an MCP server entry. The Python provider
+  is embedded in the `evercli` binary (`cli/internal/plugin/hermesassets/`)
+  and scaffolded into `<hermes_home>/plugins/everme/` on install; existing
+  EverMe MCP entries in `~/.hermes/config.yaml` are migrated automatically and
+  credentials are preserved.
+- Memory recall and writes on Hermes no longer depend on the model calling
+  tools: recall runs via the provider `prefetch` hook, and writes flush
+  automatically via `sync_turn`, `on_session_end`, and `on_pre_compress`
+  hooks.
+- Split user profile from episodic memory in the provider's memory-hub view
+  so profile facts and episodes are fetched and rendered independently.
+- Redact `emk_*` tokens in provider logs and error output.
+- Bump `@everme/cli` to 0.2.4.
 - Open-source the `evercli` Go source tree under `cli/`.
 - Include CLI commands for auth, plugin install, import, and doctor workflows.
 - Include CLI unit and contract tests.

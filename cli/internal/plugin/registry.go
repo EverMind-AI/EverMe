@@ -9,10 +9,7 @@ import (
 // their own via NewServiceWithRegistry, but production code goes through
 // DefaultRegistry which carries the V1 install matrix (Claude Code +
 // OpenClaw + Cursor + Claude Desktop + Codex + Hermes + Gemini CLI +
-// opencode). Windsurf / VS Code Copilot / Cline are V1.1 candidates. A
-// V2 Hermes track —
-// native Python MemoryProvider via `pip install everme-hermes` — is
-// deferred and orthogonal to the V1.x MCP path landed in hermes.go.
+// opencode). Windsurf / VS Code Copilot / Cline are V1.1 candidates.
 type registry struct {
 	detectors map[Platform]Detector
 	writers   map[Platform]Writer
@@ -59,15 +56,13 @@ type registry struct {
 //     re-parse). See codex.go.
 //
 //   - PlatformHermes → hermesWriter
-//     Hermes (Python) reads MCP servers from `mcp_servers.<name>` in
-//     ~/.hermes/config.yaml. hermesWriter upserts `mcp_servers.everme`
-//     directly via yaml.v3 — same on-disk effect as Hermes's own
-//     `_save_mcp_server(name, dict)` catalog-install helper. We do
-//     NOT shell out to `hermes mcp add` because its argparse can't
-//     carry dash-leading args (`-y` for npx), confirmed against
-//     Hermes v0.14.0. Implements Verifier (re-read mcp_servers.everme)
-//     but not Preparer — Hermes has no marketplace concept. See
-//     hermes.go.
+//     Hermes (Python) supports native MemoryProviders under
+//     $HERMES_HOME/plugins/<name>/. hermesWriter installs the embedded
+//     EverMe provider there, writes everme.env (0600), sets
+//     memory.provider=everme, and removes any legacy mcp_servers.everme
+//     entry. Memory capture is hook-driven (sync_turn / on_session_end),
+//     not dependent on model-initiated tool calls. Implements Verifier
+//     (provider files + memory.provider) but not Preparer. See hermes.go.
 func DefaultRegistry() *registry {
 	return &registry{
 		detectors: map[Platform]Detector{

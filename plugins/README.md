@@ -60,7 +60,7 @@ A single multi-host package would couple unrelated host integrations, and a Clau
 | Cursor | `@everme/memory-mcp` | ✅ via MCP | model-driven (`mem_search` tool) | model-driven (`mem_save_turn` tool; SDK-side `buffer.flush()` on session end) |
 | Claude Desktop | `@everme/memory-mcp` | ✅ via MCP | same as Cursor | same as Cursor |
 | Codex | `@everme/memory-mcp` | ✅ via MCP (CLI) / Resources (App) | model-driven (`mem_search` tool / `mem://search`) | model-driven (`mem_save_turn`; Codex App is recall-only) |
-| Hermes | `@everme/memory-mcp` | ✅ via MCP | same as Cursor | same as Cursor |
+| Hermes | native `MemoryProvider` (evercli-embedded, no npm) | ✅ native provider | `prefetch` hook (auto) | `sync_turn` + `on_session_end` / `on_pre_compress` hooks (auto) |
 | Cline | `@everme/memory-mcp` | ✅ via MCP | same as Cursor | same as Cursor |
 | Generic MCP host | `@everme/memory-mcp` | ✅ via MCP | same as Cursor | same as Cursor |
 | Gemini CLI | `@everme/memory-mcp` | ✅ via MCP | same as Cursor | same as Cursor |

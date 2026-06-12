@@ -4,11 +4,11 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"gopkg.in/yaml.v3"
 )
 
 // TestHermesDetector_NoConfig_NotInstalled covers the "Hermes not on
@@ -58,98 +58,6 @@ func TestHermesDetector_InstalledFromHomeDir(t *testing.T) {
 	d, err := hermesDetector{}.Detect(context.Background())
 	require.NoError(t, err)
 	assert.True(t, d.Installed, "~/.hermes/ presence must flag installed")
-}
-
-// TestHermesDetector_ConfigWithEverMe_ReportsEntry proves
-// HasEverMeEntry reads the canonical `mcp_servers.everme` YAML path
-// AND requires env.EVERME_AGENT_TOKEN to be non-empty — same contract
-// codex.go enforces (codexHasEverMeEntry). Sibling `mcp_servers.other`
-// must be ignored.
-func TestHermesDetector_ConfigWithEverMe_ReportsEntry(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("EVERCLI_HERMES_CONFIG_DIR", dir)
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("EVERCLI_HERMES_CMD", "/nonexistent/hermes")
-
-	path := filepath.Join(dir, "config.yaml")
-	body := `agent:
-  max_turns: 90
-mcp_servers:
-  everme:
-    command: npx
-    args:
-    - -y
-    - "@everme/memory-mcp"
-    env:
-      EVERME_API_BASE: https://api.everme.evermind.ai
-      EVERME_AGENT_ID: agt_test
-      EVERME_AGENT_TOKEN: evt_test_token_aaaaaaaaaaaaaaaaaa
-  other:
-    command: noop
-`
-	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
-
-	d, err := hermesDetector{}.Detect(context.Background())
-	require.NoError(t, err)
-	assert.True(t, d.ConfigExists)
-	assert.True(t, d.HasEverMeEntry, "must recognise existing mcp_servers.everme entry with a token")
-}
-
-// TestHermesDetector_StubEntry_NoToken_NotReported is the P2 regression
-// guard: a hand-written / stale Hermes entry that lacks
-// env.EVERME_AGENT_TOKEN (e.g. a half-baked README paste, or a stale
-// scaffold left after the user disconnected the agent on the backend)
-// must NOT be reported as configured. Otherwise `plugin list` /
-// Verify show "installed" for an entry that can't actually authenticate.
-// Mirrors codex's contract (codexHasEverMeEntry requires
-// env.EVERME_AGENT_TOKEN != "").
-func TestHermesDetector_StubEntry_NoToken_NotReported(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("EVERCLI_HERMES_CONFIG_DIR", dir)
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("EVERCLI_HERMES_CMD", "/nonexistent/hermes")
-
-	path := filepath.Join(dir, "config.yaml")
-	stub := `mcp_servers:
-  everme:
-    command: npx
-    args:
-    - -y
-    - "@everme/memory-mcp"
-    env:
-      EVERME_API_BASE: https://api.everme.evermind.ai
-`
-	require.NoError(t, os.WriteFile(path, []byte(stub), 0o600))
-
-	d, err := hermesDetector{}.Detect(context.Background())
-	require.NoError(t, err)
-	assert.True(t, d.ConfigExists)
-	assert.False(t, d.HasEverMeEntry, "entry without EVERME_AGENT_TOKEN must not be reported as configured")
-}
-
-// TestHermesDetector_EmptyTokenString_NotReported is the adjacent
-// regression: an entry with EVERME_AGENT_TOKEN: "" (explicit empty
-// string) must also be treated as "not configured". Catches the
-// failure mode where a tool / hand-edit zeroed the token without
-// removing the env block.
-func TestHermesDetector_EmptyTokenString_NotReported(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("EVERCLI_HERMES_CONFIG_DIR", dir)
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("EVERCLI_HERMES_CMD", "/nonexistent/hermes")
-
-	path := filepath.Join(dir, "config.yaml")
-	body := `mcp_servers:
-  everme:
-    command: npx
-    env:
-      EVERME_AGENT_TOKEN: ""
-`
-	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
-
-	d, err := hermesDetector{}.Detect(context.Background())
-	require.NoError(t, err)
-	assert.False(t, d.HasEverMeEntry, "empty-string token must not be reported as configured")
 }
 
 // TestHermesDetector_ConfigWithoutEverMe_HasOther verifies the
@@ -260,187 +168,6 @@ func TestHermesWriter_LifecycleInterfaces(t *testing.T) {
 	assert.True(t, isVerifier, "hermes writer must implement Verifier for post-Commit yaml round-trip check")
 }
 
-// TestHermesWriter_FreshFile creates a config.yaml from scratch and
-// pins the on-disk entry shape — keys (command/args/env), nested
-// env values including the freshly minted token. Also exercises
-// Verify on the result.
-func TestHermesWriter_FreshFile(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.yaml")
-
-	w := newHermesWriter()
-	plan, err := w.Plan(context.Background(), path)
-	require.NoError(t, err)
-	assert.True(t, plan.WillCreate)
-	assert.False(t, plan.WillReplace)
-	assert.Empty(t, plan.BackupPath, "fresh file has no prior state to back up")
-
-	res, err := w.Commit(context.Background(), plan, WriteParams{
-		APIBaseURL: "https://api.everme.evermind.ai",
-		AgentID:    "agt_hermes_test",
-		AgentToken: "evt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-	})
-	require.NoError(t, err)
-	require.NotNil(t, res)
-	assert.True(t, res.WroteNewEntry)
-	assert.Empty(t, res.BackupPath)
-
-	cfg := readHermesYAMLFile(t, path)
-	servers, ok := cfg["mcp_servers"].(map[string]interface{})
-	require.True(t, ok, "top-level mcp_servers must be a map")
-	entry, ok := servers["everme"].(map[string]interface{})
-	require.True(t, ok, "mcp_servers.everme must be a map")
-	assert.Equal(t, "npx", entry["command"])
-
-	env, _ := entry["env"].(map[string]interface{})
-	require.NotNil(t, env)
-	assert.Equal(t, "https://api.everme.evermind.ai", env["EVERME_API_BASE"])
-	assert.Equal(t, "agt_hermes_test", env["EVERME_AGENT_ID"])
-	assert.Equal(t, "evt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", env["EVERME_AGENT_TOKEN"])
-
-	// Verify round-trip sanity check passes.
-	require.NoError(t, (&hermesWriter{}).Verify(context.Background(), res))
-}
-
-// TestHermesWriter_PreservesSiblingKeys is the load-bearing test:
-// upsert must preserve every other key in config.yaml (agent.*,
-// memory.*, _config_version, other mcp_servers.* entries) verbatim.
-// yaml.v3 unmarshal-to-map throws away comments (acceptable, V1
-// trade-off documented in hermes.go) but must NEVER lose data.
-func TestHermesWriter_PreservesSiblingKeys(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.yaml")
-	initial := `_config_version: 12
-agent:
-  max_turns: 90
-  verbose: false
-memory:
-  provider: everos
-  everos:
-    base_url: http://localhost:1995
-mcp_servers:
-  n8n:
-    command: python
-    args:
-    - /opt/n8n/server.py
-    env:
-      N8N_KEY: secret
-`
-	require.NoError(t, os.WriteFile(path, []byte(initial), 0o600))
-
-	w := newHermesWriter()
-	plan, err := w.Plan(context.Background(), path)
-	require.NoError(t, err)
-	assert.False(t, plan.WillCreate)
-	assert.False(t, plan.WillReplace, "no everme entry yet → not replace")
-	assert.NotEmpty(t, plan.BackupPath, "existing file must have a backup target")
-
-	_, err = w.Commit(context.Background(), plan, WriteParams{
-		APIBaseURL: "https://api.everme.evermind.ai",
-		AgentID:    "agt_hermes",
-		AgentToken: "evt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-	})
-	require.NoError(t, err)
-
-	cfg := readHermesYAMLFile(t, path)
-	// Sibling top-level scalar preserved.
-	assert.Equal(t, 12, cfg["_config_version"])
-
-	agent, ok := cfg["agent"].(map[string]interface{})
-	require.True(t, ok)
-	assert.Equal(t, 90, agent["max_turns"])
-	assert.Equal(t, false, agent["verbose"])
-
-	memory, ok := cfg["memory"].(map[string]interface{})
-	require.True(t, ok)
-	assert.Equal(t, "everos", memory["provider"])
-	everos, ok := memory["everos"].(map[string]interface{})
-	require.True(t, ok)
-	assert.Equal(t, "http://localhost:1995", everos["base_url"])
-
-	// Sibling mcp_servers entry preserved + new everme entry added.
-	servers, ok := cfg["mcp_servers"].(map[string]interface{})
-	require.True(t, ok)
-	n8n, ok := servers["n8n"].(map[string]interface{})
-	require.True(t, ok, "n8n sibling must survive the upsert")
-	assert.Equal(t, "python", n8n["command"])
-	n8nEnv, _ := n8n["env"].(map[string]interface{})
-	assert.Equal(t, "secret", n8nEnv["N8N_KEY"])
-
-	everme, ok := servers["everme"].(map[string]interface{})
-	require.True(t, ok)
-	evermeEnv, _ := everme["env"].(map[string]interface{})
-	assert.Equal(t, "evt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", evermeEnv["EVERME_AGENT_TOKEN"])
-
-	// Backup must exist and contain the original (untouched) bytes.
-	backupRaw, err := os.ReadFile(plan.BackupPath)
-	require.NoError(t, err)
-	assert.Equal(t, initial, string(backupRaw), "backup must be byte-for-byte original")
-}
-
-// TestHermesWriter_ReinstallReplaces — re-running install upserts the
-// entry idempotently with a fresh token. Plan reports WillReplace=true
-// and Result.WroteNewEntry=false so JSON callers can distinguish
-// "first install" from "rotate".
-func TestHermesWriter_ReinstallReplaces(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.yaml")
-	initial := `mcp_servers:
-  everme:
-    command: npx
-    args:
-    - -y
-    - "@everme/memory-mcp"
-    env:
-      EVERME_API_BASE: https://api.everme.evermind.ai
-      EVERME_AGENT_ID: agt_old
-      EVERME_AGENT_TOKEN: evt_old_token
-`
-	require.NoError(t, os.WriteFile(path, []byte(initial), 0o600))
-
-	w := newHermesWriter()
-	plan, err := w.Plan(context.Background(), path)
-	require.NoError(t, err)
-	assert.True(t, plan.WillReplace, "existing everme entry should be detected")
-	assert.NotEmpty(t, plan.BackupPath)
-
-	res, err := w.Commit(context.Background(), plan, WriteParams{
-		APIBaseURL: "https://api.everme.evermind.ai",
-		AgentID:    "agt_new",
-		AgentToken: "evt_new_token_aaaaaaaaaaaaaaaaaaaa",
-	})
-	require.NoError(t, err)
-	assert.False(t, res.WroteNewEntry, "reinstall is a replace, not a new entry")
-
-	cfg := readHermesYAMLFile(t, path)
-	servers, _ := cfg["mcp_servers"].(map[string]interface{})
-	entry, _ := servers["everme"].(map[string]interface{})
-	env, _ := entry["env"].(map[string]interface{})
-	assert.Equal(t, "agt_new", env["EVERME_AGENT_ID"], "agent id must be replaced")
-	assert.Equal(t, "evt_new_token_aaaaaaaaaaaaaaaaaaaa", env["EVERME_AGENT_TOKEN"], "token must be replaced")
-}
-
-// TestHermesWriter_RejectsMcpServersAsList — refuses to silently
-// overwrite when mcp_servers exists with a non-map type (e.g. user
-// typoed it as a YAML sequence). The user gets a structured error
-// pointing at the shape collision rather than losing their data.
-func TestHermesWriter_RejectsMcpServersAsList(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "config.yaml")
-	require.NoError(t, os.WriteFile(path, []byte("mcp_servers:\n  - mistyped-as-a-list\n"), 0o600))
-
-	w := newHermesWriter()
-	plan, err := w.Plan(context.Background(), path)
-	require.NoError(t, err)
-
-	_, err = w.Commit(context.Background(), plan, WriteParams{
-		APIBaseURL: "https://api.everme.evermind.ai",
-		AgentID:    "agt_test",
-		AgentToken: "evt_test",
-	})
-	require.Error(t, err, "must refuse rather than overwrite user's mcp_servers list")
-}
-
 // TestHermesWriter_RejectsMalformedYAML — bad YAML must surface a
 // structured parse error, not silently overwrite.
 func TestHermesWriter_RejectsMalformedYAML(t *testing.T) {
@@ -495,13 +222,140 @@ func TestHermesWriter_Verify_ConfigVanished(t *testing.T) {
 	require.Error(t, err, "Verify must fail when config file is missing")
 }
 
-// readHermesYAMLFile is a test helper: parses a YAML file into a
-// generic map for assertions on the round-tripped shape.
-func readHermesYAMLFile(t *testing.T, path string) map[string]interface{} {
-	t.Helper()
-	raw, err := os.ReadFile(path)
-	require.NoError(t, err)
-	var cfg map[string]interface{}
-	require.NoError(t, yaml.Unmarshal(raw, &cfg))
-	return cfg
+func TestHermesCommitWritesProviderAndRemovesMcp(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("EVERCLI_HERMES_CONFIG_DIR", home)
+	cfgPath := filepath.Join(home, "config.yaml")
+	// Seed an existing config with a legacy mcp_servers.everme entry + a sibling.
+	seed := "" +
+		"model: gpt-4\n" +
+		"mcp_servers:\n" +
+		"  everme:\n" +
+		"    command: npx\n" +
+		"    env:\n" +
+		"      EVERME_AGENT_TOKEN: evt_old\n" +
+		"  other:\n" +
+		"    command: foo\n"
+	if err := os.WriteFile(cfgPath, []byte(seed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	w := newHermesWriter()
+	plan, err := w.Plan(context.Background(), cfgPath)
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	res, err := w.Commit(context.Background(), plan, WriteParams{
+		AgentID: "agt_new", AgentToken: "evt_new", APIBaseURL: "https://api.everme.evermind.ai",
+	})
+	if err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	// 1. provider files written
+	if _, err := os.Stat(filepath.Join(home, "plugins", "everme", "__init__.py")); err != nil {
+		t.Fatalf("provider not written: %v", err)
+	}
+	// 2. everme.env written 0600 with token
+	envPath := filepath.Join(home, "everme.env")
+	info, err := os.Stat(envPath)
+	if err != nil {
+		t.Fatalf("everme.env missing: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("everme.env perm = %o, want 600", info.Mode().Perm())
+	}
+	envBody, _ := os.ReadFile(envPath)
+	if !strings.Contains(string(envBody), "EVERME_AGENT_TOKEN=evt_new") {
+		t.Fatalf("everme.env missing token: %s", envBody)
+	}
+	// 3. config.yaml: memory.provider=everme, mcp_servers.everme removed, sibling kept
+	cfg, _, _ := readHermesConfig(cfgPath)
+	mem, _ := cfg["memory"].(map[string]interface{})
+	if mem == nil || mem["provider"] != "everme" {
+		t.Fatalf("memory.provider not set: %#v", cfg["memory"])
+	}
+	servers, _ := cfg["mcp_servers"].(map[string]interface{})
+	if _, exists := servers["everme"]; exists {
+		t.Fatal("legacy mcp_servers.everme not removed")
+	}
+	if _, exists := servers["other"]; !exists {
+		t.Fatal("sibling mcp_servers.other clobbered")
+	}
+	_ = res
+}
+
+func TestHermesDetectProviderInstalled(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("EVERCLI_HERMES_CONFIG_DIR", home)
+	// Write provider files + memory.provider=everme.
+	if err := writeProviderFiles(filepath.Join(home, "plugins")); err != nil {
+		t.Fatal(err)
+	}
+	cfg := "memory:\n  provider: everme\n"
+	if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d, err := hermesDetector{}.Detect(context.Background())
+	if err != nil {
+		t.Fatalf("detect: %v", err)
+	}
+	if !d.HasEverMeEntry {
+		t.Fatal("expected HasEverMeEntry=true when provider installed")
+	}
+}
+
+func TestHermesVerifyChecksProvider(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("EVERCLI_HERMES_CONFIG_DIR", home)
+	cfgPath := filepath.Join(home, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte("model: x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w := newHermesWriter()
+	plan, _ := w.Plan(context.Background(), cfgPath)
+	res, err := w.Commit(context.Background(), plan, WriteParams{
+		AgentID: "agt", AgentToken: "evt_x", APIBaseURL: "https://api.everme.evermind.ai",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Verify(context.Background(), res); err != nil {
+		t.Fatalf("verify failed after commit: %v", err)
+	}
+}
+
+func TestHermesDetectProviderFilesButNoConfigKey(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("EVERCLI_HERMES_CONFIG_DIR", home)
+	// Provider files present, but memory.provider NOT set.
+	if err := writeProviderFiles(filepath.Join(home, "plugins")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("model: x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d, err := hermesDetector{}.Detect(context.Background())
+	if err != nil {
+		t.Fatalf("detect: %v", err)
+	}
+	if d.HasEverMeEntry {
+		t.Fatal("expected HasEverMeEntry=false when memory.provider missing")
+	}
+}
+
+func TestHermesDetectConfigKeyButNoProviderFiles(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("EVERCLI_HERMES_CONFIG_DIR", home)
+	// memory.provider set, but provider package NOT written.
+	if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte("memory:\n  provider: everme\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d, err := hermesDetector{}.Detect(context.Background())
+	if err != nil {
+		t.Fatalf("detect: %v", err)
+	}
+	if d.HasEverMeEntry {
+		t.Fatal("expected HasEverMeEntry=false when provider files missing")
+	}
 }

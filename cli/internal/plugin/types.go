@@ -123,12 +123,9 @@ type Writer interface {
 //     `codex plugin marketplace add`. Without this happening before
 //     the token is minted, a marketplace failure (network, missing CLI)
 //     would leave a stranded cloud agent.
-//   - V2 Hermes (deferred): `pip install everme-hermes` into Hermes'
-//     Python env to land a native MemoryProvider plugin. V1.x Hermes
-//     does not use Preparer — `mcp_servers.everme` is upserted into
-//     ~/.hermes/config.yaml directly in Commit (see hermes.go for
-//     why we mirror catalog's `_save_mcp_server` rather than shell
-//     out to `hermes mcp add`).
+//   - Hermes: the native MemoryProvider is installed by Commit (embedded
+//     python written to $HERMES_HOME/plugins/everme/), not Preparer —
+//     there is no out-of-band registration step to run before token mint.
 //
 // Plan runs after Prepare, so Plan's TOCTOU snapshot already reflects
 // any side effects Prepare introduced (e.g. the marketplace section
