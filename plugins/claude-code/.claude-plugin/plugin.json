@@ -1,6 +1,6 @@
 {
   "name": "everme",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "EverMe — automatic memory recall for Claude Code. Recalls relevant context from past sessions before each prompt and saves new turns through the EverMe gateway.",
   "author": {
     "name": "EverMind AI",

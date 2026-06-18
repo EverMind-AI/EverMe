@@ -10,8 +10,8 @@
  */
 
 import { toText, stripChannelMetadata } from "./messages.js";
+import { capRunes } from "./truncate.js";
 
-const MAX_TEXT_CHARS = 32_000;
 const PERSONAL_MEMORY_ROLES = new Set(["user", "assistant"]);
 
 export async function savePersonalMemory(client, { conversationId, messages = [], flush = true } = {}, log = { info() {}, warn() {} }) {
@@ -54,6 +54,5 @@ function normalizeTimestamp(ts, fallback) {
 }
 
 function cap(text) {
-  const s = String(text || "");
-  return s.length > MAX_TEXT_CHARS ? s.slice(0, MAX_TEXT_CHARS) : s;
+  return capRunes(text);
 }

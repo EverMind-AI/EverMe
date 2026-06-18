@@ -1,6 +1,6 @@
 {
   "name": "@everme/agent-sdk",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "type": "module",
   "description": "Shared core for EverMe AI-agent plugins. HTTP client, search/context, agent-memory writes, redaction, prompt helpers. Host-agnostic — paired with @everme/openclaw, @everme/claude-code, @everme/memory-mcp, …",
   "license": "Apache-2.0",
@@ -18,7 +18,7 @@
     "node": ">=18.0.0"
   },
   "scripts": {
-    "test": "node --test tests/client.test.js tests/config.test.js tests/messages.test.js tests/agent-memory.test.js tests/personal-memory.test.js"
+    "test": "node --test tests/client.test.js tests/config.test.js tests/messages.test.js tests/agent-memory.test.js tests/personal-memory.test.js tests/search.test.js tests/truncate.test.js"
   },
   "keywords": [
     "evermind",

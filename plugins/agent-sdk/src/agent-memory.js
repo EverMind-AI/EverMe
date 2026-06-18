@@ -6,8 +6,7 @@
  */
 
 import { toText, stripChannelMetadata } from "./messages.js";
-
-const MAX_TEXT_CHARS = 32_000;
+import { capRunes } from "./truncate.js";
 
 export const AGENT_MEMORY_ROLES = Object.freeze({
   USER: "user",
@@ -126,6 +125,5 @@ function normalizeTimestamp(ts, fallback) {
 }
 
 function cap(text) {
-  const s = String(text || "");
-  return s.length > MAX_TEXT_CHARS ? s.slice(0, MAX_TEXT_CHARS) : s;
+  return capRunes(text);
 }

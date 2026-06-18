@@ -2,7 +2,7 @@
   "id": "@everme/openclaw",
   "name": "EverMe Memory Plugin",
   "description": "Real-time memory retrieval and persistence backed by the EverMe cloud (cold-start memory uploaded by evercli)",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "kind": "context-engine",
   "contextEngine": true,
   "main": "./index.js",

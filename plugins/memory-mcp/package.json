@@ -1,6 +1,6 @@
 {
   "name": "@everme/memory-mcp",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "EverMe memory plugin — generic MCP server for any MCP host (Cursor, Cline, generic JSON-RPC clients). Hosts with native plugin formats (Claude Code, OpenClaw) have their own packages.",
   "license": "Apache-2.0",
   "type": "module",
@@ -34,7 +34,7 @@
     "test": "node --test tests/mcp.test.js tests/instructions.test.js tests/schema.test.js tests/resources.test.js"
   },
   "dependencies": {
-    "@everme/agent-sdk": "^0.3.3",
+    "@everme/agent-sdk": "^0.3.4",
     "@modelcontextprotocol/sdk": "^1.0.4"
   },
   "homepage": "https://everme.evermind.ai",
