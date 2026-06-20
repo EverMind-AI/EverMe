@@ -25,5 +25,6 @@ func New() *cobra.Command {
 	}
 	c.AddCommand(newList())
 	c.AddCommand(newInstall())
+	c.AddCommand(newUninstall())
 	return c
 }

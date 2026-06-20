@@ -284,6 +284,69 @@ func (*hermesWriter) Commit(_ context.Context, plan *WritePlan, params WritePara
 	}, nil
 }
 
+// Remove uninstalls the EverMe memory provider from Hermes.
+// It deletes the embedded Python plugin directory, the credentials env file,
+// and strips the memory.provider setting from config.yaml.
+// It implements the Remover interface to restore uninstall capabilities.
+func (*hermesWriter) Remove(_ context.Context, configPath string) (bool, error) {
+	home := filepath.Dir(configPath)
+	modifiedAny := false
+
+	// 1. Delete the physical Python plugin directory
+	pluginDir := filepath.Join(home, "plugins", "everme")
+	if info, err := os.Stat(pluginDir); err == nil && info.IsDir() {
+		if err := os.RemoveAll(pluginDir); err != nil {
+			return false, output.IOErr(pluginDir, "remove-plugin-dir", err)
+		}
+		modifiedAny = true
+	}
+
+	// 2. Delete the physical credentials file
+	envFile := filepath.Join(home, "everme.env")
+	if _, err := os.Stat(envFile); err == nil {
+		if err := os.Remove(envFile); err != nil {
+			return false, output.IOErr(envFile, "remove-env-file", err)
+		}
+		modifiedAny = true
+	}
+
+	// 3. Safely read the YAML config
+	cfg, exists, err := readHermesConfig(configPath)
+	if err != nil {
+		return false, err
+	}
+	
+	if exists {
+		yamlModified := false
+
+		// 4. Strip the provider setting if it belongs to us
+		if mem, ok := cfg["memory"].(map[string]interface{}); ok {
+			if prov, _ := mem["provider"].(string); prov == "everme" {
+				delete(mem, "provider")
+				yamlModified = true
+			}
+		}
+
+		// 5. Clean up the legacy V1.x MCP entry just in case they upgraded
+		if servers, ok := cfg["mcp_servers"].(map[string]interface{}); ok {
+			if _, present := servers[hermesMcpEntryName]; present {
+				delete(servers, hermesMcpEntryName)
+				yamlModified = true
+			}
+		}
+
+		// 6. Write back to disk only if we actually changed the YAML
+		if yamlModified {
+			if err := writeHermesConfig(configPath, cfg); err != nil {
+				return false, err
+			}
+			modifiedAny = true
+		}
+	}
+
+	return modifiedAny, nil
+}
+
 // writeEvermeEnv writes the three EVERME_* credentials as KEY=VALUE lines
 // at mode 0600. The provider's config.py reads this file (priority 3).
 func writeEvermeEnv(path string, params WriteParams) error {
