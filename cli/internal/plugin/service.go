@@ -476,3 +476,44 @@ func (s *Service) buildRegisterReq(p Platform, displayName string) client.Regist
 func osTag() string {
 	return runtimeGOOS()
 }
+
+// Uninstall orchestrates the local cleanup of EverMe configurations across the requested
+// platforms. It utilizes the Remover interface to safely strip configurations.
+func (s *Service) Uninstall(ctx context.Context, platforms []Platform) error {
+	if len(platforms) == 0 {
+		return output.Invalid("at least one platform is required (or use --all)", "")
+	}
+
+	for _, p := range platforms {
+		if !s.reg.Has(p) {
+			fmt.Printf("✗ %s: unknown platform\n", p)
+			continue
+		}
+
+		wr := s.reg.writer(p)
+		remover, ok := wr.(Remover)
+		if !ok {
+			fmt.Printf("— %s: uninstall not yet supported for this platform format\n", p)
+			continue
+		}
+
+		det := s.reg.detector(p)
+		detection, err := det.Detect(ctx)
+		if err != nil || detection == nil || detection.ConfigPath == "" {
+			fmt.Printf("— %s: could not detect config path\n", p)
+			continue
+		}
+
+		modified, err := remover.Remove(ctx, detection.ConfigPath)
+		if err != nil {
+			fmt.Printf("✗ %s failed to uninstall: %v\n", p, err)
+		} else if modified {
+			fmt.Printf("✓ %s: successfully removed EverMe configuration from %s\n", p, detection.ConfigPath)
+		} else {
+			fmt.Printf("— %s: no EverMe configuration found in %s\n", p, detection.ConfigPath)
+		}
+	}
+	
+	fmt.Println("\nNote: Local configurations removed. Please ensure you disconnect the agents from the EverMe Web UI to revoke server-side tokens.")
+	return nil
+}

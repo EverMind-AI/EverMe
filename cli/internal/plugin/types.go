@@ -112,6 +112,18 @@ type Writer interface {
 	Commit(ctx context.Context, plan *WritePlan, params WriteParams) (*WriteResult, error)
 }
 
+// Remover is an extension to Writer that safely strips the everme-memory
+// entry from the Agent's MCP config. This restores the uninstall capability
+// that was temporarily retired in V1.
+type Remover interface {
+	Writer
+
+	// Remove parses the target ConfigPath, deletes the EverMe entry if it
+	// exists, and atomically rewrites the file. Returns true if the file
+	// was modified, false if no EverMe entry was found.
+	Remove(ctx context.Context, configPath string) (bool, error)
+}
+
 // Preparer is an optional Writer extension for hosts that need a
 // side-effecting setup step BEFORE the backend mints a fresh token.
 // Service.installOne calls Prepare immediately after Detect and before
