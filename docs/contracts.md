@@ -131,6 +131,42 @@ failures return MCP tool errors with `isError: true`; resource-read failures are
 thrown as MCP JSON-RPC errors so hosts can distinguish them from successful
 markdown content.
 
+### MCP tool error diagnostics
+
+For backward compatibility, a tool failure still returns a short redacted text
+line in `content[0].text`. When the failure reaches the MCP adapter through the
+agent SDK, the same result also contains `structuredContent.error`:
+
+```json
+{
+  "classification": "http",
+  "causeCode": "HTTP_503",
+  "httpStatus": 503,
+  "requestId": "req_example",
+  "attempts": 2,
+  "retryable": true,
+  "elapsedMs": 152
+}
+```
+
+The fields are additive and machine-readable:
+
+| Field | Meaning |
+|---|---|
+| `classification` | Redacted failure class such as `transport`, `timeout`, `http`, `rate_limit`, `auth`, or `application`. |
+| `causeCode` | Sanitized transport, HTTP, or EverMe code. It never contains native exception text. |
+| `httpStatus` | HTTP status, or `0` when no response was received. |
+| `requestId` | Sanitized upstream correlation id when available. |
+| `attempts` | Number of actual network attempts made. |
+| `retryable` | Whether another read attempt is semantically safe; writes report `false`. |
+| `elapsedMs` | Total elapsed time across attempts and retry delay. |
+
+Diagnostics never include the memory query, request body, URL, token, or raw
+fetch cause. `mem_context` and `mem_search` are semantic reads even though the
+wire method is POST: they retry transient transport failures, HTTP 429, and
+HTTP 5xx once within the original timeout budget. Memory writes are
+non-idempotent and remain single-attempt.
+
 ## MCP Tools
 
 The stable tool names are:

@@ -15,6 +15,8 @@
  * Both endpoints accept evt_ via Bearer (MemAuth + mem:search/mem:read).
  */
 
+import { REQUEST_SEMANTICS } from "./client.js";
+
 const noop = { info() {}, warn() {} };
 
 // Mirror the backend's max search-query limit: /mem/search rejects a
@@ -60,7 +62,9 @@ export async function searchMemory(client, params, log = noop) {
       : {}),
   };
   log.info?.(`[everme] POST /mem/search topK=${body.topK} q="${truncate(body.query, 60)}"`);
-  const res = await client.request("POST", "/mem/search", body);
+  const res = await client.request("POST", "/mem/search", body, {
+    requestSemantics: REQUEST_SEMANTICS.SAFE_READ,
+  });
   return {
     memories: res?.items ?? [],
     profiles: res?.profiles ?? [],
@@ -81,7 +85,9 @@ export async function searchMemory(client, params, log = noop) {
 export async function getContext(client, _query, opts = {}, log = noop) {
   const body = opts.forceRefresh ? { forceRefresh: true } : {};
   log.info?.(`[everme] POST /mem/context forceRefresh=${!!opts.forceRefresh}`);
-  const res = await client.request("POST", "/mem/context", body);
+  const res = await client.request("POST", "/mem/context", body, {
+    requestSemantics: REQUEST_SEMANTICS.SAFE_READ,
+  });
   if (typeof res?.context === "string" && res.context) {
     return { context: res.context, memoryCount: res.memoryCount ?? estimateCount(res) };
   }

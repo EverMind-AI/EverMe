@@ -26,7 +26,7 @@
  * dedicated module rather than reviving the multi-layer buffer.
  */
 
-export { createClient, EvermeError, redactError } from "./src/client.js";
+export { createClient, EvermeError, redactError, REQUEST_SEMANTICS } from "./src/client.js";
 export {
   saveAgentMemory,
   convertAgentMessage,

@@ -1,13 +1,13 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { searchMemory, QUERY_MAX_CHARS } from "../src/search.js";
+import { getContext, searchMemory, QUERY_MAX_CHARS } from "../src/search.js";
 
 describe("searchMemory", () => {
   test("posts query + topK to /mem/search and renames items → memories", async () => {
     const calls = [];
     const client = {
-      async request(method, path, body) {
-        calls.push({ method, path, body });
+      async request(method, path, body, options) {
+        calls.push({ method, path, body, options });
         return { items: [{ summary: "hit" }], profiles: [], requestId: "req-1" };
       },
     };
@@ -19,8 +19,26 @@ describe("searchMemory", () => {
     assert.equal(calls[0].path, "/mem/search");
     assert.equal(calls[0].body.query, "what do I prefer");
     assert.equal(calls[0].body.topK, 3);
+    assert.equal(calls[0].options.requestSemantics, "safe_read");
     assert.equal(res.memories.length, 1);
     assert.equal(res.requestId, "req-1");
+  });
+
+  test("marks /mem/context as a safe semantic read", async () => {
+    const calls = [];
+    const client = {
+      async request(method, path, body, options) {
+        calls.push({ method, path, body, options });
+        return { context: "remembered", memoryCount: 1 };
+      },
+    };
+
+    const res = await getContext(client, "unused");
+
+    assert.deepEqual(res, { context: "remembered", memoryCount: 1 });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].path, "/mem/context");
+    assert.equal(calls[0].options.requestSemantics, "safe_read");
   });
 
   test("clamps an over-long query to the backend's MaxSearchQueryRunes", async () => {

@@ -30,6 +30,25 @@ Read-only MCP resources are also exposed for hosts that support
 The public MCP contract is documented in
 [`../../docs/contracts.md`](../../docs/contracts.md).
 
+Tool failures keep the backward-compatible `isError: true` text response and
+also expose redacted diagnostics at `structuredContent.error`:
+
+```json
+{
+  "classification": "transport",
+  "causeCode": "ECONNRESET",
+  "httpStatus": 0,
+  "requestId": "",
+  "attempts": 2,
+  "retryable": true,
+  "elapsedMs": 154
+}
+```
+
+The diagnostic object never includes the memory query, request body, token,
+URL, or native fetch error text. Read tools use the SDK's bounded safe-read
+retry; write tools remain single-attempt.
+
 ## Wire it into a host's mcpServers config
 
 ```json
@@ -52,7 +71,7 @@ The public MCP contract is documented in
 
 ## Architecture
 
-Thin adapter on top of [`@everme/agent-sdk`](https://www.npmjs.com/package/@everme/agent-sdk). This package owns the MCP framing (stdio + JSON-RPC), tool list, and dispatch. Everything else — HTTP client, realtime agent-memory writes, search/context calls, retry, redaction — comes from the SDK.
+Thin adapter on top of [`@everme/agent-sdk`](https://www.npmjs.com/package/@everme/agent-sdk). This package owns the MCP framing (stdio + JSON-RPC), tool list, dispatch, and structured MCP error projection. Everything else — HTTP client, realtime agent-memory writes, search/context calls, retry, and redaction — comes from the SDK.
 
 ## Tests
 
