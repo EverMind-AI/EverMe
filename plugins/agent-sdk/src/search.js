@@ -61,7 +61,7 @@ export async function searchMemory(client, params, log = noop) {
       ? { memoryTypes: params.memoryTypes }
       : {}),
   };
-  log.info?.(`[everme] POST /mem/search topK=${body.topK} q="${truncate(body.query, 60)}"`);
+  log.info?.(`[everme] POST /mem/search topK=${body.topK} queryChars=${body.query.length}`);
   const res = await client.request("POST", "/mem/search", body, {
     requestSemantics: REQUEST_SEMANTICS.SAFE_READ,
   });
@@ -132,9 +132,4 @@ function estimateCount(res) {
   if (!res || typeof res !== "object") return 0;
   const arr = res.items || [];
   return Array.isArray(arr) ? arr.length : 0;
-}
-
-function truncate(s, n) {
-  s = String(s || "");
-  return s.length > n ? s.slice(0, n) + "…" : s;
 }

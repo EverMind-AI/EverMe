@@ -67,4 +67,17 @@ describe("searchMemory", () => {
     await searchMemory(client, { query: ok });
     assert.equal(sent.query, ok, "exactly-at-limit query is untouched");
   });
+
+  test("logs search metadata without persisting the query text", async () => {
+    const logs = [];
+    const client = { async request() { return { items: [] }; } };
+    const query = "private regression phrase";
+
+    await searchMemory(client, { query, topK: 7 }, { info: (line) => logs.push(line), warn() {} });
+
+    assert.equal(logs.length, 1);
+    assert.doesNotMatch(logs[0], /private regression phrase/);
+    assert.match(logs[0], /topK=7/);
+    assert.match(logs[0], new RegExp(`queryChars=${query.length}`));
+  });
 });
