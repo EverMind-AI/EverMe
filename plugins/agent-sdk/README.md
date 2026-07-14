@@ -19,7 +19,7 @@ Without a shared SDK each plugin would reimplement the EverMe wire protocol — 
 ```js
 import {
   // HTTP layer
-  createClient, EvermeError, redactError,
+  createClient, EvermeError, redactError, REQUEST_SEMANTICS,
   // Agent-memory realtime writes
   saveAgentMemory, AGENT_MEMORY_ROLES, AGENT_MEMORY_TOOL_CALL_TYPES,
   // Search / context
@@ -51,9 +51,12 @@ The envelope every endpoint follows:
 
 ## Concurrency / safety contracts
 
-- **Retry**: `execWithRetry` retries transport failures once — but only for GET/HEAD. POST writes (`/mem/agent-memory`) surface the transport error so the caller can decide; retrying a POST after a mid-flight drop can duplicate writes.
+- **Request semantics**: GET/HEAD default to `safe_read`. The POST read endpoints `/mem/search` and `/mem/context` opt in explicitly through `REQUEST_SEMANTICS.SAFE_READ`. All other requests are `non_idempotent_write`; a caller cannot make a write retry merely by mislabelling it.
+- **Retry**: safe reads make at most two attempts for transient transport failures, HTTP 429, and HTTP 5xx. Both attempts and any `Retry-After` delay share the original timeout budget. A timeout that consumes that budget is surfaced after one attempt rather than starting another full timeout.
+- **Write safety**: POST writes such as `/mem/agent-memory` are attempted exactly once. A lost response can hide a server-side success, so blind retry can duplicate memory until every write path has a supported idempotency key.
+- **Structured failures**: `EvermeError` includes `classification`, `causeCode`, `httpStatus`, `requestId`, `attempts`, `retryable`, and `elapsedMs`. These fields never include the request URL, query, body, token, or the native fetch cause message.
 - **Redaction**: `redactError` scrubs `evt_*`, `emk_*`, `X-Amz-Signature/Credential/Security-Token`, and AWS access key ids. Apply at every error sink before passing to host stderr / model context.
-- **Timeouts**: `EvermeError{type:"timeout"}` is thrown so callers can branch on it (e.g. degrade to fallback) rather than retrying as if it were a transport blip. Body-read timeouts are caught too — a stuck body no longer silently parses as `null`.
+- **Timeouts**: `EvermeError{type:"timeout", classification:"timeout"}` is thrown so callers can branch on it (e.g. degrade to fallback). Body-read timeouts are caught too — a stuck body no longer silently parses as `null`.
 
 The public CLI/MCP/token redaction contract is documented in
 [`../../docs/contracts.md`](../../docs/contracts.md).
@@ -64,7 +67,9 @@ The public CLI/MCP/token redaction contract is documented in
 npm test
 ```
 
-Covers HTTP envelope, retry gating, config precedence, message normalization, agent-memory shaping.
+Covers HTTP envelope, safe-read retry gating, write single-attempt safety,
+structured error metadata, config precedence, message normalization, and
+agent-memory shaping.
 
 ## License
 

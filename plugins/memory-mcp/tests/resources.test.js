@@ -666,6 +666,83 @@ describe("mem_context / mem_search tools return raw markdown (no JSON envelope)"
   });
 });
 
+describe("MCP tool failures preserve structured SDK diagnostics", { skip: !sdkAvailable && "SDK not installed" }, () => {
+  test("safe reads retry once while writes remain single-attempt", async () => {
+    const http = await import("node:http");
+    const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+    const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+
+    let contextCalls = 0;
+    let writeCalls = 0;
+    const mockServer = http.createServer((req, res) => {
+      if (req.url === "/api/v1/mem/context" && req.method === "POST") {
+        contextCalls += 1;
+      } else if (req.url === "/api/v1/mem/agent-memory" && req.method === "POST") {
+        writeCalls += 1;
+      } else {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      res.writeHead(503, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({
+        status: 0,
+        requestId: "req-test-outage",
+        error: "temporarily unavailable",
+      }));
+    });
+    await new Promise((resolve) => mockServer.listen(0, "127.0.0.1", resolve));
+    const port = mockServer.address().port;
+
+    process.env.EVERME_API_BASE = `http://127.0.0.1:${port}`;
+    process.env.EVERME_AGENT_ID = "agt_x";
+    process.env.EVERME_AGENT_TOKEN = "evt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const { createMcpServer } = await import("../src/mcp.js");
+    const { server, dispose } = createMcpServer();
+    const [c, s] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "t", version: "0" }, { capabilities: {} });
+    await Promise.all([server.connect(s), client.connect(c)]);
+
+    try {
+      const readResult = await client.callTool({
+        name: "mem_context",
+        arguments: { query: "test input" },
+      });
+      assert.equal(readResult.isError, true);
+      assert.equal(contextCalls, 2, "semantic read must use the one-retry budget");
+      assert.deepEqual(readResult.structuredContent?.error, {
+        classification: "http",
+        causeCode: "HTTP_503",
+        httpStatus: 503,
+        requestId: "req-test-outage",
+        attempts: 2,
+        retryable: true,
+        elapsedMs: readResult.structuredContent?.error?.elapsedMs,
+      });
+      assert.equal(typeof readResult.structuredContent.error.elapsedMs, "number");
+      assert.doesNotMatch(readResult.content[0].text, /test input/,
+        "the query must never be copied into the error result");
+
+      const writeResult = await client.callTool({
+        name: "mem_save_turn",
+        arguments: {
+          messages: [{ role: "user", content: "test input" }],
+          flush: false,
+        },
+      });
+      assert.equal(writeResult.isError, true);
+      assert.equal(writeCalls, 1, "non-idempotent write must never be retried");
+      assert.equal(writeResult.structuredContent?.error?.attempts, 1);
+      assert.equal(writeResult.structuredContent?.error?.retryable, false);
+    } finally {
+      await client.close();
+      await server.close();
+      await dispose();
+      await new Promise((resolve) => mockServer.close(resolve));
+    }
+  });
+});
+
 describe("mem_save_fact dispatch (profile write path)", { skip: !sdkAvailable && "SDK not installed" }, () => {
   // mem_save_fact must hit /mem/personal (profile + episodic), NOT
   // /mem/agent-memory (case/skill). Routing it to the agent path would

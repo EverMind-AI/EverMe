@@ -480,7 +480,7 @@ export function createMcpServer({ logger } = {}) {
       // — so the scrub MUST run here, not just in EvermeError.
       const safe = redactError(err?.message || String(err));
       log.warn?.(`[everme-mcp] tool ${name} failed: ${safe}`);
-      return errResp(safe);
+      return errResp(safe, structuredErrorDetail(err));
     }
   });
 
@@ -757,9 +757,57 @@ function okMarkdown(text) {
 // errResp accepts pre-redacted text. Callers MUST run redactError on
 // any non-EvermeError input before passing it in (the catch block
 // above does this; if you add another caller, do the same).
-function errResp(msg) {
-  return {
+//
+// SDK-originated failures also carry a structuredContent.error object.
+// The text line remains for older hosts; structuredContent lets newer
+// hosts and automation ledgers classify failures without parsing prose.
+function errResp(msg, errorDetail) {
+  const response = {
     isError: true,
     content: [{ type: "text", text: `error: ${msg}` }],
   };
+  if (errorDetail) response.structuredContent = { error: errorDetail };
+  return response;
+}
+
+function structuredErrorDetail(err) {
+  if (!err || typeof err !== "object") return null;
+  const classification = safeLabel(
+    err.classification ||
+      (err.type === "timeout" ? "timeout" : err.type === "auth" ? "auth" : "internal"),
+    "internal",
+  ).toLowerCase();
+  const causeCode = safeLabel(err.causeCode || "UNEXPECTED_ERROR", "UNEXPECTED_ERROR");
+  const httpStatus = boundedInteger(err.httpStatus, 0, 999, 0);
+  const attempts = boundedInteger(err.attempts, 1, 10, 1);
+  const elapsedMs = boundedInteger(err.elapsedMs, 0, Number.MAX_SAFE_INTEGER, 0);
+  const requestId = safeOpaqueId(err.requestId);
+  return {
+    classification,
+    causeCode,
+    httpStatus,
+    requestId,
+    attempts,
+    retryable: Boolean(err.retryable),
+    elapsedMs,
+  };
+}
+
+function safeLabel(value, fallback) {
+  const normalized = String(value ?? "")
+    .toUpperCase()
+    .replace(/[^A-Z0-9_]/g, "_")
+    .slice(0, 64);
+  return normalized || fallback;
+}
+
+function safeOpaqueId(value) {
+  const safe = redactError(String(value ?? "")).slice(0, 128);
+  return /^[A-Za-z0-9._:-]*$/.test(safe) ? safe : "";
+}
+
+function boundedInteger(value, min, max, fallback) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(n)));
 }

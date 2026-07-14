@@ -3,6 +3,34 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import { createClient, EvermeError } from "../src/client.js";
 
+const token = "evt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+function jsonResponse(body, status = 200, headers = {}) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json", ...headers },
+  });
+}
+
+function successResponse(result = { ok: true }) {
+  return jsonResponse({ error: "ok", status: 0, result, requestId: "req-ok" });
+}
+
+function fetchFailure(code, message = "fetch failed") {
+  const err = new TypeError(message);
+  err.cause = Object.assign(new Error("internal transport detail must stay private"), { code });
+  return err;
+}
+
+function clientWithFetch(fetchImpl) {
+  return createClient({
+    baseUrl: "https://gateway.invalid/api/v1",
+    agentId: "agt_test",
+    agentToken: token,
+    fetch: fetchImpl,
+  });
+}
+
 /**
  * Helper: spin up a tiny HTTP server, return its base URL + a
  * "respond" closure tests can use to set the next reply.
@@ -115,5 +143,187 @@ describe("client", () => {
     const c = createClient({ baseUrl: s.baseUrl, agentId: "x", agentToken: "evt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" });
     await c.request("GET", "/agents", undefined, { query: { platform: "claude-code" } });
     assert.equal(s.getLastRequest().url, "/agents?platform=claude-code");
+  });
+
+  test("retries a safe GET once after a socket reset", async (t) => {
+    t.after(async () => s.close());
+    let calls = 0;
+    const c = clientWithFetch(async () => {
+      calls += 1;
+      if (calls === 1) throw fetchFailure("ECONNRESET");
+      return successResponse({ recovered: true });
+    });
+
+    const out = await c.request("GET", "/healthz");
+
+    assert.deepEqual(out, { recovered: true });
+    assert.equal(calls, 2);
+  });
+
+  test("retries an explicitly safe POST read once after a transport failure", async (t) => {
+    t.after(async () => s.close());
+    let calls = 0;
+    const c = clientWithFetch(async () => {
+      calls += 1;
+      if (calls === 1) throw fetchFailure("UND_ERR_SOCKET");
+      return successResponse({ items: [] });
+    });
+
+    const out = await c.request("POST", "/mem/search", { query: "q" }, {
+      requestSemantics: "safe_read",
+    });
+
+    assert.deepEqual(out, { items: [] });
+    assert.equal(calls, 2);
+  });
+
+  test("never retries a non-idempotent write, even if a caller mislabels it", async (t) => {
+    t.after(async () => s.close());
+    let calls = 0;
+    const c = clientWithFetch(async () => {
+      calls += 1;
+      throw fetchFailure("ECONNRESET");
+    });
+
+    await assert.rejects(
+      c.request("POST", "/mem/agent-memory", { messages: [] }, {
+        requestSemantics: "safe_read",
+      }),
+      (err) => err instanceof EvermeError && err.attempts === 1,
+    );
+    assert.equal(calls, 1);
+  });
+
+  test("returns structured redacted metadata after DNS retries are exhausted", async (t) => {
+    t.after(async () => s.close());
+    let calls = 0;
+    const c = clientWithFetch(async () => {
+      calls += 1;
+      throw fetchFailure("ENOTFOUND", "fetch failed");
+    });
+
+    await assert.rejects(c.request("GET", "/healthz"), (err) => {
+      assert.ok(err instanceof EvermeError);
+      assert.equal(err.classification, "transport");
+      assert.equal(err.causeCode, "ENOTFOUND");
+      assert.equal(err.attempts, 2);
+      assert.equal(err.retryable, true);
+      assert.equal(typeof err.elapsedMs, "number");
+      assert.doesNotMatch(JSON.stringify(err), /internal transport detail/);
+      return true;
+    });
+    assert.equal(calls, 2);
+  });
+
+  test("keeps a timeout inside one shared budget and reports it without a retry storm", async (t) => {
+    t.after(async () => s.close());
+    let calls = 0;
+    const c = clientWithFetch((_url, { signal }) => {
+      calls += 1;
+      return new Promise((resolve, reject) => {
+        signal.addEventListener("abort", () => {
+          const err = new Error("aborted");
+          err.name = "AbortError";
+          reject(err);
+        }, { once: true });
+      });
+    });
+
+    const startedAt = Date.now();
+    await assert.rejects(
+      c.request("GET", "/slow", undefined, { timeoutMs: 25 }),
+      (err) =>
+        err instanceof EvermeError &&
+        err.classification === "timeout" &&
+        err.causeCode === "TIMEOUT" &&
+        err.attempts === 1 &&
+        err.retryable === true,
+    );
+    assert.equal(calls, 1);
+    assert.ok(Date.now() - startedAt < 250, "timeout retry budget must stay bounded");
+  });
+
+  test("retries a safe read once on HTTP 429", async (t) => {
+    t.after(async () => s.close());
+    let calls = 0;
+    const c = clientWithFetch(async () => {
+      calls += 1;
+      if (calls === 1) {
+        return jsonResponse(
+          { error: "rate limited", status: 42900, requestId: "req-rate" },
+          429,
+          { "Retry-After": "0" },
+        );
+      }
+      return successResponse({ recovered: true });
+    });
+
+    const out = await c.request("POST", "/mem/context", {}, {
+      requestSemantics: "safe_read",
+    });
+    assert.deepEqual(out, { recovered: true });
+    assert.equal(calls, 2);
+  });
+
+  test("retries a safe read once on HTTP 5xx", async (t) => {
+    t.after(async () => s.close());
+    let calls = 0;
+    const c = clientWithFetch(async () => {
+      calls += 1;
+      if (calls === 1) {
+        return jsonResponse({ error: "unavailable", status: 0, requestId: "req-503" }, 503);
+      }
+      return successResponse({ recovered: true });
+    });
+
+    const out = await c.request("GET", "/healthz");
+    assert.deepEqual(out, { recovered: true });
+    assert.equal(calls, 2);
+  });
+
+  test("does not retry HTTP 401 and preserves the request id", async (t) => {
+    t.after(async () => s.close());
+    let calls = 0;
+    const c = clientWithFetch(async () => {
+      calls += 1;
+      return jsonResponse(
+        { error: "invalid token", status: 30001, requestId: "req-auth" },
+        401,
+      );
+    });
+
+    await assert.rejects(c.request("GET", "/healthz"), (err) => {
+      assert.ok(err instanceof EvermeError);
+      assert.equal(err.type, "auth");
+      assert.equal(err.classification, "auth");
+      assert.equal(err.requestId, "req-auth");
+      assert.equal(err.attempts, 1);
+      assert.equal(err.retryable, false);
+      return true;
+    });
+    assert.equal(calls, 1);
+  });
+
+  test("preserves envelope auth classification on non-401 HTTP errors", async (t) => {
+    t.after(async () => s.close());
+    let calls = 0;
+    const c = clientWithFetch(async () => {
+      calls += 1;
+      return jsonResponse(
+        { error: "invalid token", status: 30001, requestId: "req-auth-400" },
+        400,
+      );
+    });
+
+    await assert.rejects(c.request("GET", "/healthz"), (err) => {
+      assert.ok(err instanceof EvermeError);
+      assert.equal(err.type, "auth");
+      assert.equal(err.classification, "auth");
+      assert.equal(err.causeCode, "EVERME_30001");
+      assert.equal(err.requestId, "req-auth-400");
+      assert.equal(err.attempts, 1);
+      return true;
+    });
+    assert.equal(calls, 1);
   });
 });

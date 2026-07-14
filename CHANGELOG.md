@@ -32,6 +32,13 @@ the open-source home for EverMe CLI and agent plugins.
 
 ### Plugins
 
+- Fix the agent SDK's dead transport-retry path by distinguishing semantic
+  reads from non-idempotent writes. `mem_context` and `mem_search` now retry
+  transient transport failures, HTTP 429, and HTTP 5xx once within the
+  original timeout budget; memory writes remain single-attempt.
+- Add redacted structured SDK/MCP failure diagnostics (`classification`,
+  `causeCode`, `httpStatus`, `requestId`, `attempts`, `retryable`, and
+  `elapsedMs`) without exposing request queries, bodies, URLs, or tokens.
 - Open-source the plugin workspace under `plugins/`.
 - Include `@everme/agent-sdk`, the shared JavaScript client and helper package.
 - Include `@everme/memory-mcp`, the generic MCP memory server.
