@@ -1,0 +1,12 @@
+{"timestamp":1749001000000,"type":"session_meta","payload":{"id":"session"}}
+{"timestamp":1749001001000,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"prior question"}]}}
+{"timestamp":1749001002000,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"prior answer"}]}}
+this is malformed json
+{"timestamp":1749001003000,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"inspect config.json"}]}}
+{"timestamp":1749001004000,"type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"private reasoning"}]}}
+{"timestamp":1749001005000,"type":"response_item","payload":{"type":"function_call","name":"read_file","call_id":"call_latest","arguments":"{\"path\":\"config.json\"}"}}
+{"timestamp":1749001006000,"type":"response_item","payload":{"type":"function_call_output","call_id":"call_latest","output":"{\"enabled\":true}"}}
+{"timestamp":1749001007000,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Memory is enabled."}]}}
+{"timestamp":"2025-06-04T01:36:48.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Config check complete."}]}}
+{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Untimed trailing note."}]}}
+{"timestamp":1749001009000,"type":"event_msg","payload":{"type":"agent_message","message":"duplicate display event"}}

@@ -1,7 +1,7 @@
 {
   "name": "everme",
   "version": "0.4.0",
-  "description": "Persistent memory recall for Codex sessions via EverMe MCP — pairs with the everme MCP server configured by evercli to load user profile and search prior conversations across sessions.",
+  "description": "Persistent memory recall and lifecycle capture for Codex sessions via EverMe.",
   "author": {
     "name": "EverMind AI",
     "url": "https://everme.evermind.ai"
@@ -17,14 +17,16 @@
     "recall"
   ],
   "skills": "./skills/",
+  "hooks": "./hooks/hooks.json",
   "interface": {
     "displayName": "EverMe",
     "shortDescription": "Persistent cross-session memory recall for Codex",
-    "longDescription": "EverMe gives Codex read access to your persistent memory across sessions. The skill instructs Codex when to read the `mem://profile` and `mem://search` MCP resources exposed by the everme MCP server (configured by `evercli plugin install codex`). Use it to load user profile + relevant context at the start of a session and to recall prior conversations on demand. Saving new memories from inside Codex is not part of this plugin in the current Codex App — write back via Claude Code, Cursor, or the EverMe web UI. No model output is sent to EverMe servers unless the LLM explicitly reads a mem:// resource.",
+    "longDescription": "EverMe gives Codex persistent memory across sessions. Native lifecycle hooks load profile context at session start, recall relevant memories before prompts, save each completed turn, and flush extraction before compaction. The MCP server remains available for explicit profile/search access and memory tools. Hook failures are non-blocking and credentials are provisioned by `evercli plugin install codex`.",
     "developerName": "EverMind AI",
     "category": "Productivity",
     "capabilities": [
-      "Read"
+      "Read",
+      "Write"
     ],
     "defaultPrompt": [
       "Load my EverMe memory for this Codex session.",

@@ -1,7 +1,7 @@
 # EverMe for Codex
 
-Codex marketplace plugin that pairs with the `@everme/memory-mcp` MCP server
-to give Codex persistent cross-session memory **recall**.
+Codex marketplace plugin that combines native lifecycle hooks with the
+`@everme/memory-mcp` MCP server for persistent cross-session memory.
 
 ## What you get
 
@@ -10,12 +10,9 @@ to give Codex persistent cross-session memory **recall**.
   Codex bridges MCP Resources to the model, so reads work end-to-end.
 - **Skill** — `everme-memory`, tells Codex when to read those resources so
   recall happens without explicit prompting.
-
-> **Write side**: the MCP server also exposes `mem_save_fact` (user
-> profile facts) and `mem_save_turn` (conversation trajectories) as MCP
-> Tools, but Codex's current LLM tool surface is biased toward Resources;
-> automatic save from inside Codex is not guaranteed in this iteration.
-> Save reliably from Claude Code, Cursor, or the EverMe web UI.
+- **Native hooks** — SessionStart loads the profile, UserPromptSubmit recalls
+  relevant memory, Stop saves the latest turn, and PreCompact flushes pending
+  extraction. Hook failures are non-blocking and redact credentials.
 
 ## Install
 
@@ -35,6 +32,10 @@ That single command:
 3. Upserts the `[plugins."everme@everme"]` and `[mcp_servers.everme.*]`
    sections of `~/.codex/config.toml` with the freshly-minted credentials.
    Unrelated sections are preserved verbatim.
+4. Writes the same hook credentials to `~/.codex/everme.env` with mode `0600`.
+
+Start a new Codex session after installation, open `/hooks`, and review and
+trust the EverMe hook commands. A changed hook command requires trust again.
 
 Re-running the command rotates the token via the server-side upsert on
 `(account_id, platform, machine_fingerprint)` and rewrites the config in
@@ -44,7 +45,9 @@ place — no manual cleanup, no `register` command, no copy-paste.
 
 Codex App and Codex CLI both read `~/.codex/config.toml`, so V1 ships a
 single `platform=codex` (no `codex-cli` / `codex-desktop` split). One
-install command, one cloud agent, one local config block.
+install command, one cloud agent, one MCP config, and one protected hook env
+file. Plugins continue to call the stable `/api/v1/mem/*` BFF contract; cloud
+memory implementation selection stays server-side.
 
 ## License
 

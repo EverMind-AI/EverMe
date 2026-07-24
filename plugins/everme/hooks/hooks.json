@@ -1,0 +1,52 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx -y @everme/codex@0.4.0 hook SessionStart",
+            "timeout": 30,
+            "statusMessage": "Loading EverMe memory"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx -y @everme/codex@0.4.0 hook UserPromptSubmit",
+            "timeout": 10,
+            "statusMessage": "Searching EverMe memory"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx -y @everme/codex@0.4.0 hook Stop",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx -y @everme/codex@0.4.0 hook PreCompact",
+            "timeout": 30,
+            "statusMessage": "Flushing EverMe memory"
+          }
+        ]
+      }
+    ]
+  }
+}

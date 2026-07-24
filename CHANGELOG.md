@@ -32,6 +32,13 @@ the open-source home for EverMe CLI and agent plugins.
 
 ### Plugins
 
+- Add native Codex lifecycle hooks to the `everme` marketplace plugin:
+  `plugins/everme/hooks/hooks.json` wires `SessionStart`, `UserPromptSubmit`,
+  `Stop`, and `PreCompact` to the `@everme/codex` hook runner, and
+  `.codex-plugin/plugin.json` now declares the `hooks` entry so
+  `codex plugin marketplace add/upgrade` installs them.
+- Include `@everme/codex`, the native EverMe lifecycle hook runner for Codex,
+  under `plugins/codex`.
 - Open-source the plugin workspace under `plugins/`.
 - Include `@everme/agent-sdk`, the shared JavaScript client and helper package.
 - Include `@everme/memory-mcp`, the generic MCP memory server.

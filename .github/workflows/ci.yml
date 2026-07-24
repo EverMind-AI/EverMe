@@ -63,8 +63,9 @@ jobs:
       - name: Validate package manifests
         working-directory: plugins
         run: |
-          node -e 'for (const f of ["package.json","agent-sdk/package.json","memory-mcp/package.json","openclaw/package.json","claude-code/package.json","cli/package.json"]) JSON.parse(require("fs").readFileSync(f,"utf8"))'
+          node -e 'for (const f of ["package.json","agent-sdk/package.json","memory-mcp/package.json","openclaw/package.json","claude-code/package.json","codex/package.json","cli/package.json"]) JSON.parse(require("fs").readFileSync(f,"utf8"))'
           node -e 'JSON.parse(require("fs").readFileSync("everme/.codex-plugin/plugin.json","utf8"))'
+          node -e 'JSON.parse(require("fs").readFileSync("everme/hooks/hooks.json","utf8"))'
 
   # ── Layer 2: Quality Gate ──────────────────────────────────────────
   cli-test:

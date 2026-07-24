@@ -1,9 +1,8 @@
 ---
 name: everme-memory
 description: |
-  Persistent memory for Codex sessions. Use whenever the user references prior
-  conversations, mentions personal facts/preferences/decisions worth keeping,
-  or starts a new session that could benefit from prior context.
+  Persistent memory for Codex sessions with native lifecycle recall and save.
+  Use MCP resources and tools when explicit memory operations are needed.
 ---
 
 # EverMe Memory (Codex)
@@ -11,6 +10,16 @@ description: |
 This skill connects you to EverMe's persistent memory across sessions.
 
 ## How memory reaches you on Codex
+
+EverMe lifecycle hooks work independently of the model-facing tool surface:
+
+- `SessionStart` injects the user's profile.
+- `UserPromptSubmit` searches and injects relevant memory.
+- `Stop` saves the latest completed turn and flushes every five turns.
+- `PreCompact` flushes pending extraction before compaction.
+
+These hooks are fail-open: a memory backend error never blocks Codex. The MCP
+server remains available for explicit reads and writes chosen by the model.
 
 Codex variants differ in what the LLM-facing tool layer surfaces:
 
@@ -21,11 +30,9 @@ Codex variants differ in what the LLM-facing tool layer surfaces:
   functions.
 - **Codex CLI** (the `codex` terminal command) — has been observed to
   expose both Resources and Tools to the LLM in practice, so
-  write-side tools such as `mem_save_fact` / `mem_save_turn` may also
-  work there.
+  `tools/call mem_save_turn` may also work there.
 
-This skill is written assuming the **Resources** path because it works
-on both. The memory server is configured under
+The memory server is configured under
 `~/.codex/config.toml::mcp_servers.everme` (auto-managed by
 `evercli plugin install codex`).
 
@@ -34,7 +41,7 @@ Two URIs are available:
 | URI | What it returns | When to read |
 |---|---|---|
 | `mem://profile` | The user's persistent profile + currently relevant memories, rendered as markdown. Equivalent to a zero-query context lookup. | **At the start of every conversation**, before responding to the first user message. Splice the returned markdown into your reasoning context so you know who you're talking to. |
-| `mem://search?q={query}&topK={topK}` | Search results across episodic memories, profile entries, recent raw messages, and agent cases/skills, rendered as markdown. Keep `q` **short** — a few keywords or one short phrase, not a long passage; `topK` defaults to 5, omit it. | **When the user references prior context** ("what did we say about X", "remember when…", "based on what we decided last week…"). |
+| `mem://search?q={query}&topK={topK}` | Search results across episodic memories, profile entries, recent raw messages, and agent cases/skills, rendered as markdown. Keep `q` **short** — a few keywords or one short phrase, not a long passage; `topK` defaults to 10, omit it. | **When the user references prior context** ("what did we say about X", "remember when…", "based on what we decided last week…"). |
 
 > **Discoverability gotcha on Codex App.** Codex App's
 > `list_mcp_resources` returns only static resources — it surfaces
@@ -48,37 +55,25 @@ Two URIs are available:
 
 ## Recommended protocol
 
-Act on these triggers **autonomously** — read/save the moment a trigger
-fires, don't wait for the user to ask you to "remember" or "recall".
+Native hooks already perform routine profile load, recall, and turn capture.
+Use these explicit MCP operations only when they add value:
 
-1. **First user message of a session**:
-   read `mem://profile` via `resources/read`. Use the returned markdown
-   silently — don't quote it back to the user verbatim, just let it
-   shape your responses (preferred coffee, project context, naming
-   conventions, etc.). Read it **once per session**, not every turn.
+1. **A fresh profile is explicitly needed**:
+   read `mem://profile` via `resources/read`. Do not repeat this every turn;
+   SessionStart already injects the normal snapshot.
 
-2. **User references prior context**:
+2. **User asks for broader or refreshed prior context**:
    read `mem://search?q=<their topic>` to fetch matching memories. Keep
-   `q` short — a few keywords or one short phrase naming the topic, not
-   the whole conversation pasted in; omit `topK` (default 5). Quote
+   `q` short — a few keywords or one short phrase naming the topic. Quote
    relevant fragments inline when answering.
 
-3. **User shares a new fact, preference, or decision**:
-   try `tools/call mem_save_fact` if your Codex variant exposes MCP
-   Tools to you. Pass either `fact` or a `messages[]` array containing
-   only `user` / `assistant` roles. Do not use `mem_save_turn` for
-   durable facts; it records conversation trajectories and does not
-   update the long-term profile. If your tool surface only carries
-   Resources (which is the common Codex App behavior), there's no
-   Resource equivalent to write back — quietly acknowledge "I'll
-   remember that for this session" and let the user know cross-session
-   persistence may need another EverMe-enabled client.
-
-4. **You want to preserve a full conversation trajectory**:
-   use `tools/call mem_save_turn` when Tools are available, especially
-   when preserving assistant tool calls and tool results. Prefer the
-   `messages[]` form for complete user → assistant → tool → assistant
-   round trips.
+3. **A durable fact should be saved immediately**:
+   if your Codex variant exposes MCP Tools (Codex CLI typically does),
+   call `tools/call mem_save_fact` with that fact — it writes the user's
+   long-term profile (the block loaded at session start). Use
+   `tools/call mem_save_turn` instead when you want to record the
+   conversation trajectory (how a task was solved), not a profile fact.
+   Normal completed turns are already captured by Stop.
 
 ## When NOT to call these resources
 
@@ -96,12 +91,9 @@ fires, don't wait for the user to ask you to "remember" or "recall".
 
 ## Limitations
 
-- **Recall is reliable, save is variant-dependent.** Reading
-  `mem://profile` / `mem://search` works on every Codex build that
-  bridges MCP Resources to the LLM. Writing via `mem_save_fact` or
-  `mem_save_turn` requires the variant to also bridge MCP Tools —
-  Codex CLI has been observed to do this; Codex App typically doesn't.
-  Always attempt Tools and gracefully degrade.
+- Explicit MCP writes remain variant-dependent because the host must expose
+  MCP Tools. Native hook turn capture does not depend on MCP Tool exposure.
+- Hooks run only after the user reviews and trusts them in `/hooks`.
 - The MCP server uses credentials written by `evercli plugin install
   codex` into `~/.codex/config.toml`. If recall returns 401 or empty
   results across sessions, run `evercli plugin install codex` again to
