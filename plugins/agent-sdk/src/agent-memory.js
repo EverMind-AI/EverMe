@@ -19,22 +19,43 @@ export const AGENT_MEMORY_TOOL_CALL_TYPES = Object.freeze({
   FUNCTION: "function",
 });
 
+// The gateway rejects any /mem/agent-memory request carrying more than this
+// many messages. Keep in sync with the server-side validation limit.
+export const MAX_MESSAGES_PER_REQUEST = 500;
+
 export async function saveAgentMemory(client, { conversationId, messages = [], flush = true } = {}, log = { info() {}, warn() {} }) {
-  if (!conversationId || !messages.length) return null;
+  if (!conversationId) return null;
+  const flushOnly = flush === true && messages.length === 0;
   const stamp = Date.now();
   const converted = messages
     .map((m, i) => convertAgentMessage(m, stamp + i))
     .filter(Boolean)
     .filter((m) => m.content != null || (m.toolCalls && m.toolCalls.length));
-  if (!converted.length) return null;
+  if (!converted.length && !flushOnly) return null;
 
-  const res = await client.request("POST", "/mem/agent-memory", {
-    conversationId,
-    messages: converted,
-    flush,
-  });
-  log.info?.(`[everme] saveAgentMemory ok: messages=${converted.length} flushed=${Boolean(res?.flushed)}`);
+  // Whole-session uploads (e.g. a kimicode SessionEnd) can exceed the
+  // gateway's per-request message cap, which would reject — and lose — the
+  // entire session. Split into sequential batches; only the final batch
+  // carries the caller's flush flag so extraction sees the complete session,
+  // not a partial prefix. A mid-batch failure throws and surfaces to the
+  // caller instead of pretending the upload succeeded.
+  const batches = Math.max(1, Math.ceil(converted.length / MAX_MESSAGES_PER_REQUEST));
+  let res = null;
+  for (let batch = 0; batch < batches; batch += 1) {
+    const slice = converted.slice(batch * MAX_MESSAGES_PER_REQUEST, (batch + 1) * MAX_MESSAGES_PER_REQUEST);
+    const isLast = batch === batches - 1;
+    res = await client.request("POST", "/mem/agent-memory", {
+      conversationId,
+      messages: slice,
+      flush: isLast ? flush : false,
+    });
+  }
+  log.info?.(`[everme] saveAgentMemory ok: messages=${converted.length} batches=${batches} flushed=${Boolean(res?.flushed)}`);
   return res;
+}
+
+export async function flushAgentMemory(client, { conversationId } = {}, log) {
+  return saveAgentMemory(client, { conversationId, messages: [], flush: true }, log);
 }
 
 export function convertAgentMessage(msg, fallbackTimestamp) {

@@ -29,12 +29,20 @@
 export { createClient, EvermeError, redactError } from "./src/client.js";
 export {
   saveAgentMemory,
+  flushAgentMemory,
   convertAgentMessage,
   AGENT_MEMORY_ROLES,
   AGENT_MEMORY_TOOL_CALL_TYPES,
+  MAX_MESSAGES_PER_REQUEST,
 } from "./src/agent-memory.js";
+export { capRunes, MAX_CONTENT_RUNES } from "./src/truncate.js";
 export { savePersonalMemory, convertPersonalMessage } from "./src/personal-memory.js";
 export { searchMemory, getContext } from "./src/search.js";
 export { resolveConfig, assertConfigUsable, TIMEOUT_MS, UPLOAD_TIMEOUT_MS } from "./src/config.js";
 export { buildMemoryPrompt, MEMORY_TYPES, MEMORY_TYPE_LABELS } from "./src/prompt.js";
 export { toText, stripChannelMetadata, isSessionResetPrompt } from "./src/messages.js";
+export { resolveHookKnobs } from "./src/hooks/knobs.js";
+export { sanitizeRecallQuery } from "./src/hooks/query.js";
+export { createSessionState, createTurnCounter } from "./src/hooks/state.js";
+export { runHook } from "./src/hooks/runtime.js";
+export { renderProfileBlock, profileItemCount } from "./src/hooks/session-start.js";

@@ -1,6 +1,6 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { redactError } from "../hooks/scripts/lib/redact.js";
+import { redactError } from "@everme/agent-sdk";
 
 describe("redactError", () => {
   test("scrubs evt and emk tokens", () => {

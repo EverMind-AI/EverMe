@@ -10,15 +10,17 @@
  *                      (the auto-prompt). Body accepts only an optional
  *                      { forceRefresh: bool } — agent is bound from the
  *                      MemAuth token, so query/topK/agentId are no longer
- *                      forwarded. Used by the OpenClaw engine's assemble().
+ *                      forwarded. Used for queryless profile snapshots
+ *                      (Claude Code / Kimi Code SessionStart hooks);
+ *                      per-turn recall goes through searchMemory instead.
  *
  * Both endpoints accept evt_ via Bearer (MemAuth + mem:search/mem:read).
  */
 
 const noop = { info() {}, warn() {} };
 
-// Mirror the backend's max search-query limit: /mem/search rejects a
-// query longer than 1024 runes with a validation error.
+// Mirror the backend's MaxSearchQueryRunes (server/internal/biz/memory/
+// search.go): /mem/search rejects query > 1024 runes with ErrValidation.
 // Callers hand us raw user prompts that can be huge pastes (a log dump, a
 // whole file), so we clamp here — the single chokepoint to /mem/search —
 // and every surface (MCP mem_search, OpenClaw assemble, Claude Code hook)
@@ -52,7 +54,7 @@ export const QUERY_MAX_CHARS = 1024;
 export async function searchMemory(client, params, log = noop) {
   const body = {
     query: String(params.query || "").slice(0, QUERY_MAX_CHARS),
-    topK: params.topK ?? 5,
+    topK: params.topK ?? 10,
     ...(params.rankBy ? { rankBy: params.rankBy } : {}),
     ...(params.filter ? { filter: params.filter } : {}),
     ...(Array.isArray(params.memoryTypes) && params.memoryTypes.length

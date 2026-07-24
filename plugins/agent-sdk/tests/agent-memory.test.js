@@ -1,6 +1,12 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { saveAgentMemory, convertAgentMessage } from "../src/agent-memory.js";
+import {
+  saveAgentMemory,
+  flushAgentMemory,
+  convertAgentMessage,
+  EvermeError,
+  MAX_MESSAGES_PER_REQUEST,
+} from "../index.js";
 
 describe("agent memory", () => {
   test("convertAgentMessage strips channel envelope from user content", () => {
@@ -74,5 +80,123 @@ describe("agent memory", () => {
     assert.equal(calls[0].path, "/mem/agent-memory");
     assert.equal(calls[0].body.conversationId, "sess-1");
     assert.equal(calls[0].body.flush, true);
+  });
+
+  test("flushAgentMemory posts a flush-only request", async () => {
+    const calls = [];
+    const client = {
+      async request(method, path, body) {
+        calls.push({ method, path, body });
+        return { status: "accumulated", messageCount: 0, flushed: true };
+      },
+    };
+
+    const res = await flushAgentMemory(client, { conversationId: "sess-1" });
+
+    assert.equal(res.flushed, true);
+    assert.deepEqual(calls, [{
+      method: "POST",
+      path: "/mem/agent-memory",
+      body: { conversationId: "sess-1", messages: [], flush: true },
+    }]);
+  });
+
+  test("saveAgentMemory splits oversized uploads and flushes only on the last batch", async () => {
+    const calls = [];
+    const client = {
+      async request(method, path, body) {
+        calls.push({ method, path, body });
+        return { status: "accumulated", messageCount: body.messages.length, flushed: body.flush };
+      },
+    };
+    const messages = Array.from({ length: 1203 }, (_, i) => ({
+      role: "user",
+      timestamp: 1710000000000 + i,
+      content: `message ${i}`,
+    }));
+
+    const res = await saveAgentMemory(client, { conversationId: "sess-big", messages, flush: true });
+
+    assert.equal(calls.length, 3);
+    assert.deepEqual(calls.map((call) => call.body.messages.length), [500, 500, 203]);
+    assert.deepEqual(calls.map((call) => call.body.flush), [false, false, true]);
+    assert.ok(calls.every((call) => call.path === "/mem/agent-memory" && call.body.conversationId === "sess-big"));
+    assert.equal(calls[0].body.messages[0].content, "message 0");
+    assert.equal(calls[2].body.messages[202].content, "message 1202");
+    assert.equal(res.flushed, true);
+    assert.equal(MAX_MESSAGES_PER_REQUEST, 500);
+  });
+
+  test("saveAgentMemory keeps flush=false on every batch when the caller did not flush", async () => {
+    const calls = [];
+    const client = {
+      async request(method, path, body) {
+        calls.push(body);
+        return { flushed: body.flush };
+      },
+    };
+    const messages = Array.from({ length: 501 }, (_, i) => ({
+      role: "user",
+      timestamp: 1710000000000 + i,
+      content: `m${i}`,
+    }));
+
+    await saveAgentMemory(client, { conversationId: "sess-nf", messages, flush: false });
+
+    assert.deepEqual(calls.map((body) => body.flush), [false, false]);
+    assert.deepEqual(calls.map((body) => body.messages.length), [500, 1]);
+  });
+
+  test("saveAgentMemory surfaces a mid-batch failure instead of silent success", async () => {
+    const calls = [];
+    const client = {
+      async request(method, path, body) {
+        calls.push(body);
+        if (calls.length === 2) {
+          throw new EvermeError({ message: "server rejected batch", status: 500, code: 50301 });
+        }
+        return { flushed: body.flush };
+      },
+    };
+    const messages = Array.from({ length: 1100 }, (_, i) => ({
+      role: "user",
+      timestamp: 1710000000000 + i,
+      content: `m${i}`,
+    }));
+
+    await assert.rejects(
+      saveAgentMemory(client, { conversationId: "sess-fail", messages, flush: true }),
+      (error) => {
+        // Assert the numeric code, not the message: upstream error copy is
+        // known to be misleading (e.g. errno 50301's text).
+        assert.equal(error.code, 50301);
+        assert.equal(error.httpStatus, 500);
+        return true;
+      },
+    );
+    assert.equal(calls.length, 2, "stops at the failing batch; no further batches sent");
+    assert.equal(calls[0].flush, false, "no flush was issued before the failure");
+  });
+
+  test("saveAgentMemory permits an explicit flush-only request", async () => {
+    const calls = [];
+    const client = {
+      async request(method, path, body) {
+        calls.push({ method, path, body });
+        return { flushed: true };
+      },
+    };
+
+    await saveAgentMemory(client, {
+      conversationId: "sess-1",
+      messages: [],
+      flush: true,
+    });
+
+    assert.deepEqual(calls[0].body, {
+      conversationId: "sess-1",
+      messages: [],
+      flush: true,
+    });
   });
 });

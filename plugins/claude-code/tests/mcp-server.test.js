@@ -172,7 +172,7 @@ describe("mcp-server.js: tool responses are raw markdown (regression: JSON envel
       if (url === "/api/v1/mem/context") {
         // getContext returns the gateway's raw shape with a structured
         // `profile` field — renderProfileBlock turns it into markdown.
-        // Real wire shape (per lib/profile.js head comment): explicit
+        // Real wire shape consumed by the shared profile renderer: explicit
         // entries carry `{category, description, evidence?, sources?}`,
         // NOT `content`. Mocking `content` would let renderProfileBlock
         // emit an empty `<everme_profile>` block because the field-name

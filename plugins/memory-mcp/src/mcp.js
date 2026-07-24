@@ -22,9 +22,10 @@ import {
   ReadResourceRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 
-// Derive serverInfo.version from package.json so package metadata flows through
-// to what we advertise on the MCP wire. The previous hard-coded "0.1.0"
-// drifted from package.json over time.
+// Derive serverInfo.version from package.json so a release bump in
+// bump.sh flows through to what we advertise on the MCP wire. The
+// previous hard-coded "0.1.0" drifted from package.json on every
+// publish.
 const { version: PKG_VERSION } = createRequire(import.meta.url)("../package.json");
 
 // Instructions surfaced via MCP `initialize.instructions`. Hosts that
@@ -47,7 +48,7 @@ export const EVERME_MCP_INSTRUCTIONS = [
   "",
   "Keep the `mem_search` query short: a few keywords, NOT the whole",
   "conversation or the full user message pasted in — a long query searches",
-  "worse and bloats the request. Rely on the default topK of 5; only raise it",
+  "worse and bloats the request. Rely on the default topK of 10; only raise it",
   "if a first search genuinely missed. Read the profile once per session",
   "rather than re-fetching it every turn.",
   "",
@@ -70,7 +71,7 @@ export const EVERME_MCP_INSTRUCTIONS = [
 // every host that follows the skill's guidance.
 const MEM_RESOURCE_PROFILE_URI = "mem://profile";
 const MEM_RESOURCE_SEARCH_TEMPLATE = "mem://search?q={query}&topK={topK}";
-const MEM_RESOURCE_DEFAULT_TOPK = 5;
+const MEM_RESOURCE_DEFAULT_TOPK = 10;
 
 import {
   resolveConfig,
@@ -89,10 +90,10 @@ import {
  * Build the MCP server. Returns the Server instance ready to connect to
  * a transport (the bin/ entry point pairs it with a StdioServerTransport).
  */
-export function createMcpServer({ logger } = {}) {
+export function createMcpServer({ logger, config } = {}) {
   const log = logger || { info() {}, warn() {} };
-  const cfg = resolveConfig({});
-  assertConfigUsable(cfg);
+  const cfg = resolveConfig(config || {});
+  assertConfigUsable(cfg, { requireAgentId: config === undefined });
 
   const client = createClient(cfg, log);
 
@@ -127,7 +128,7 @@ export function createMcpServer({ logger } = {}) {
           "Keep `query` SHORT: a few keywords or one short phrase naming the " +
           "topic. Do NOT paste in the whole conversation, the full user " +
           "message, or long passages — a long query searches worse and bloats " +
-          "the request. Rely on the default topK of 5; only raise it if a " +
+          "the request. Rely on the default topK of 10; only raise it if a " +
           "first search genuinely missed.",
         inputSchema: {
           type: "object",
@@ -139,7 +140,7 @@ export function createMcpServer({ logger } = {}) {
                 "naming the topic to recall. Keep it concise; do not pass the " +
                 "whole conversation or a long passage.",
             },
-            topK: { type: "integer", description: "Max entries to return", default: 5 },
+            topK: { type: "integer", description: "Max entries to return", default: 10 },
           },
           required: ["query"],
         },
@@ -361,7 +362,7 @@ export function createMcpServer({ logger } = {}) {
           // not LLM-friendly without buildMemoryPrompt's rendering.
           const res = await searchMemory(
             client,
-            { query: args.query, topK: normalizeTopK(args.topK, cfg.topK || 5) },
+            { query: args.query, topK: normalizeTopK(args.topK, cfg.topK || 10) },
             log,
           );
           return okMarkdown(
@@ -524,7 +525,7 @@ export function createMcpServer({ logger } = {}) {
           "Search EverMe memory for entries relevant to a free-text " +
           "query. Use when the user references prior conversations " +
           "(\"what did we say about X\", \"remember when…\"). " +
-          "topK defaults to 5; omit to use the default.",
+          "topK defaults to 10; omit to use the default.",
         mimeType: "text/markdown",
       },
     ],
@@ -691,7 +692,7 @@ function normalizeTopK(value, fallback, max = MEM_RESOURCE_TOPK_MAX) {
 // `defaultTopK` lets the caller (handler) thread cfg.topK in so the
 // Resources surface returns the same number of results as the
 // equivalent mem_search Tool call. The exported test calls it without
-// the argument, in which case we fall back to MEM_RESOURCE_DEFAULT_TOPK.
+// the argument, in which case we fall back to the shared default of 10.
 function parseMemSearchURI(uri, defaultTopK) {
   const u = new URL(uri);
   const sp = u.searchParams;

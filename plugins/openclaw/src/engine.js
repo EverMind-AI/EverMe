@@ -8,8 +8,8 @@
  *   bootstrap   — assert config, init session state
  *   afterTurn   — write the raw turn through /mem/agent-memory
  *   assemble    — call getContext or searchMemory, render prompt
- *   compact     — no-op: EverMe is the source of truth, OpenClaw decides locally
- *   dispose     — drop in-memory cursors; afterTurn owns persistence
+ *   compact     — flush pending extraction before local compaction
+ *   dispose     — best-effort bounded flush, then drop in-memory cursors
  *
  * Cold-start memory (the bulk of the user's history) is uploaded by
  * evercli `import run` BEFORE the agent ever starts. This plugin only
@@ -23,6 +23,7 @@ import {
   assertConfigUsable,
   createClient,
   redactError,
+  flushAgentMemory,
   saveAgentMemory,
   searchMemory,
   toText,
@@ -32,6 +33,7 @@ import {
 } from "@everme/agent-sdk";
 
 const SESSION_TTL_MS = 2 * 60 * 60 * 1000; // 2h, matches reference
+const DISPOSE_FLUSH_TIMEOUT_MS = 3000;
 
 export function createContextEngine(pluginMeta, hostConfig, hostLogger) {
   const log = hostLogger || { info() {}, warn() {} };
@@ -137,9 +139,8 @@ export function createContextEngine(pluginMeta, hostConfig, hostLogger) {
       // periodically.
       //
       // Nth turn semantics: turnCount becomes N after this call, so we
-      // gate on the post-increment value to flush on turn 1, N+1, 2N+1,
-      // ... rather than 0-mod. flushEveryTurns=0 keeps the legacy
-      // "never auto-flush" escape hatch.
+      // gate on the post-increment value to flush on turn N, 2N, 3N, ... .
+      // flushEveryTurns=0 keeps the "never auto-flush" escape hatch.
       const nextTurn = s.turnCount + 1;
       const flush = cfg.flushEveryTurns > 0 && nextTurn % cfg.flushEveryTurns === 0;
       // Trajectory-shape telemetry. EverOS only extracts agent_case /
@@ -218,13 +219,37 @@ export function createContextEngine(pluginMeta, hostConfig, hostLogger) {
     },
 
     async compact({ sessionKey } = {}) {
-      // We don't own compaction — host's compactor decides when. Runtime
-      // writes are already handled in afterTurn via /mem/agent-memory.
       if (sessionKey) ensure(sessionKey);
-      return { ok: true, compacted: false, reason: "everme: realtime memory writes are handled by afterTurn" };
+      if (sessionKey) {
+        try {
+          await flushAgentMemory(client, { conversationId: sessionKey }, log);
+        } catch (err) {
+          log.warn(`${L} compact flush failed: ${redactError(err?.message)}`);
+        }
+      }
+      return { ok: true, compacted: false, reason: "everme: pending memory extraction flushed before compaction" };
     },
 
     async dispose({ sessionKey } = {}) {
+      const sessionKeys = sessionKey ? [sessionKey] : Array.from(sessions.keys());
+      if (sessionKeys.length) {
+        let timer;
+        try {
+          await Promise.race([
+            Promise.all(sessionKeys.map((key) => flushAgentMemory(client, { conversationId: key }, log))),
+            new Promise((_, reject) => {
+              timer = setTimeout(
+                () => reject(new Error(`flush timed out after ${DISPOSE_FLUSH_TIMEOUT_MS}ms`)),
+                DISPOSE_FLUSH_TIMEOUT_MS,
+              );
+            }),
+          ]);
+        } catch (err) {
+          log.warn(`${L} dispose flush failed: ${redactError(err?.message)}`);
+        } finally {
+          clearTimeout(timer);
+        }
+      }
       if (sessionKey) {
         sessions.delete(sessionKey);
       } else {

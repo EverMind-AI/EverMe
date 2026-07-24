@@ -18,11 +18,15 @@
 
 import { createInterface } from "readline";
 import { createRequire } from "node:module";
-import { buildMemoryPrompt } from "@everme/agent-sdk";
-import { searchMemories, getContext, EvermeError } from "./lib/api.js";
-import { isConfigured } from "./lib/config.js";
-import { renderProfileBlock } from "./lib/profile.js";
-import { redactError, debug } from "./lib/redact.js";
+import {
+  buildMemoryPrompt,
+  createClient,
+  searchMemory,
+  renderProfileBlock,
+  redactError,
+  EvermeError,
+} from "@everme/agent-sdk";
+import { getConfig, isConfigured } from "./lib/config.js";
 
 // Derive serverInfo.version from package.json so the value tracks the
 // plugin release rather than rotting as a hard-coded literal. We sit at
@@ -41,6 +45,12 @@ const { version: PKG_VERSION } = createRequire(import.meta.url)("../../package.j
 // Claude Code already negotiates "2025-03-26".
 const SUPPORTED_PROTOCOL_VERSIONS = new Set(["2024-11-05", "2025-03-26"]);
 const LATEST_PROTOCOL_VERSION = "2025-03-26";
+let client;
+
+function getClient() {
+  if (!client) client = createClient(getConfig());
+  return client;
+}
 
 const TOOLS = [
   {
@@ -59,12 +69,12 @@ const TOOLS = [
   {
     name: "everme_context",
     description:
-      "Fetch the server-rendered context block (profile + recent episodes) the gateway uses for prompt injection. Useful when you want a single ready-to-paste summary. Params: query (optional), topK (default 5).",
+      "Fetch the server-rendered context block (profile + recent episodes) the gateway uses for prompt injection. Useful when you want a single ready-to-paste summary. Params: query (optional), topK (default 10).",
     inputSchema: {
       type: "object",
       properties: {
         query: { type: "string", description: "Optional query for relevance-biased context" },
-        topK: { type: "number", description: "Max items to include (default 5)" },
+        topK: { type: "number", description: "Max items to include (default 10)" },
       },
     },
   },
@@ -99,7 +109,7 @@ const handlers = {
           // host LLM to peel a JSON envelope and decode escaped
           // newlines before any of the section bullets were readable.
           const topK = Math.min(Number(args.topK) || 10, 25);
-          const res = await searchMemories(String(args.query || ""), { topK });
+          const res = await searchMemory(getClient(), { query: String(args.query || ""), topK });
           const body = buildMemoryPrompt(res, { wrapInCodeBlock: false });
           const header = `## EverMe search results for "${String(args.query || "")}"`;
           const trimmed = body.replace(/^## Relevant memory\n\n?/, "");
@@ -116,7 +126,7 @@ const handlers = {
           // uses for the SessionStart hook injection) so the Tools
           // path matches what users already see in the injected
           // <everme_profile> block.
-          const res = await getContext(String(args.query || ""), {});
+          const res = await getClient().request("POST", "/mem/context", {});
           // renderProfileBlock returns "" when profile exists but has no
           // facts/traits yet (new account). Check the rendered output, not
           // just the wrapper object, so the empty case yields a fallback
@@ -130,7 +140,6 @@ const handlers = {
       }
     } catch (err) {
       const safe = redactError(err instanceof EvermeError ? err.message : err?.message || String(err));
-      debug("mcp", `tool ${name} failed:`, safe);
       return errResp(safe);
     }
   },
@@ -177,5 +186,3 @@ function respond(id, result, error) {
     : { jsonrpc: "2.0", id, result };
   process.stdout.write(JSON.stringify(env) + "\n");
 }
-
-debug("mcp", "everme MCP server ready");

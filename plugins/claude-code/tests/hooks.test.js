@@ -128,7 +128,7 @@ describe("inject-memories.js: UserPromptSubmit hook contract", () => {
         return {
           json: {
             items: [{ summary: "user prefers Go for backend", type: "episodic_memory", score: 0.9 }],
-            profiles: [],
+            profiles: [{ profileData: { embed_text: "hidden passive profile" } }],
             rawMessages: [],
             agentMemory: { cases: [], skills: [] },
           },
@@ -142,7 +142,7 @@ describe("inject-memories.js: UserPromptSubmit hook contract", () => {
   test("reads data.prompt from stdin and POSTs to /mem/search", async () => {
     // Documented CC payload shape: { prompt, transcript_path, cwd, ... }
     const ccPayload = {
-      prompt: "What backend language do I prefer?",
+      prompt: "/ask <everme_recall>old recall</everme_recall> What backend language do I prefer?",
       transcript_path: "/tmp/claude-transcripts/abc.jsonl",
       cwd: "/home/user/proj",
       session_id: "sess-1",
@@ -163,10 +163,12 @@ describe("inject-memories.js: UserPromptSubmit hook contract", () => {
       "What backend language do I prefer?",
       "search query must be the user's prompt from stdin",
     );
+    assert.equal(searchCalls[0].body.topK, 10, "shared hook default must request topK=10");
 
     const parsed = JSON.parse(stdout);
     assert.equal(parsed.hookSpecificOutput.hookEventName, "UserPromptSubmit");
     assert.match(parsed.hookSpecificOutput.additionalContext, /everme_recall/);
+    assert.doesNotMatch(parsed.hookSpecificOutput.additionalContext, /hidden passive profile/);
     assert.match(parsed.systemMessage, /Recalling 1 relevant memory/);
   });
 
@@ -225,9 +227,9 @@ describe("inject-memories.js: UserPromptSubmit hook contract", () => {
       );
       assert.equal(code, 0, "hook must never block on backend failure");
       // CONTRACT (silent-fail visibility): a degraded run prints one
-      // WARN line so the user sees something is wrong without setting
-      // EVERME_DEBUG=1. This guards the OpenClaw-style "looks healthy
-      // but isn't" failure mode at the visibility layer.
+      // WARN line so the user sees something is wrong without any
+      // extra debug tooling. This guards the OpenClaw-style "looks
+      // healthy but isn't" failure mode at the visibility layer.
       assert.match(stderr, /EverMe inject hook degraded:/, "stderr must surface degraded state");
     } finally {
       await failing.close();
@@ -286,6 +288,7 @@ describe("store-memories.js: Stop hook contract", () => {
         JSON.stringify({
           type: "user",
           message: { role: "user", content: "remember I like durian" },
+          uuid: "e1b7a1a0-0000-4000-8000-000000000001",
           timestamp: "2026-05-15T08:00:00.000Z",
         }),
         JSON.stringify({
@@ -297,6 +300,7 @@ describe("store-memories.js: Stop hook contract", () => {
               { type: "tool_use", id: "toolu_remember_1", name: "memory_write", input: { fact: "user_likes_durian" } },
             ],
           },
+          uuid: "e1b7a1a0-0000-4000-8000-000000000002",
           timestamp: "2026-05-15T08:00:01.000Z",
         }),
         JSON.stringify({
@@ -305,11 +309,13 @@ describe("store-memories.js: Stop hook contract", () => {
             role: "user",
             content: [{ type: "tool_result", tool_use_id: "toolu_remember_1", content: "fact stored" }],
           },
+          uuid: "e1b7a1a0-0000-4000-8000-000000000003",
           timestamp: "2026-05-15T08:00:02.000Z",
         }),
         JSON.stringify({
           type: "assistant",
           message: { role: "assistant", content: [{ type: "text", text: "Noted." }] },
+          uuid: "e1b7a1a0-0000-4000-8000-000000000004",
           timestamp: "2026-05-15T08:00:03.000Z",
         }),
         // turn_duration marker — readTranscript waits for it to
@@ -317,14 +323,19 @@ describe("store-memories.js: Stop hook contract", () => {
         JSON.stringify({ type: "turn_duration", durationMs: 3000 }),
       ].join("\n"),
     );
+    // Real documented Stop stdin: session_id / transcript_path / cwd /
+    // hook_event_name / stop_hook_active — no turn_id field exists.
     const ccPayload = {
       transcript_path: transcriptPath,
       cwd: "/home/user/proj",
       session_id: "sess-fixture-1",
+      hook_event_name: "Stop",
+      stop_hook_active: false,
     };
     const { code, stderr } = await runHook("store-memories.js", ccPayload, {
       ...FAKE_CREDS,
       EVERME_API_BASE: backend.url,
+      EVERME_STATE_DIR: path.join(tmpDir, "state-fixture"),
     });
     assert.equal(code, 0, `expected exit 0, stderr=${stderr}`);
 
@@ -350,7 +361,76 @@ describe("store-memories.js: Stop hook contract", () => {
     assert.equal(assistantWithTool.toolCalls[0].name, "memory_write");
     const toolMsg = msgs.find((m) => m.role === "tool");
     assert.equal(toolMsg.toolCallId, "toolu_remember_1", "tool message must reference the original tool_use id");
-    assert.equal(saves[0].body.flush, true);
+    assert.equal(saves[0].body.flush, false);
+  });
+
+  test("a re-fired Stop over an unchanged transcript is deduped via the derived turn key", async () => {
+    // Claude Code sends no turn_id on Stop; dedup must work anyway, keyed
+    // on the uuid of the transcript's last event. Same stdin + same
+    // transcript twice → exactly one write.
+    const transcriptPath = writeTranscript([
+      JSON.stringify({
+        type: "user",
+        message: { role: "user", content: "dedup me" },
+        uuid: "d3d0b2c0-0000-4000-8000-00000000000a",
+        timestamp: "2026-05-15T09:00:00.000Z",
+      }),
+      JSON.stringify({ type: "turn_duration", durationMs: 1000 }),
+    ].join("\n"));
+    const ccPayload = {
+      transcript_path: transcriptPath,
+      session_id: "sess-dedup",
+      cwd: "/home/user/proj",
+      hook_event_name: "Stop",
+      stop_hook_active: false,
+    };
+    const env = {
+      ...FAKE_CREDS,
+      EVERME_API_BASE: backend.url,
+      EVERME_STATE_DIR: path.join(tmpDir, "state-dedup"),
+    };
+    const before = backend.calls.length;
+
+    const first = await runHook("store-memories.js", ccPayload, env);
+    assert.equal(first.code, 0, first.stderr);
+    const second = await runHook("store-memories.js", ccPayload, env);
+    assert.equal(second.code, 0, second.stderr);
+
+    const saves = backend.calls.slice(before).filter((call) => call.path.endsWith("/mem/agent-memory"));
+    assert.equal(saves.length, 1, "second Stop over the same transcript must be deduped");
+  });
+
+  test("enqueues each turn and flushes extraction at turn five", async () => {
+    const stateDir = path.join(tmpDir, "state-cadence");
+    const transcriptPath = path.join(tmpDir, "transcript-cadence.jsonl");
+    const before = backend.calls.length;
+    const lines = [];
+    for (let turn = 1; turn <= 5; turn++) {
+      // Each turn appends new events (fresh uuid) like a real growing
+      // transcript, so the derived turn key advances turn over turn.
+      lines.push(JSON.stringify({
+        type: "user",
+        message: { role: "user", content: `cadence test turn ${turn}` },
+        uuid: `cadence-uuid-${turn}`,
+        timestamp: `2026-05-15T08:00:0${turn}.000Z`,
+      }));
+      lines.push(JSON.stringify({ type: "turn_duration", durationMs: 1000 }));
+      writeFileSync(transcriptPath, lines.join("\n"), { mode: 0o600 });
+      const { code, stderr } = await runHook("store-memories.js", {
+        transcript_path: transcriptPath,
+        session_id: "sess-cadence",
+        hook_event_name: "Stop",
+        stop_hook_active: false,
+      }, {
+        ...FAKE_CREDS,
+        EVERME_API_BASE: backend.url,
+        EVERME_STATE_DIR: stateDir,
+      });
+      assert.equal(code, 0, stderr);
+    }
+
+    const saves = backend.calls.slice(before).filter((call) => call.path.endsWith("/mem/agent-memory"));
+    assert.deepEqual(saves.map((call) => call.body.flush), [false, false, false, false, false, true]);
   });
 
   test("missing transcript_path → exit 0, no backend call", async () => {
@@ -397,8 +477,8 @@ describe("session-start.js: SessionStart hook contract", () => {
   test("drains stdin and POSTs to /mem/context (no specific fields required)", async () => {
     const backend = await startBackend(({ path: p }) => {
       if (p.endsWith("/mem/context")) {
-        // renderProfileBlock reads `explicit_info[i].description` /
-        // `.evidence` (see hooks/scripts/lib/profile.js). Using the
+        // The shared renderProfileBlock reads `explicit_info[i].description`
+        // / `.evidence`. Using the
         // wrong key here would produce empty stdout and silently mask
         // the test, the same failure mode this whole file exists to
         // surface.
@@ -468,16 +548,14 @@ describe("session-start.js: SessionStart hook contract", () => {
 });
 
 // -------------------------------------------------------------------- //
-// session-summary.js — SessionEnd hook (intentionally no-op)
+// session-summary.js — SessionEnd hook
 // -------------------------------------------------------------------- //
 describe("session-summary.js: SessionEnd hook contract", () => {
-  test("always exits 0, no backend call (runtime persistence is Stop's job)", async () => {
-    // This hook is INTENTIONALLY a no-op — runtime memory writes
-    // happen turn-by-turn in store-memories.js via /mem/agent-memory.
-    // If someone re-introduces a /mem/sources upload here we want
-    // immediate test failure: SessionEnd uploading a markdown summary
-    // would create document sources on every session close.
-    const backend = await startBackend(() => ({ json: {} }));
+  test("flushes pending extraction without repeating messages", async () => {
+    const backend = await startBackend(({ path: requestPath }) => {
+      if (requestPath.endsWith("/mem/agent-memory")) return { json: { flushed: true } };
+      return { status: 404 };
+    });
     try {
       const { code } = await runHook(
         "session-summary.js",
@@ -485,7 +563,12 @@ describe("session-summary.js: SessionEnd hook contract", () => {
         { ...FAKE_CREDS, EVERME_API_BASE: backend.url },
       );
       assert.equal(code, 0);
-      assert.equal(backend.calls.length, 0, "SessionEnd must not call the backend");
+      assert.equal(backend.calls.length, 1);
+      assert.deepEqual(backend.calls[0].body, {
+        conversationId: "s",
+        messages: [],
+        flush: true,
+      });
     } finally {
       await backend.close();
     }

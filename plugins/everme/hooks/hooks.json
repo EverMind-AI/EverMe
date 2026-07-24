@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "npx -y @everme/codex@0.4.0 hook SessionStart",
+            "command": "npx -y @everme/codex@0.4.1 hook SessionStart",
             "timeout": 30,
             "statusMessage": "Loading EverMe memory"
           }
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "npx -y @everme/codex@0.4.0 hook UserPromptSubmit",
+            "command": "npx -y @everme/codex@0.4.1 hook UserPromptSubmit",
             "timeout": 10,
             "statusMessage": "Searching EverMe memory"
           }
@@ -30,7 +30,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "npx -y @everme/codex@0.4.0 hook Stop",
+            "command": "npx -y @everme/codex@0.4.1 hook Stop",
             "timeout": 30
           }
         ]
@@ -41,7 +41,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "npx -y @everme/codex@0.4.0 hook PreCompact",
+            "command": "npx -y @everme/codex@0.4.1 hook PreCompact",
             "timeout": 30,
             "statusMessage": "Flushing EverMe memory"
           }

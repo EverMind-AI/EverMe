@@ -14,6 +14,7 @@ function startBackend({ contextResult, searchResult, failAgentMemory = false } =
   let sourceCalls = 0;
   let agentMemoryCalls = 0;
   let lastAgentMemory = null;
+  const agentMemoryBodies = [];
   let searchCalls = 0;
   let lastSearch = null;
 
@@ -37,10 +38,8 @@ function startBackend({ contextResult, searchResult, failAgentMemory = false } =
           status: 0,
           requestId: "r",
           result: searchResult || {
-            items: [{ memcellId: "m1", episode: "prior fact about the user", relevanceScore: 0.5, timestamp: "2026-05-11T10:00:00Z" }],
+            items: [{ id: "ep1", subject: "prior fact", episode: "prior fact about the user", atomicFacts: ["prior fact about the user"], relevanceScore: 0.5, timestamp: "2026-05-11T10:00:00Z" }],
             profiles: [],
-            total: 1,
-            queryTimeMs: 1,
           },
         }));
         return;
@@ -60,6 +59,7 @@ function startBackend({ contextResult, searchResult, failAgentMemory = false } =
       if (path === "/api/v1/mem/agent-memory") {
         agentMemoryCalls++;
         lastAgentMemory = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : {};
+        agentMemoryBodies.push(lastAgentMemory);
         if (failAgentMemory) {
           res.writeHead(502, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "upstream down", status: 50101, requestId: "r" }));
@@ -112,6 +112,7 @@ function startBackend({ contextResult, searchResult, failAgentMemory = false } =
         getSourceCalls: () => sourceCalls,
         getAgentMemoryCalls: () => agentMemoryCalls,
         getLastAgentMemory: () => lastAgentMemory,
+        getAgentMemoryBodies: () => agentMemoryBodies,
         getSearchCalls: () => searchCalls,
         getLastSearch: () => lastSearch,
         close: () => new Promise((r) => srv.close(r)),
@@ -127,7 +128,6 @@ function mkEngine(baseUrl, overrides = {}) {
       apiBase: baseUrl,
       agentId: "agt_x",
       agentToken: "evt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      flushEveryTurns: 2,
       flushMaxBytes: 1024 * 1024,
       ...overrides,
     },
@@ -156,12 +156,10 @@ describe("engine", () => {
   test("assemble pulls all sections from /mem/search and renders them as systemPromptAddition", async (t) => {
     const s = await startBackend({
       searchResult: {
-        items: [{ memcellId: "m1", episode: "user mentioned having a golden retriever named Wangcai", relevanceScore: 0.6, timestamp: "2026-05-11T10:00:00Z" }],
+        items: [{ id: "ep1", subject: "golden retriever", episode: "user mentioned having a golden retriever named Wangcai", atomicFacts: ["user has a golden retriever named Wangcai"], relevanceScore: 0.6, timestamp: "2026-05-11T10:00:00Z" }],
         profiles: [{ id: "p1", profileData: { item_type: "explicit_info", embed_text: "宠物: 用户养了一只名叫旺财的金毛犬" }, relevanceScore: 0.5 }],
         rawMessages: [{ id: "r1", senderName: "alice", contentItems: [{ type: "text", text: "顺便记一下我要去京都看樱花" }], timestamp: "2026-05-11T11:00:00Z" }],
         agentMemory: { skills: [{ id: "s1", name: "双文件协同记忆更新", description: "long-term memory + daily log sync" }] },
-        total: 1,
-        queryTimeMs: 1,
       },
     });
     t.after(async () => s.close());
@@ -225,15 +223,16 @@ describe("engine", () => {
     assert.equal(s.getSourceCalls(), 0, "OpenClaw runtime must not create document sources on realtime failure");
   });
 
-  test("dispose has no pending flush after realtime save succeeds", async (t) => {
+  test("compact and dispose flush pending extraction without repeating messages", async (t) => {
     const s = await startBackend();
     t.after(async () => s.close());
     const eng = mkEngine(s.baseUrl, { flushEveryTurns: 100 });
     await eng.afterTurn({ sessionKey: "sess", messages: [{ role: "user", content: "hi" }] });
-    assert.equal(s.getSourceCalls(), 0);
+    await eng.compact({ sessionKey: "sess" });
     await eng.dispose({ sessionKey: "sess" });
     assert.equal(s.getSourceCalls(), 0);
-    assert.equal(s.getAgentMemoryCalls(), 1);
+    assert.deepEqual(s.getAgentMemoryBodies().map((body) => body.messages.length), [1, 0, 0]);
+    assert.deepEqual(s.getAgentMemoryBodies().map((body) => body.flush), [false, true, true]);
   });
 
   test("afterTurn flushes every Nth turn — interim turns send flush=false", async (t) => {
@@ -261,7 +260,33 @@ describe("engine", () => {
     assert.equal(s.getAgentMemoryCalls(), 6);
   });
 
-  test("flushEveryTurns=0 disables runtime upload", async (t) => {
+  test("default cadence flushes every fifth turn", async (t) => {
+    const s = await startBackend();
+    t.after(async () => s.close());
+    const eng = mkEngine(s.baseUrl);
+    const allMessages = [];
+    for (let i = 1; i <= 5; i++) {
+      const prePromptMessageCount = allMessages.length;
+      allMessages.push({ role: "user", content: `turn ${i}` });
+      await eng.afterTurn({ sessionKey: "sess", messages: allMessages, prePromptMessageCount });
+    }
+
+    assert.deepEqual(s.getAgentMemoryBodies().map((body) => body.flush), [false, false, false, false, true]);
+  });
+
+  test("legacy flush mode restores every-turn extraction", async (t) => {
+    const s = await startBackend();
+    t.after(async () => s.close());
+    const eng = mkEngine(s.baseUrl, { flushEveryTurns: 5, flushMode: "legacy" });
+    const messages = [{ role: "user", content: "one" }];
+    await eng.afterTurn({ sessionKey: "sess", messages, prePromptMessageCount: 0 });
+    messages.push({ role: "user", content: "two" });
+    await eng.afterTurn({ sessionKey: "sess", messages, prePromptMessageCount: 1 });
+
+    assert.deepEqual(s.getAgentMemoryBodies().map((body) => body.flush), [true, true]);
+  });
+
+  test("flushEveryTurns=0 disables turn uploads but keeps lifecycle flush", async (t) => {
     const s = await startBackend();
     t.after(async () => s.close());
     const eng = mkEngine(s.baseUrl, { flushEveryTurns: 0, flushMaxBytes: 0 });
@@ -269,9 +294,11 @@ describe("engine", () => {
       await eng.afterTurn({ sessionKey: "sess", messages: [{ role: "user", content: "x" + i }] });
     }
     assert.equal(s.getSourceCalls(), 0, "0 disables auto flush");
+    await eng.compact({ sessionKey: "sess" });
     await eng.dispose({ sessionKey: "sess" });
     assert.equal(s.getSourceCalls(), 0);
-    assert.equal(s.getAgentMemoryCalls(), 0);
+    assert.deepEqual(s.getAgentMemoryBodies().map((body) => body.messages.length), [0, 0]);
+    assert.deepEqual(s.getAgentMemoryBodies().map((body) => body.flush), [true, true]);
   });
 
   test("missing token at construction throws", () => {

@@ -32,6 +32,19 @@ the open-source home for EverMe CLI and agent plugins.
 
 ### Plugins
 
+- Release the protocol packages at 0.4.1. `@everme/memory-mcp` regains a
+  default bin (`memory-mcp`) so bare `npx -y @everme/memory-mcp@latest` — the
+  command installers write into host MCP configs — resolves the stdio server
+  again; 0.4.0's second bin had broken executable selection and MCP clients
+  saw the connection close during the initialize handshake.
+- Bump the Codex marketplace plugin (`plugins/everme`) to 0.4.1 so
+  `codex plugin marketplace add/upgrade` treats the hooks-era content as a
+  new version and refreshes installed caches; hook commands now pin
+  `@everme/codex@0.4.1`.
+- Sync `@everme/agent-sdk`, `@everme/memory-mcp`, `@everme/openclaw`, and
+  `@everme/claude-code` sources with the 0.4.1 release, including the shared
+  hook runtime under `agent-sdk/src/hooks/` and the memory MCP HTTP server
+  binary.
 - Add native Codex lifecycle hooks to the `everme` marketplace plugin:
   `plugins/everme/hooks/hooks.json` wires `SessionStart`, `UserPromptSubmit`,
   `Stop`, and `PreCompact` to the `@everme/codex` hook runner, and

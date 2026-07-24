@@ -23,6 +23,13 @@ describe("searchMemory", () => {
     assert.equal(res.requestId, "req-1");
   });
 
+  test("uses topK=10 when callers omit it", async () => {
+    let sent;
+    const client = { async request(_method, _path, body) { sent = body; return { items: [] }; } };
+    await searchMemory(client, { query: "default recall" });
+    assert.equal(sent.topK, 10);
+  });
+
   test("clamps an over-long query to the backend's MaxSearchQueryRunes", async () => {
     // The backend rejects query > 1024 runes; the SDK is the single
     // chokepoint to /mem/search, so an oversized prompt from any caller

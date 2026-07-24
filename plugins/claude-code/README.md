@@ -4,10 +4,10 @@ Automatic memory recall + persistence for Claude Code, backed by the EverMe gate
 
 ## What it does
 
-- **SessionStart** → loads recent context (profile + episodes) from past sessions and injects it as `additionalContext` for the model + a one-line `🧠 EverMe loaded N memory items` system message for you.
+- **SessionStart** → loads the profile snapshot from past sessions and injects it as `additionalContext` for the model + a one-line `🧠 EverMe loaded N memory items` system message for you.
 - **UserPromptSubmit** → searches your memory for content relevant to the prompt you just typed and injects it BEFORE the model sees the prompt. Silent when no relevant hit (no nag).
-- **Stop** → after each Claude reply, persists the just-finished raw turn (including tool calls/results) to `/mem/agent-memory`.
-- **SessionEnd** → no persistence; Stop owns runtime writes so Claude Code does not create `/mem/sources`.
+- **Stop** → persists the just-finished raw turn (including tool calls/results) with `flush:false`; every fifth turn triggers extraction.
+- **SessionEnd** → sends a flush-only request so short sessions still extract memory without repeating messages.
 
 Plus:
 
@@ -21,7 +21,7 @@ Plus:
 |---|---|---|
 | Format | Generic MCP server | Claude Code plugin (hooks + commands + skill + MCP) |
 | Recall trigger | User must call MCP tool manually | Automatic on every UserPromptSubmit |
-| Save trigger | Buffer flushes by turn-count or byte threshold | Every Stop event via realtime agent memory |
+| Save trigger | Explicit MCP tool call | Every Stop add + every fifth turn / SessionEnd extraction flush |
 | Auth | `EVERME_AGENT_TOKEN` (evt) | Recall supports `EVERME_API_KEY` or `EVERME_AGENT_TOKEN`; realtime writes require `EVERME_AGENT_TOKEN` + `EVERME_AGENT_ID` |
 | Backend | EverMe gateway (`/api/v1/mem/*`) | Same — runtime writes use `/mem/agent-memory`, not `/mem/sources` |
 
@@ -42,7 +42,7 @@ The installer:
 ## Manual install
 
 ```bash
-export EVERME_API_KEY="emk_<redacted>"                         # from EverMe Web UI
+export EVERME_API_KEY="emk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"   # from EverMe Web UI
 export EVERME_API_BASE="http://localhost:8080"                  # optional — defaults to api.everme.evermind.ai
 claude plugin install /path/to/everme/plugins/claude-code
 ```
@@ -55,7 +55,12 @@ claude plugin install /path/to/everme/plugins/claude-code
 | `EVERME_AGENT_TOKEN` | Per-machine evt — written by `evercli plugin install claude-code`. Required for realtime writes and wins over emk when both are set. |
 | `EVERME_AGENT_ID` | Required with `EVERME_AGENT_TOKEN` for realtime writes; also pins recall to a specific cloud agent. |
 | `EVERME_API_BASE` | Gateway host. Defaults to `https://api.everme.evermind.ai`. Set to `http://localhost:8080` for local dev. |
-| `EVERME_DEBUG` | `1` to print hook traces to stderr (with token redaction). |
+| `EVERME_INJECT_TOPK` | Recall rows, default `10`, clamped to `1..20`. |
+| `EVERME_INJECT_PROFILE` | `1` includes profiles in per-prompt recall; default `0` because SessionStart already injects profile. |
+| `EVERME_INJECT_MIN_SCORE` | Positive-score cutoff, default `0.1`; unscored rows remain eligible. |
+| `EVERME_FLUSH_EVERY_TURNS` | Extraction cadence, default `5`; `0` disables cadence flush. |
+| `EVERME_FLUSH_MODE` | Set `legacy` to restore every-turn flush. |
+| `EVERME_STATE_DIR` | Turn counter directory, default `~/.everme/state`; files are `0600`. |
 
 ## Verifying the install
 
@@ -85,10 +90,10 @@ hooks/scripts/store-memories.js      Stop handler
 hooks/scripts/session-start.js       SessionStart handler
 hooks/scripts/session-summary.js     SessionEnd handler
 hooks/scripts/mcp-server.js          MCP server (everme_search / everme_context tools)
-hooks/scripts/lib/api.js             Gateway HTTP client (agent-memory, search, context)
+hooks/scripts/lib/adapter.js         Claude Code stdin/transcript/stdout adapter
+hooks/scripts/lib/run-hook.js        thin shared-runtime entry helper
 hooks/scripts/lib/config.js          Env-var resolution (emk vs evt)
 hooks/scripts/lib/transcript.js      Claude Code transcript JSONL reader
-hooks/scripts/lib/redact.js          evt/emk/X-Amz-Signature scrub for logs
 commands/recall.md                   /recall slash command
 commands/everme-help.md              /everme-help slash command
 skills/memory-tools.md               always-injected skill — tells Claude how to use the tools

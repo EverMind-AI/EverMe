@@ -2,7 +2,7 @@
   "id": "@everme/openclaw",
   "name": "EverMe Memory Plugin",
   "description": "Real-time memory retrieval and persistence backed by the EverMe cloud (cold-start memory uploaded by evercli)",
-  "version": "0.3.4",
+  "version": "0.4.1",
   "kind": "context-engine",
   "contextEngine": true,
   "main": "./index.js",
@@ -31,12 +31,12 @@
       },
       "flushEveryTurns": {
         "type": "integer",
-        "description": "How many turns between auto-flush calls. 1 (default) = flush every turn so short sessions still produce agent_case/agent_skill. Larger values trade extraction freshness for fewer upstream LLM extract calls but lose extraction entirely on sessions that never reach the threshold. Set both flushEveryTurns and flushMaxBytes to 0 to disable runtime writes.",
-        "default": 1
+        "description": "How many turns between extraction flushes. Defaults to 5; compact and dispose also flush. Set both flushEveryTurns and flushMaxBytes to 0 to disable per-turn uploads while retaining lifecycle flushes. EVERME_FLUSH_MODE=legacy restores every-turn extraction.",
+        "default": 5
       },
       "flushMaxBytes": {
         "type": "integer",
-        "description": "Legacy switch. Set both flushEveryTurns and flushMaxBytes to 0 to disable runtime writes; realtime writes do not buffer by byte size.",
+        "description": "Deprecated compatibility switch. Set both flushEveryTurns and flushMaxBytes to 0 to disable per-turn uploads; realtime writes do not buffer by byte size.",
         "default": 65536
       }
     }

@@ -98,4 +98,24 @@ describe("prompt.buildMemoryPrompt", () => {
     assert.match(out, /^```memory/);
     assert.match(out, /```$/);
   });
+  test("section options can omit profiles without hiding other recall types", () => {
+    const out = buildMemoryPrompt(
+      {
+        memories: [{ type: "episodic_memory", summary: "episode" }],
+        profiles: [{ profileData: { item_type: "preference", embed_text: "profile" } }],
+        agentMemory: {
+          skills: [{ name: "skill" }],
+          cases: [{ taskIntent: "case" }],
+        },
+        rawMessages: [{ senderName: "user", contentItems: [{ text: "raw" }] }],
+      },
+      { sections: { profiles: false } },
+    );
+
+    assert.match(out, /### Episodic memory/);
+    assert.doesNotMatch(out, /### User profile/);
+    assert.match(out, /### Agent skills/);
+    assert.match(out, /### Past task cases/);
+    assert.match(out, /### Recent raw messages/);
+  });
 });

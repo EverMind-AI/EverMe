@@ -35,4 +35,33 @@ describe("mcp", { skip: !sdkAvailable && "SDK not installed" }, () => {
     // dispose currently has no buffered runtime writes, but must resolve cleanly.
     await dispose();
   });
+
+  test("createMcpServer accepts request-scoped config without an agent id", async () => {
+    const previousAgentId = process.env.EVERME_AGENT_ID;
+    const previousAgentToken = process.env.EVERME_AGENT_TOKEN;
+    const requestToken = "evt_" + "a".repeat(32);
+    delete process.env.EVERME_AGENT_ID;
+    process.env.EVERME_AGENT_TOKEN = "evt_" + "e".repeat(32);
+
+    try {
+      const { createMcpServer } = await import("../src/mcp.js");
+      const { cfg, dispose } = createMcpServer({
+        config: {
+          apiBase: "http://127.0.0.1:1",
+          agentId: "",
+          agentToken: requestToken,
+        },
+      });
+
+      assert.equal(cfg.agentId, "");
+      assert.equal(cfg.agentToken, requestToken);
+      assert.equal(cfg.baseUrl, "http://127.0.0.1:1/api/v1");
+      await dispose();
+    } finally {
+      if (previousAgentId === undefined) delete process.env.EVERME_AGENT_ID;
+      else process.env.EVERME_AGENT_ID = previousAgentId;
+      if (previousAgentToken === undefined) delete process.env.EVERME_AGENT_TOKEN;
+      else process.env.EVERME_AGENT_TOKEN = previousAgentToken;
+    }
+  });
 });

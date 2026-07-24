@@ -31,7 +31,7 @@ export const MEMORY_TYPE_LABELS = Object.freeze({
   [MEMORY_TYPES.RAW_MESSAGE]: "recent",
 });
 
-export function buildMemoryPrompt(memoriesOrBundle, { wrapInCodeBlock = false } = {}) {
+export function buildMemoryPrompt(memoriesOrBundle, { wrapInCodeBlock = false, sections: requestedSections } = {}) {
   // Accept the legacy shape (a bare memories array) and the new
   // searchMemory() bundle ({memories, profiles, rawMessages, agentMemory}).
   // The bundle path renders sub-sections under their own headers so the
@@ -42,22 +42,30 @@ export function buildMemoryPrompt(memoriesOrBundle, { wrapInCodeBlock = false } 
     ? { memories: memoriesOrBundle }
     : memoriesOrBundle || {};
 
+  const enabled = {
+    episodes: true,
+    profiles: true,
+    skills: true,
+    cases: true,
+    rawMessages: true,
+    ...requestedSections,
+  };
   const sections = [];
 
   const episodes = (bundle.memories || []).map(formatRow).filter(Boolean);
-  if (episodes.length) sections.push(["### Episodic memory", ...episodes].join("\n"));
+  if (enabled.episodes && episodes.length) sections.push(["### Episodic memory", ...episodes].join("\n"));
 
   const profiles = (bundle.profiles || []).map(formatProfile).filter(Boolean);
-  if (profiles.length) sections.push(["### User profile", ...profiles].join("\n"));
+  if (enabled.profiles && profiles.length) sections.push(["### User profile", ...profiles].join("\n"));
 
   const skills = (bundle.agentMemory?.skills || []).map(formatSkill).filter(Boolean);
-  if (skills.length) sections.push(["### Agent skills", ...skills].join("\n"));
+  if (enabled.skills && skills.length) sections.push(["### Agent skills", ...skills].join("\n"));
 
   const cases = (bundle.agentMemory?.cases || []).map(formatCase).filter(Boolean);
-  if (cases.length) sections.push(["### Past task cases", ...cases].join("\n"));
+  if (enabled.cases && cases.length) sections.push(["### Past task cases", ...cases].join("\n"));
 
   const raw = (bundle.rawMessages || []).map(formatRawMessage).filter(Boolean);
-  if (raw.length) sections.push(["### Recent raw messages", ...raw].join("\n"));
+  if (enabled.rawMessages && raw.length) sections.push(["### Recent raw messages", ...raw].join("\n"));
 
   if (!sections.length) return "";
 

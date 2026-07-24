@@ -108,7 +108,7 @@ export function getConfig() {
     apiBase: process.env.EVERME_API_BASE,
     agentId: process.env.EVERME_AGENT_ID,
     agentToken,
-    topK: 5,
+    topK: 10,
   });
 
   cached = {

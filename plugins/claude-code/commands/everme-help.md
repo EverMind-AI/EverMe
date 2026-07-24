@@ -26,6 +26,4 @@ Slash:
 MCP tools:
   everme_search     — ranked search
   everme_context    — server-rendered context block
-
-Tip: Set EVERME_DEBUG=1 to see hook traces on stderr.
 ```

@@ -163,9 +163,9 @@ describe("parseMemSearchURI", { skip: !sdkAvailable && "SDK not installed" }, ()
     assert.deepEqual(parseMemSearchURI("mem://search?q=foo&topK=10"), { query: "foo", topK: 10 });
   });
 
-  test("defaults topK to 5 when omitted", async () => {
+  test("defaults topK to 10 when omitted", async () => {
     const { parseMemSearchURI } = await import("../src/mcp.js");
-    assert.deepEqual(parseMemSearchURI("mem://search?q=foo"), { query: "foo", topK: 5 });
+    assert.deepEqual(parseMemSearchURI("mem://search?q=foo"), { query: "foo", topK: 10 });
   });
 
   test("recovers from non-numeric topK rather than throwing", async () => {
@@ -173,7 +173,7 @@ describe("parseMemSearchURI", { skip: !sdkAvailable && "SDK not installed" }, ()
     // numeric params. Falling back to the default beats throwing —
     // the host would have to special-case the failure otherwise.
     const { parseMemSearchURI } = await import("../src/mcp.js");
-    assert.deepEqual(parseMemSearchURI("mem://search?q=foo&topK=abc"), { query: "foo", topK: 5 });
+    assert.deepEqual(parseMemSearchURI("mem://search?q=foo&topK=abc"), { query: "foo", topK: 10 });
   });
 
   test("rejects parseInt prefix-eating values like 1e2 / 5xyz (regression for #11/#12)", async () => {
@@ -182,9 +182,9 @@ describe("parseMemSearchURI", { skip: !sdkAvailable && "SDK not installed" }, ()
     // default, so `topK=1e2` (LLM scientific notation for 100) returned
     // 1 result. Strict ^\d+$ regex now rejects both forms.
     const { parseMemSearchURI } = await import("../src/mcp.js");
-    assert.equal(parseMemSearchURI("mem://search?q=foo&topK=1e2").topK, 5,
+    assert.equal(parseMemSearchURI("mem://search?q=foo&topK=1e2").topK, 10,
       "topK=1e2 was silently truncated to 1; must fall back to default");
-    assert.equal(parseMemSearchURI("mem://search?q=foo&topK=5xyz").topK, 5,
+    assert.equal(parseMemSearchURI("mem://search?q=foo&topK=5xyz").topK, 10,
       "topK=5xyz was silently truncated to 5; must fall back to default");
   });
 
@@ -245,7 +245,7 @@ describe("normalizeTopK (Tools-surface guard parallel to parseMemSearchURI)", { 
 
   test("falls back when value is 0", async () => {
     const { normalizeTopK } = await import("../src/mcp.js");
-    assert.equal(normalizeTopK(0, 5), 5, "topK=0 must fall back — `??` would have let 0 through");
+    assert.equal(normalizeTopK(0, 10), 10, "topK=0 must fall back — `??` would have let 0 through");
   });
 
   test("falls back when value is negative", async () => {
@@ -717,7 +717,7 @@ describe("mem_save_fact dispatch (profile write path)", { skip: !sdkAvailable &&
       assert.equal(captured.flush, true, "flush defaults to true");
       const parsed = JSON.parse(result.content[0].text);
       assert.equal(parsed.saved, true);
-      // The tool passes through EverOS's real extraction verdict. This is
+      // The tool passes through EverOS's real verdict from the BFF. This is
       // success-shaped but NOT a profile update.
       assert.equal(parsed.status, "no_extraction");
       assert.equal(parsed.flushed, true);

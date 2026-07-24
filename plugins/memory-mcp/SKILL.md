@@ -1,19 +1,19 @@
 ---
 name: everme-memory
-description: Real-time access to EverMe memory from AI Agents (Claude Code, OpenClaw, …)
-version: 0.2.0
+description: Real-time access to EverMe cloud memory from AI Agents (Claude Code, OpenClaw, …)
+version: 0.1.0
 ---
 
 # What it gives you
 
 When this plugin is loaded, the host has these MCP tools available:
 
-| tool                | input                              | output                                        |
-|---------------------|------------------------------------|-----------------------------------------------|
-| `mem_search`        | `{ query, topK? }`                 | raw markdown text in `content[0].text`        |
-| `mem_context`       | `{ query }`                        | raw markdown text in `content[0].text`        |
-| `mem_save_fact`     | `{ fact, sessionKey?, flush? }` or `{ messages[], sessionKey?, flush? }` | JSON text with `{ saved, status, messageCount, flushed, extracted }` |
-| `mem_save_turn`     | `{ messages[], sessionKey?, flush? }` or legacy `{ role, text, ... }` | JSON text with `{ saved, status, messageCount, flushed }` |
+| tool            | input                                                          | output (markdown / JSON)                       |
+|-----------------|----------------------------------------------------------------|------------------------------------------------|
+| `mem_context`   | `{ query }`                                                    | markdown context block (profile + episodes)    |
+| `mem_search`    | `{ query, topK? }`                                             | markdown search results                        |
+| `mem_save_fact` | `{ fact \| messages, sessionKey?, flush? }`                   | `{ saved, status, extracted, … }`              |
+| `mem_save_turn` | `{ role, text \| messages, sessionKey?, toolCallId?, flush? }` | `{ saved, status, messageCount, flushed }`     |
 
 # Recommended usage
 
@@ -25,15 +25,13 @@ surface the server `instructions` still get the same guidance.
 ## At the start of a session — `mem_context`
 
 Call `mem_context` once with the user's first message as the `query`,
-before answering it. Splice the returned markdown text into your
-reasoning context (or the system prompt addition). The server already
-returns a trimmed, relevance-ranked block, so call it **once per
-session**, not on every turn.
+before answering it. Splice the returned markdown into your reasoning
+context. The server already returns a trimmed, relevance-ranked block,
+so call it **once per session**, not on every turn.
 
 ```ts
-const res = await tools.mem_context({ query: userPrompt });
-const text = res.content?.[0]?.text || "";
-if (text) systemAddition += "\n" + text;
+const context = await tools.mem_context({ query: userPrompt });
+if (context) systemAddition += "\n" + context;
 ```
 
 ## When the user references prior context — `mem_search`
@@ -46,28 +44,26 @@ user message, a long query searches worse and bloats the request. Rely
 on the default `topK` of 5; only raise it if a first search genuinely
 missed.
 
-## To save durable facts
+## When the user states a durable fact — `mem_save_fact`
 
-When the user states a preference, habit, trait, or decision that should
-survive future sessions, call `mem_save_fact`. This writes to the
-personal/profile path. Do not use `mem_save_turn` for these facts; that
-tool records conversation trajectories and does not update the profile.
+When the user says something true about themselves that should outlive
+this conversation (a preference, habit, trait, or decision), call
+`mem_save_fact` so it lands in their long-term profile. Only
+`extracted: true` confirms the fact reached the profile.
 
-## To capture conversation turns
+## To capture how a task was solved — `mem_save_turn`
 
-For MCP hosts that don't support native lifecycle hooks, call
-`mem_save_turn` to preserve the conversation trajectory. Prefer the
-`messages[]` form so assistant tool calls and tool results stay in the
-same saved trajectory. It writes synchronously through
-`/mem/agent-memory` and does not create `/mem/sources`. `sessionKey`
-becomes the conversation id; use a stable value for the whole chat.
+When a task is solved in a way worth reusing, call `mem_save_turn` with
+the trajectory. It writes synchronously through `/mem/agent-memory` and
+does not create `/mem/sources`. `sessionKey` becomes the conversation
+id; use a stable value for the whole chat.
 
 # Error handling
 
 Tools return `isError: true` with `content[0].text` carrying a short
 description on failure. Common shapes:
 
-- `auth` — `emk_*` / `evt_*` revoked or expired. Re-run `evercli auth login`
+- `auth` — emk/evt revoked or expired. Re-run `evercli auth login`
   and `evercli plugin install <agent>` to refresh.
 - `network` — backend unreachable; retry with backoff.
 - `upstream` — backend returned non-zero status. The error message
