@@ -92,6 +92,7 @@ func TestCodexMarketplaceStructure(t *testing.T) {
 			Name string `json:"name"`
 		} `json:"author"`
 		Skills    string `json:"skills"`
+		Hooks     string `json:"hooks"`
 		Interface struct {
 			DisplayName string `json:"displayName"`
 			Category    string `json:"category"`
@@ -109,30 +110,62 @@ func TestCodexMarketplaceStructure(t *testing.T) {
 	// every SKILL.md under it; an array shape ships but doesn't surface the
 	// skills at runtime.
 	assert.Equal(t, "./skills/", plugin.Skills, "skills must be a directory path string with trailing slash, matching the openai-bundled convention")
+	assert.Equal(t, "./hooks/hooks.json", plugin.Hooks, "hooks must point at the bundled Codex lifecycle registration")
 	assert.NotEmpty(t, plugin.Interface.DisplayName)
 	assert.NotEmpty(t, plugin.Interface.Category)
 
-	// Capabilities must NOT advertise "Write": the Codex App's LLM
-	// tool surface biases toward MCP Resources (read-only), so users
-	// who see "Write" in the marketplace UI then read in SKILL.md
-	// that auto-save isn't supported get burned by the mismatch.
-	// SKILL.md is the source of truth on what the plugin can do
-	// inside Codex; capabilities must agree.
+	// Native lifecycle hooks now save completed turns independently of
+	// whether the LLM chooses an MCP tool, so the marketplace capability
+	// must advertise both sides of the contract.
 	var caps struct {
 		Interface struct {
 			Capabilities []string `json:"capabilities"`
 		} `json:"interface"`
 	}
 	require.NoError(t, json.Unmarshal(pluginRaw, &caps))
-	for _, c := range caps.Interface.Capabilities {
-		assert.NotEqual(t, "Write", c,
-			"plugin.json must not declare Write capability — SKILL.md tells the model auto-save isn't available, and marketplace UI advertising Write would mislead users")
-	}
+	assert.Contains(t, caps.Interface.Capabilities, "Read")
+	assert.Contains(t, caps.Interface.Capabilities, "Write")
 
 	// 5. The skill referenced by plugin.json must actually exist on disk.
 	skillPath := filepath.Join(pluginRoot, "skills", "everme-memory", "SKILL.md")
 	_, err = os.Stat(skillPath)
 	require.NoError(t, err, "SKILL.md must exist at %s — plugin.json's skills=./skills/ is a directory scan, so the file is the only thing carrying the protocol Codex shows to the LLM", skillPath)
+
+	// 6. Hook registration must include every lifecycle event implemented
+	// by @everme/codex and use the published package command.
+	hooksPath := filepath.Join(pluginRoot, "hooks", "hooks.json")
+	hooksRaw, err := os.ReadFile(hooksPath)
+	require.NoError(t, err, "hooks.json must exist at %s", hooksPath)
+	var hooks struct {
+		Hooks map[string][]struct {
+			Hooks []struct {
+				Type    string `json:"type"`
+				Command string `json:"command"`
+				Timeout int    `json:"timeout"`
+			} `json:"hooks"`
+		} `json:"hooks"`
+	}
+	require.NoError(t, json.Unmarshal(hooksRaw, &hooks), "hooks.json must parse as JSON")
+
+	// Hook commands pin the lockstep package version (bump.sh rewrites the
+	// pin): `@latest` would force an npm registry round trip on every hook
+	// fire and can blow the per-event timeout budget on a cold cache.
+	codexPkgRaw, err := os.ReadFile(filepath.Join(pluginRoot, "..", "codex", "package.json"))
+	require.NoError(t, err, "plugins/codex/package.json must exist — it is the lockstep source for the hook command pin")
+	var codexPkg struct {
+		Version string `json:"version"`
+	}
+	require.NoError(t, json.Unmarshal(codexPkgRaw, &codexPkg))
+	require.NotEmpty(t, codexPkg.Version)
+
+	for _, event := range []string{"SessionStart", "UserPromptSubmit", "Stop", "PreCompact"} {
+		require.Len(t, hooks.Hooks[event], 1, "%s must have one registration", event)
+		require.Len(t, hooks.Hooks[event][0].Hooks, 1, "%s must have one command", event)
+		command := hooks.Hooks[event][0].Hooks[0]
+		assert.Equal(t, "command", command.Type)
+		assert.Equal(t, "npx -y @everme/codex@"+codexPkg.Version+" hook "+event, command.Command)
+		assert.Greater(t, command.Timeout, 0)
+	}
 }
 
 // TestCodexMarketplace_ConstantsAgreeWithManifest pins that the Go
