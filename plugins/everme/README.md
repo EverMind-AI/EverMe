@@ -22,20 +22,30 @@ evercli plugin install codex
 
 That single command:
 
-1. Registers this marketplace via
+1. Finds either the standalone `codex` CLI or the binary bundled with the
+   macOS ChatGPT/Codex desktop app, then registers this marketplace via
    `codex plugin marketplace add EverMind-AI/EverMe`.
    Codex's own CLI writes `[marketplaces.everme]` into `~/.codex/config.toml`
    (carrying its `source_type` / `source` / `last_updated` fields) — evercli
    does NOT overwrite this section.
-2. Calls EverMe's `POST /agents` to mint a fresh `agent_id` + `evt_*` token
+2. Runs `codex plugin add everme@everme --json` and verifies the returned
+   plugin cache contains `hooks/hooks.json` and the bundled `bin/hook.mjs`.
+3. Calls EverMe's `POST /agents` to mint a fresh `agent_id` + `evt_*` token
    bound to your machine and `platform=codex`.
-3. Upserts the `[plugins."everme@everme"]` and `[mcp_servers.everme.*]`
+4. Upserts the `[plugins."everme@everme"]` and `[mcp_servers.everme.*]`
    sections of `~/.codex/config.toml` with the freshly-minted credentials.
    Unrelated sections are preserved verbatim.
-4. Writes the same hook credentials to `~/.codex/everme.env` with mode `0600`.
+5. Writes the same hook credentials to `~/.codex/everme.env` with mode `0600`.
 
 Start a new Codex session after installation, open `/hooks`, and review and
 trust the EverMe hook commands. A changed hook command requires trust again.
+The marketplace ships a self-contained Hook runner, so execution never installs
+a package or downloads `@everme/codex` through `npx`; it only needs a Node
+runtime (>= 18) resolvable on the session `PATH`. Codex runs a hook command
+through a shell with the session working directory as its cwd, so the commands
+in `hooks/hooks.json` locate the runner through the `PLUGIN_ROOT` /
+`CLAUDE_PLUGIN_ROOT` variables Codex exports rather than through a cwd-relative
+path.
 
 Re-running the command rotates the token via the server-side upsert on
 `(account_id, platform, machine_fingerprint)` and rewrites the config in

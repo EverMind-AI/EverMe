@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "npx -y @everme/codex@0.4.1 hook SessionStart",
+            "command": "node \"${PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/bin/hook.mjs\" hook SessionStart",
             "timeout": 30,
             "statusMessage": "Loading EverMe memory"
           }
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "npx -y @everme/codex@0.4.1 hook UserPromptSubmit",
+            "command": "node \"${PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/bin/hook.mjs\" hook UserPromptSubmit",
             "timeout": 10,
             "statusMessage": "Searching EverMe memory"
           }
@@ -30,7 +30,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "npx -y @everme/codex@0.4.1 hook Stop",
+            "command": "node \"${PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/bin/hook.mjs\" hook Stop",
             "timeout": 30
           }
         ]
@@ -41,7 +41,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "npx -y @everme/codex@0.4.1 hook PreCompact",
+            "command": "node \"${PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/bin/hook.mjs\" hook PreCompact",
             "timeout": 30,
             "statusMessage": "Flushing EverMe memory"
           }

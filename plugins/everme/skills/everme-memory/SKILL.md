@@ -2,7 +2,11 @@
 name: everme-memory
 description: |
   Persistent memory for Codex sessions with native lifecycle recall and save.
-  Use MCP resources and tools when explicit memory operations are needed.
+  Use EverMe proactively when the user refers to previous conversations,
+  earlier decisions, "last time", "remember when", existing project
+  conventions, or previously solved errors, or asks to continue prior work;
+  save durable user preferences, habits, and decisions when stated. Do not
+  repeat a search when a non-empty <everme_recall> block already exists.
 ---
 
 # EverMe Memory (Codex)
@@ -40,8 +44,8 @@ Two URIs are available:
 
 | URI | What it returns | When to read |
 |---|---|---|
-| `mem://profile` | The user's persistent profile + currently relevant memories, rendered as markdown. Equivalent to a zero-query context lookup. | **At the start of every conversation**, before responding to the first user message. Splice the returned markdown into your reasoning context so you know who you're talking to. |
-| `mem://search?q={query}&topK={topK}` | Search results across episodic memories, profile entries, recent raw messages, and agent cases/skills, rendered as markdown. Keep `q` **short** — a few keywords or one short phrase, not a long passage; `topK` defaults to 10, omit it. | **When the user references prior context** ("what did we say about X", "remember when…", "based on what we decided last week…"). |
+| `mem://profile` | The user's durable Profile ONLY (preferences, habits, traits, long-term decisions), rendered as markdown. It never performs semantic search and never contains episodes, raw messages, or agent cases/skills. | **Once at the start of a conversation** when no `<everme_profile>` block was injected. Do not use it as a fallback for recalling past decisions or task context — that is `mem://search`'s job. |
+| `mem://search?q={query}&topK={topK}` | Search results across episodic memories, profile entries, agent cases/skills, and the recent raw transcript, rendered as markdown (raw rows appear under a provisional unextracted-transcript header — never quote them as established facts). Keep `q` **short** — a few keywords or one short phrase, not a long passage; `topK` defaults to 10, omit it. | **When the user references prior context** ("what did we say about X", "remember when…", "based on what we decided last week…", "did we fix this before") and the injected `<everme_recall>` block is missing, empty, or clearly unrelated. Do not repeat a search the recall block already answers, and do not repeat an identical query within the same turn. |
 
 > **Discoverability gotcha on Codex App.** Codex App's
 > `list_mcp_resources` returns only static resources — it surfaces
@@ -67,13 +71,19 @@ Use these explicit MCP operations only when they add value:
    `q` short — a few keywords or one short phrase naming the topic. Quote
    relevant fragments inline when answering.
 
-3. **A durable fact should be saved immediately**:
+3. **The user states a durable fact** (a preference, habit, trait, or
+   long-term decision — even without saying "remember this"):
    if your Codex variant exposes MCP Tools (Codex CLI typically does),
    call `tools/call mem_save_fact` with that fact — it writes the user's
-   long-term profile (the block loaded at session start). Use
+   long-term profile (the block loaded at session start). Only
+   `extracted: true` / `profileUpdated: true` in the result means the
+   profile really updated; on `no_extraction` do not tell the user the
+   fact was remembered, and do not auto-retry. Use
    `tools/call mem_save_turn` instead when you want to record the
-   conversation trajectory (how a task was solved), not a profile fact.
-   Normal completed turns are already captured by Stop.
+   conversation trajectory (how a task was solved). Chat-dual-write backends
+   may also update the profile; check `profileUpdated`. Use `mem_save_fact`
+   for a deliberate durable fact. Normal completed turns are already captured
+   by Stop.
 
 ## When NOT to call these resources
 
