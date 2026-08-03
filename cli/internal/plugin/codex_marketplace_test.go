@@ -132,7 +132,7 @@ func TestCodexMarketplaceStructure(t *testing.T) {
 	require.NoError(t, err, "SKILL.md must exist at %s — plugin.json's skills=./skills/ is a directory scan, so the file is the only thing carrying the protocol Codex shows to the LLM", skillPath)
 
 	// 6. Hook registration must include every lifecycle event implemented
-	// by @everme/codex and use the published package command.
+	// by @everme/codex and use the self-contained marketplace runner.
 	hooksPath := filepath.Join(pluginRoot, "hooks", "hooks.json")
 	hooksRaw, err := os.ReadFile(hooksPath)
 	require.NoError(t, err, "hooks.json must exist at %s", hooksPath)
@@ -147,23 +147,21 @@ func TestCodexMarketplaceStructure(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(hooksRaw, &hooks), "hooks.json must parse as JSON")
 
-	// Hook commands pin the lockstep package version (bump.sh rewrites the
-	// pin): `@latest` would force an npm registry round trip on every hook
-	// fire and can blow the per-event timeout budget on a cold cache.
-	codexPkgRaw, err := os.ReadFile(filepath.Join(pluginRoot, "..", "codex", "package.json"))
-	require.NoError(t, err, "plugins/codex/package.json must exist — it is the lockstep source for the hook command pin")
-	var codexPkg struct {
-		Version string `json:"version"`
-	}
-	require.NoError(t, json.Unmarshal(codexPkgRaw, &codexPkg))
-	require.NotEmpty(t, codexPkg.Version)
+	runnerPath := filepath.Join(pluginRoot, "bin", "hook.mjs")
+	runnerInfo, err := os.Stat(runnerPath)
+	require.NoError(t, err, "the marketplace plugin must contain its bundled Hook runner")
+	assert.False(t, runnerInfo.IsDir())
 
 	for _, event := range []string{"SessionStart", "UserPromptSubmit", "Stop", "PreCompact"} {
 		require.Len(t, hooks.Hooks[event], 1, "%s must have one registration", event)
 		require.Len(t, hooks.Hooks[event][0].Hooks, 1, "%s must have one command", event)
 		command := hooks.Hooks[event][0].Hooks[0]
 		assert.Equal(t, "command", command.Type)
-		assert.Equal(t, "npx -y @everme/codex@"+codexPkg.Version+" hook "+event, command.Command)
+		// Codex evaluates the command with the session cwd as the working
+		// directory and points at the installed plugin only through
+		// PLUGIN_ROOT / CLAUDE_PLUGIN_ROOT, so the runner path must be
+		// resolved from the environment rather than relative to cwd.
+		assert.Equal(t, `node "${PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/bin/hook.mjs" hook `+event, command.Command)
 		assert.Greater(t, command.Timeout, 0)
 	}
 }
