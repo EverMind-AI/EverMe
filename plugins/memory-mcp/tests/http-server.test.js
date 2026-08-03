@@ -151,6 +151,26 @@ async function startGateway({ holdSearchesUntil = 0 } = {}) {
       inFlightSearches -= 1;
       return;
     }
+    if (req.method === "POST" && req.url === "/api/v1/mem/agent-memory") {
+      authorizations.push(req.headers.authorization || "");
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          status: 0,
+          requestId: "req-http-agent-memory",
+          error: "",
+          result: {
+            sessionId: "agent:agt_test:conv-1",
+            status: "accumulated",
+            messageCount: 1,
+            flushed: true,
+            personalStatus: "extracted",
+            personalExtracted: true,
+          },
+        }),
+      );
+      return;
+    }
     res.writeHead(404).end();
   });
   server.listen(0, "127.0.0.1");
@@ -549,6 +569,41 @@ describe("hosted MCP Streamable HTTP transport", () => {
       assert.ok(seenSessionIds.length >= 2);
       assert.ok(seenSessionIds.every((value) => value === null));
     } finally {
+      await stopServer(hosted.server);
+      await stopServer(gateway.server);
+    }
+  });
+
+  test("mem_save_turn surfaces the derived profile verdict", async () => {
+    const gateway = await startGateway();
+    const hosted = await startServer({
+      apiBase: gateway.baseUrl,
+      logger: { info() {}, warn() {} },
+    });
+    const token = evtToken("p");
+    const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+    const { StreamableHTTPClientTransport } = await import(
+      "@modelcontextprotocol/sdk/client/streamableHttp.js"
+    );
+    const client = new Client(
+      { name: "everme-http-profile-test", version: "0.0.0" },
+      { capabilities: {} },
+    );
+    const transport = new StreamableHTTPClientTransport(new URL(`${hosted.baseUrl}/mcp`), {
+      requestInit: { headers: { Authorization: `Bearer ${token}` } },
+    });
+
+    try {
+      await client.connect(transport);
+      const result = await client.callTool({
+        name: "mem_save_turn",
+        arguments: { sessionKey: "conv-1", text: "deploy succeeded" },
+      });
+      const payload = JSON.parse(result.content[0].text);
+      assert.equal(payload.profileStatus, "extracted");
+      assert.equal(payload.profileUpdated, true);
+    } finally {
+      await client.close().catch(() => {});
       await stopServer(hosted.server);
       await stopServer(gateway.server);
     }

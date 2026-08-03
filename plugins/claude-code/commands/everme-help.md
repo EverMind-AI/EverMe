@@ -14,7 +14,7 @@ Auth:      EVERME_API_KEY  (account emk_*) — recall-only mode
 Gateway:   EVERME_API_BASE — defaults to https://api.everme.evermind.ai
 
 Hooks:
-  SessionStart      → loads recent context from past sessions
+  SessionStart      → loads the durable Profile snapshot
   UserPromptSubmit  → recalls relevant memories before each prompt
   Stop              → saves the last raw turn through /mem/agent-memory
   SessionEnd        → no persistence; Stop owns runtime writes
@@ -24,6 +24,8 @@ Slash:
   /everme-help      — this card
 
 MCP tools:
-  everme_search     — ranked search
-  everme_context    — server-rendered context block
+  mem_search        — hybrid search across all memory buckets
+  mem_context       — durable Profile snapshot only
+  mem_save_fact     — save a durable user fact to the Profile path
+  mem_save_turn     — save a reusable task trajectory
 ```

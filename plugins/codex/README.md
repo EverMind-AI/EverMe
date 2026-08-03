@@ -1,7 +1,9 @@
 # @everme/codex
 
-Native EverMe lifecycle hook runner for Codex. It is invoked by the EverMe
-Codex marketplace plugin and uses the stable `/api/v1/mem/*` BFF contract.
+Native EverMe lifecycle hook source for Codex. The release build bundles this
+package and `@everme/agent-sdk` into `plugins/everme/bin/hook.mjs`, which is
+shipped inside the EverMe Codex marketplace plugin and uses the stable
+`/api/v1/mem/*` BFF contract.
 
 ## Lifecycle
 
@@ -14,7 +16,18 @@ Codex marketplace plugin and uses the stable `/api/v1/mem/*` BFF contract.
 
 All hook failures are fail-open and credentials are redacted from diagnostics.
 `evercli plugin install codex` writes credentials to `~/.codex/everme.env`
-with mode `0600`; the user reviews and trusts the commands in `/hooks`.
+with mode `0600`; the user reviews and trusts the commands in `/hooks`. Hook
+execution does not install or download an npm package at runtime.
+
+## Marketplace build
+
+```bash
+npm run build:marketplace
+```
+
+The generated `../everme/bin/hook.mjs` is committed with the marketplace
+plugin. `npm test --workspace @everme/codex` rebuilds it before running the
+isolated runner test.
 
 ## Configuration
 

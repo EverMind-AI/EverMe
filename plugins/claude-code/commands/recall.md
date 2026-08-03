@@ -8,10 +8,10 @@ arguments:
 
 # EverMe · recall
 
-You have access to two MCP tools backed by the EverMe gateway:
+Use the canonical EverMe MCP tools:
 
-- `everme_search` — ranked search with subject + summary + score.
-- `everme_context` — server-rendered context block (profile + recent episodes).
+- `mem_search` — hybrid search across episodic memories, profile entries, agent cases/skills, and the recent raw transcript.
+- `mem_context` — durable Profile snapshot only; it does not search past conversations and is not needed for this command.
 
 ## Query
 
@@ -19,8 +19,9 @@ You have access to two MCP tools backed by the EverMe gateway:
 
 ## Instructions
 
-1. Call `everme_search` with the query. Start with `topK: 10`.
-2. If the top results are clearly relevant (score ≥ 0.3), summarize the matched memories briefly and use them to answer or guide the next action.
+1. Call `mem_search` with a short version of the query. Start with `topK: 10`.
+2. If the returned memories are clearly relevant, summarize them briefly and use them to answer or guide the next action.
 3. If results are weak or empty, retry once with broader keywords. If still nothing useful, say so explicitly — do not fabricate context.
-4. When citing a memory, mention its subject (or session id) so the user can trace it back via `evercli` or the EverMe Web UI.
-5. NEVER paste the entire raw memory body verbatim if it's long; quote the salient parts only.
+4. Treat rows under "Recent unextracted transcript" as provisional, not as established facts or confirmed decisions.
+5. When citing a memory, mention its subject or session id when available so the user can trace it through `evercli` or the EverMe Web UI.
+6. NEVER paste an entire long memory body verbatim; quote only the salient parts.

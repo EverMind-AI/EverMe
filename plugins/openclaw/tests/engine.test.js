@@ -172,7 +172,7 @@ describe("engine", () => {
     // All four section headers must render together.
     assert.match(r.systemPromptAddition, /Episodic memory/);
     assert.match(r.systemPromptAddition, /User profile/);
-    assert.match(r.systemPromptAddition, /Recent raw messages/);
+    assert.match(r.systemPromptAddition, /Recent unextracted transcript/);
     assert.match(r.systemPromptAddition, /Agent skills/);
     // And the per-row content survives the renderer.
     assert.match(r.systemPromptAddition, /Wangcai/);

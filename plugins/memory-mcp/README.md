@@ -11,7 +11,7 @@ If you're on:
 ## Tools exposed
 
 ```
-mem_context        server-rendered context block (profile + episodes)
+mem_context        durable user Profile snapshot only (no search, no episodes)
 mem_search         hybrid memory search (text + vector)
 mem_save_fact      durable user fact → long-term profile
 mem_save_turn      realtime trajectory write to /mem/agent-memory (no records)

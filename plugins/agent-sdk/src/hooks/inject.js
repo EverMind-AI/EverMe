@@ -1,11 +1,15 @@
 import { buildMemoryPrompt } from "../prompt.js";
 import { searchMemory } from "../search.js";
-import { sanitizeRecallQuery } from "./query.js";
+import { extractUserIntent, formatQueryStats } from "./query.js";
 
 const MIN_PROMPT_TOKENS = 3;
 
-export async function runInject({ input, client, config, search = searchMemory }) {
-  const query = sanitizeRecallQuery(input?.prompt);
+export async function runInject({ input, client, config, search = searchMemory, log }) {
+  const { query, stats } = extractUserIntent(input?.prompt);
+  // One line per recall so the host log shows what the framework contributed
+  // versus what the user asked. stderr only (stdout is the hook ABI) and
+  // lengths only — never the query text.
+  writeQueryStats(log, stats);
   if (countTokens(query) < MIN_PROMPT_TOKENS) return { block: "", count: 0 };
 
   const result = await search(client, { query, topK: config.injectTopK });
@@ -33,6 +37,22 @@ export async function runInject({ input, client, config, search = searchMemory }
     block: `<everme_recall>\n${inner}\n</everme_recall>`,
     count: countBundle(bundle, sections),
   };
+}
+
+// writeQueryStats emits the recall-query line. The hook contract owns stdout,
+// so this goes to stderr (where every host already collects diagnostics) and
+// stays a single line the operator can grep for.
+function writeQueryStats(log, stats) {
+  const line = `[everme] recall query: ${formatQueryStats(stats)}`;
+  if (typeof log?.info === "function") {
+    log.info(line);
+    return;
+  }
+  try {
+    process.stderr.write(`${line}\n`);
+  } catch {
+    // A closed stderr must never break recall.
+  }
 }
 
 function countTokens(text) {

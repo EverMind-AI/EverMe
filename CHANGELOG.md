@@ -32,6 +32,22 @@ the open-source home for EverMe CLI and agent plugins.
 
 ### Plugins
 
+- Release the protocol packages at 0.4.2. `@everme/agent-sdk` now builds the
+  recall query from the user's intent instead of the host's raw prompt
+  (stripping injected reminders and host boilerplate before searching), and
+  the memory MCP autonomy and extraction contracts are aligned with the
+  EverMe gateway.
+- Ship a self-contained Codex lifecycle Hook runner at
+  `plugins/everme/bin/hook.mjs`: installed Hooks run on the host Node
+  runtime (>= 18) instead of fetching `@everme/codex` through `npx` on every
+  lifecycle event, and Hook commands resolve the runner through the
+  `PLUGIN_ROOT` / `CLAUDE_PLUGIN_ROOT` variables Codex exports. The
+  marketplace plugin is bumped to 0.4.2 so `codex plugin marketplace
+  add/upgrade` refreshes caches still holding the 0.4.1 payload.
+- Sync `@everme/agent-sdk`, `@everme/memory-mcp`, `@everme/openclaw`,
+  `@everme/claude-code`, and `@everme/codex` sources with the published
+  0.4.2 packages, including the `@everme/codex` marketplace bundle build
+  script, and refresh the plugins lockfile.
 - Release the protocol packages at 0.4.1. `@everme/memory-mcp` regains a
   default bin (`memory-mcp`) so bare `npx -y @everme/memory-mcp@latest` — the
   command installers write into host MCP configs — resolves the stdio server

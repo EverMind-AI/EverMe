@@ -12,8 +12,8 @@
  *     `../../package.json`. A test that asserts the server responds
  *     to `initialize` would have caught it on day one.
  *
- *  2. **JSON envelope (rendering bug)** — the `everme_search` /
- *     `everme_context` tool handlers wrapped the SDK response in
+ *  2. **JSON envelope (rendering bug)** — the `mem_search` /
+ *     `mem_context` tool handlers wrapped the SDK response in
  *     `ok(JSON.stringify(res, null, 2))`, forcing the host LLM to peel
  *     a JSON envelope and decode escaped newlines before any of the
  *     section bullets were readable. The fix routes both through
@@ -135,7 +135,7 @@ describe("mcp-server.js: stdio handshake (regression: path bug)", () => {
     assert.deepEqual(init.result.capabilities?.tools, { listChanged: false });
   });
 
-  test("tools/list advertises everme_search and everme_context", async () => {
+  test("tools/list advertises exactly the canonical four tools", async () => {
     const responses = await rpc(
       { ...FAKE_CREDS, EVERME_API_BASE: "http://127.0.0.1:1" },
       [
@@ -145,8 +145,39 @@ describe("mcp-server.js: stdio handshake (regression: path bug)", () => {
       [1, 2],
     );
     const tools = responses.get(2)?.result?.tools || [];
+    const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
     const names = tools.map((t) => t.name).sort();
-    assert.deepEqual(names, ["everme_context", "everme_search"]);
+    assert.deepEqual(names, [
+      "mem_context",
+      "mem_save_fact",
+      "mem_save_turn",
+      "mem_search",
+    ]);
+    // Canonical ABI guards — keep in lockstep with @everme/memory-mcp and
+    // the Go hosted /mcp surface.
+    assert.deepEqual(byName.mem_search.inputSchema.required, ["query"]);
+    assert.equal(byName.mem_context.inputSchema.required, undefined,
+      "mem_context has no required fields — Profile-only, query deprecated/ignored");
+    assert.ok(byName.mem_context.inputSchema.properties.forceRefresh);
+    assert.equal(byName.mem_save_turn.inputSchema.properties.flush.default, true);
+    assert.equal(byName.mem_save_fact.inputSchema.properties.flush.default, true);
+  });
+
+  test("legacy everme_* tool names are rejected", async () => {
+    const responses = await rpc(
+      { ...FAKE_CREDS, EVERME_API_BASE: "http://127.0.0.1:1" },
+      [
+        { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "0" } } },
+        { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "everme_search", arguments: { query: "durian" } } },
+        { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "everme_context", arguments: {} } },
+      ],
+      [1, 2, 3],
+    );
+    for (const id of [2, 3]) {
+      const result = responses.get(id)?.result;
+      assert.equal(result?.isError, true);
+      assert.match(result?.content?.[0]?.text || "", /unknown tool/);
+    }
   });
 });
 
@@ -192,12 +223,12 @@ describe("mcp-server.js: tool responses are raw markdown (regression: JSON envel
   });
   after(async () => { await backend.close(); });
 
-  test("everme_search returns rendered markdown sections, not JSON.stringify of the bundle", async () => {
+  test("mem_search returns rendered markdown sections, not JSON.stringify of the bundle", async () => {
     const responses = await rpc(
       { ...FAKE_CREDS, EVERME_API_BASE: backend.url },
       [
         { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "0" } } },
-        { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "everme_search", arguments: { query: "durian", topK: 3 } } },
+        { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "mem_search", arguments: { query: "durian", topK: 3 } } },
       ],
       [1, 2],
     );
@@ -209,12 +240,12 @@ describe("mcp-server.js: tool responses are raw markdown (regression: JSON envel
     assert.ok(!text.includes('"memories":'), 'result text must not contain the literal `"memories":` JSON key from the searchMemory bundle');
   });
 
-  test("everme_context returns rendered profile markdown, not the gateway envelope", async () => {
+  test("mem_context returns rendered profile markdown, not the gateway envelope", async () => {
     const responses = await rpc(
       { ...FAKE_CREDS, EVERME_API_BASE: backend.url },
       [
         { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "0" } } },
-        { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "everme_context", arguments: {} } },
+        { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "mem_context", arguments: {} } },
       ],
       [1, 2],
     );
@@ -227,13 +258,138 @@ describe("mcp-server.js: tool responses are raw markdown (regression: JSON envel
   });
 });
 
-describe("mcp-server.js: everme_context empty-profile fallback (regression: empty tool result)", () => {
+describe("mcp-server.js: canonical mem_* tools", () => {
+  let backend;
+  before(async () => {
+    backend = await startBackend(({ path: url, body }) => {
+      if (url === "/api/v1/mem/search") {
+        return {
+          json: {
+            items: [{ episode: "Raven MR !103 landed with scheme C." }],
+            profiles: [],
+            rawMessages: [],
+            agentMemory: { cases: [], skills: [] },
+          },
+        };
+      }
+      if (url === "/api/v1/mem/context") {
+        return {
+          json: {
+            profile: {
+              explicit_info: Array.from({ length: 13 }, (_, index) => ({
+                category: "pet",
+                description: index === 0 ? "corgi named Bytie" : `profile fact ${index + 1}`,
+              })),
+            },
+          },
+        };
+      }
+      if (url === "/api/v1/mem/personal") {
+        return { json: { sessionId: "s", status: "no_extraction", messageCount: 1, flushed: true, extracted: false } };
+      }
+      if (url === "/api/v1/mem/agent-memory") {
+        return {
+          json: {
+            sessionId: "s",
+            status: "accumulated",
+            messageCount: body?.messages?.length || 0,
+            flushed: !!body?.flush,
+            personalStatus: "extracted",
+            personalExtracted: true,
+          },
+        };
+      }
+      return { json: {} };
+    });
+  });
+  after(async () => { await backend.close(); });
+
+  test("mem_search renders markdown and leaves memoryTypes to the gateway default", async () => {
+    const responses = await rpc(
+      { ...FAKE_CREDS, EVERME_API_BASE: backend.url },
+      [
+        { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "0" } } },
+        { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "mem_search", arguments: { query: "raven" } } },
+      ],
+      [1, 2],
+    );
+    const text = responses.get(2)?.result?.content?.[0]?.text;
+    assert.ok(text);
+    assert.match(text, /^## EverMe search results for "raven"/);
+    const call = backend.calls.find((c) => c.path === "/api/v1/mem/search");
+    assert.equal(call?.body?.memoryTypes, undefined, "no memoryTypes narrowing — the gateway default covers the full bundle");
+  });
+
+  test("mem_context forwards forceRefresh and ignores query", async () => {
+    const responses = await rpc(
+      { ...FAKE_CREDS, EVERME_API_BASE: backend.url },
+      [
+        { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "0" } } },
+        { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "mem_context", arguments: { query: "should be ignored", forceRefresh: true } } },
+      ],
+      [1, 2],
+    );
+    const text = responses.get(2)?.result?.content?.[0]?.text;
+    assert.match(text, /^```memory\n## Relevant memory/);
+    assert.match(text, /corgi named Bytie/);
+    assert.match(text, /profile fact 13/, "MCP mem_context must not inherit the hook renderer's 12-fact truncation");
+    assert.doesNotMatch(text, /<everme_profile>/, "MCP tool output follows the canonical memory-mcp markdown renderer");
+    const call = backend.calls.find((c) => c.path === "/api/v1/mem/context");
+    assert.deepEqual(call?.body, { forceRefresh: true }, "body must carry forceRefresh only — no query");
+  });
+
+  test("mem_save_fact surfaces the honest no_extraction verdict", async () => {
+    const responses = await rpc(
+      { ...FAKE_CREDS, EVERME_API_BASE: backend.url },
+      [
+        { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "0" } } },
+        { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "mem_save_fact", arguments: { fact: "loves mango iced tea" } } },
+      ],
+      [1, 2],
+    );
+    const text = responses.get(2)?.result?.content?.[0]?.text;
+    const parsed = JSON.parse(text);
+    assert.equal(parsed.saved, true);
+    assert.equal(parsed.accepted, true);
+    assert.equal(parsed.status, "no_extraction");
+    assert.equal(parsed.extracted, false);
+    assert.equal(parsed.profileUpdated, false, "no_extraction must never claim a profile update");
+    const call = backend.calls.find((c) => c.path === "/api/v1/mem/personal");
+    assert.equal(call?.body?.flush, true, "flush must default to true");
+  });
+
+  test("mem_save_turn defaults flush=true and surfaces derived profile updates", async () => {
+    const responses = await rpc(
+      { ...FAKE_CREDS, EVERME_API_BASE: backend.url },
+      [
+        { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "0" } } },
+        { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "mem_save_turn", arguments: {
+          sessionKey: "conv-1",
+          messages: [
+            { role: "user", content: "deploy to staging", timestamp: 1000 },
+            { role: "assistant", content: "deploying", timestamp: 2000, toolCalls: [{ id: "t1", name: "deploy", arguments: "{}" }] },
+            { role: "tool", content: "ok", timestamp: 3000, toolCallId: "t1" },
+          ],
+        } } },
+      ],
+      [1, 2],
+    );
+    const parsed = JSON.parse(responses.get(2)?.result?.content?.[0]?.text);
+    assert.equal(parsed.saved, true);
+    assert.equal(parsed.accepted, true);
+    assert.equal(parsed.profileStatus, "extracted");
+    assert.equal(parsed.profileUpdated, true);
+    const call = backend.calls.find((c) => c.path === "/api/v1/mem/agent-memory");
+    assert.equal(call?.body?.flush, true, "flush must default to true");
+    assert.equal(call?.body?.messages?.length, 3);
+  });
+});
+
+describe("mcp-server.js: mem_context empty-profile fallback (regression: empty tool result)", () => {
   // New EverMe accounts return /mem/context with a `profile` object that
-  // has empty `explicit_info` and `implicit_traits`. renderProfileBlock
-  // returns "" for that shape. Pre-fix the handler did
-  // `res?.profile ? renderProfileBlock(res.profile) : fallback`, which
-  // took the truthy branch on the empty object and shipped "" to the
-  // host — the LLM saw the tool 'succeed' with no content.
+  // has empty `explicit_info` and `implicit_traits`. The canonical context
+  // renderer returns "" for that shape; the handler must still surface a
+  // non-empty fallback so the host does not see a silent success.
   let backend;
   before(async () => {
     backend = await startBackend(({ path: url }) => {
@@ -250,12 +406,12 @@ describe("mcp-server.js: everme_context empty-profile fallback (regression: empt
       { ...FAKE_CREDS, EVERME_API_BASE: backend.url },
       [
         { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "0" } } },
-        { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "everme_context", arguments: {} } },
+        { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "mem_context", arguments: {} } },
       ],
       [1, 2],
     );
     const text = responses.get(2)?.result?.content?.[0]?.text;
-    assert.ok(text && text.length > 0, `everme_context must not return empty content for a profile with no facts/traits; got: ${JSON.stringify(responses.get(2))}`);
+    assert.ok(text && text.length > 0, `mem_context must not return empty content for a profile with no facts/traits; got: ${JSON.stringify(responses.get(2))}`);
     assert.match(text, /no profile available/, "empty-profile case must surface the friendly fallback message");
   });
 });

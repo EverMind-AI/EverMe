@@ -65,7 +65,10 @@ export function buildMemoryPrompt(memoriesOrBundle, { wrapInCodeBlock = false, s
   if (enabled.cases && cases.length) sections.push(["### Past task cases", ...cases].join("\n"));
 
   const raw = (bundle.rawMessages || []).map(formatRawMessage).filter(Boolean);
-  if (enabled.rawMessages && raw.length) sections.push(["### Recent raw messages", ...raw].join("\n"));
+  // Raw rows are unextracted transcript — the header must brand them as
+  // provisional so the model never quotes them as established facts.
+  // Keep the exact wording in sync with server mcphost/render.go.
+  if (enabled.rawMessages && raw.length) sections.push(["### Recent unextracted transcript — provisional, not a stable memory", ...raw].join("\n"));
 
   if (!sections.length) return "";
 

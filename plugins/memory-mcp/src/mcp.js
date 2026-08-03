@@ -5,6 +5,7 @@
  * Tools:
  *   mem_search           — full-text + vector hybrid query
  *   mem_context          — server-assembled context block for a prompt
+ *   mem_save_fact        — durable profile fact write
  *   mem_save_turn        — realtime write to /mem/agent-memory
  *
  * Build separately from bin/mcp-server.js so this file can be unit-tested
@@ -31,30 +32,25 @@ const { version: PKG_VERSION } = createRequire(import.meta.url)("../package.json
 // Instructions surfaced via MCP `initialize.instructions`. Hosts that
 // honour the field (Claude Desktop, Cursor, Codex at time of writing)
 // splice this into their system prompt, so it doubles as the autonomy
-// nudge that makes `mem_context` / `mem_save_turn` / `mem_search` get
+// nudge that makes all four memory tools get
 // called without the user having to ask.
-//
-// Constraint: `mem_context.query` is required, so the protocol below
-// MUST give the host a concrete value to pass — never tell it to call
-// the tool with no arguments.
 export const EVERME_MCP_INSTRUCTIONS = [
   "EverMe memory is connected. Act on this protocol AUTONOMOUSLY: call these",
   "tools yourself the moment a trigger below fires — never wait for the user to",
   "ask you to \"remember\" or \"recall\".",
-  "1. START of a session — on the first user message, call `mem_context` passing that message as the `query`. Loads the user's profile, preferences, and relevant prior context. Call it ONCE per session, not on every turn.",
-  "2. The user states a durable fact about themselves (a preference, habit, trait, or decision) — call `mem_save_fact` so it lands in their long-term profile.",
-  "3. You want to record how a task was solved (so future sessions can reuse the approach) — call `mem_save_turn` with the trajectory.",
-  "4. The user references earlier conversations or decisions — call `mem_search` with a SHORT query (a few keywords or one short phrase naming the topic).",
+  "1. START of a session — if the host has NOT already injected a non-empty <everme_profile> block, call `mem_context` once. It returns the user's durable Profile ONLY (no semantic search, no episodes, no raw transcript). Never re-fetch it later in the session unless the user asks to refresh the profile.",
+  "2. The user states a durable fact about themselves (a preference, habit, trait, long-term goal, or decision) — call `mem_save_fact` immediately, without being asked. Only `extracted:true` / `profileUpdated:true` in the result means the profile really updated; on `no_extraction` do NOT tell the user the fact was remembered, and do not auto-retry.",
+  "3. A task was solved in a way worth reusing — call `mem_save_turn` with the COMPLETE trajectory (user → assistant tool calls → tool results → final answer). It feeds episodic / case / skill extraction; chat-dual-write backends may also update the Profile, reported by profileUpdated.",
+  "4. The user references earlier conversations, decisions, conventions, or previously solved problems — call `mem_search` with a SHORT query. Skip it when the host already injected a non-empty, relevant <everme_recall> block this turn, and do not repeat an identical query in the same turn. Rows under the provisional unextracted-transcript header are not yet extracted — treat them as a provisional transcript, never as established facts.",
   "",
   "Keep the `mem_search` query short: a few keywords, NOT the whole",
   "conversation or the full user message pasted in — a long query searches",
   "worse and bloats the request. Rely on the default topK of 10; only raise it",
-  "if a first search genuinely missed. Read the profile once per session",
-  "rather than re-fetching it every turn.",
+  "if a first search genuinely missed.",
   "",
   "If your host exposes MCP Resources (rather than Tools) to you, the same",
   "read data is available at these URIs — read them via `resources/read`:",
-  "  mem://profile             → user profile + relevant context (equivalent to mem_context)",
+  "  mem://profile             → durable user Profile only (equivalent to mem_context)",
   "  mem://search?q={query}    → search results (equivalent to mem_search)",
   "Saving (mem_save_fact / mem_save_turn) has no Resource equivalent (MCP",
   "Resources are read-only); hosts that only expose Resources can recall but",
@@ -84,6 +80,8 @@ import {
   getContext,
   AGENT_MEMORY_ROLES,
   buildMemoryPrompt,
+  extractUserIntent,
+  formatQueryStats,
 } from "@everme/agent-sdk";
 
 /**
@@ -120,25 +118,35 @@ export function createMcpServer({ logger, config } = {}) {
         name: "mem_search",
         description:
           "Search EverMe memory for entries relevant to a free-text query. " +
-          "Returns the top-K matching entries (episodic, profile, agent_memory) " +
-          "rendered as markdown.\n\n" +
+          "Returns the top-K matching entries (episodic, profile, agent " +
+          "cases/skills, recent raw transcript) rendered as markdown; rows " +
+          "under the provisional transcript header are not yet extracted and " +
+          "must not be quoted as established facts.\n\n" +
           "Call this proactively — without being asked — whenever the user " +
-          "references prior conversations or earlier decisions (\"what did we " +
-          "say about X\", \"remember when…\", \"like last time\").\n\n" +
-          "Keep `query` SHORT: a few keywords or one short phrase naming the " +
-          "topic. Do NOT paste in the whole conversation, the full user " +
-          "message, or long passages — a long query searches worse and bloats " +
-          "the request. Rely on the default topK of 10; only raise it if a " +
-          "first search genuinely missed.",
+          "references prior conversations, earlier decisions, project " +
+          "conventions, or previously solved problems (\"what did we say " +
+          "about X\", \"remember when…\", \"like last time\", \"did we fix " +
+          "this before\", \"continue where we left off\").\n\n" +
+          "Skip the call when the host already injected a non-empty, relevant " +
+          "<everme_recall> block this turn, and do not repeat an identical " +
+          "query within the same turn.\n\n" +
+          "`query` is KEYWORDS ONLY — the topic, not the conversation. Two to " +
+          "eight words, under ~100 characters, no sentences copied from the " +
+          "transcript. Never pass the user's whole message, a file, a log, a " +
+          "diff, or your own reasoning: the search embeds whatever you send, " +
+          "so boilerplate crowds out the topic and the results get worse. " +
+          "Good: \"oauth token rotation\". Bad: the last three turns pasted " +
+          "in. Rely on the default topK of 10; only raise it if a first " +
+          "search genuinely missed.",
         inputSchema: {
           type: "object",
           properties: {
             query: {
               type: "string",
               description:
-                "Short free-text query — a few keywords or one short phrase " +
-                "naming the topic to recall. Keep it concise; do not pass the " +
-                "whole conversation or a long passage.",
+                "Keywords naming the topic to recall — two to eight words, " +
+                "under ~100 characters. Not a sentence from the transcript, " +
+                "not the user's whole message, not a pasted file or log.",
             },
             topK: { type: "integer", description: "Max entries to return", default: 10 },
           },
@@ -148,20 +156,30 @@ export function createMcpServer({ logger, config } = {}) {
       {
         name: "mem_context",
         description:
-          "Fetch a pre-rendered memory context block for a query — a single " +
-          "string ready to splice into a system prompt.\n\n" +
-          "Call this proactively at the START of a session, before answering " +
-          "the first user message. Pass that message as the query to satisfy " +
-          "the schema; the server binds the agent from auth and returns the " +
-          "user's profile and currently relevant context (the query itself " +
-          "does not filter the block). Call it ONCE per session rather than " +
-          "every turn.",
+          "Read the current user's durable Profile snapshot ONLY. This tool " +
+          "never performs semantic search and never returns episodic " +
+          "memories, raw messages, agent cases, or agent skills.\n\n" +
+          "Call it ONCE at the START of a session, and only when the host has " +
+          "not already injected a non-empty <everme_profile> block. Do not " +
+          "re-fetch it later in the session unless the user explicitly asks " +
+          "to refresh the profile (pass forceRefresh=true then). Do NOT use " +
+          "it as a fallback for recalling past decisions, old sessions, or " +
+          "task context — that is mem_search's job.",
         inputSchema: {
           type: "object",
           properties: {
-            query: { type: "string" },
+            query: {
+              type: "string",
+              description:
+                "Deprecated and ignored — mem_context never performs semantic " +
+                "search. Kept for backwards compatibility only.",
+            },
+            forceRefresh: {
+              type: "boolean",
+              default: false,
+              description: "Bypass the server-side profile cache and re-read the upstream profile.",
+            },
           },
-          required: ["query"],
         },
       },
       {
@@ -182,10 +200,15 @@ export function createMcpServer({ logger, config } = {}) {
           "EverOS only extracts agent_case / agent_skill from trajectories " +
           "that carry the full tool round-trip, so single-message-per-call " +
           "patterns silently produce zero case/skill upstream.\n\n" +
-          "By default writes are append-only (flush=false): the messages " +
-          "become raw_messages immediately searchable via mem_search, but " +
-          "episode / case / skill extraction is deferred. Pass flush=true on " +
-          "session end or when extraction must run now.",
+          "By default flush=true: the write triggers EverOS extraction into " +
+          "episodic / agent_case / agent_skill right away. Pass flush=false " +
+          "for append-only accumulation (messages land as raw_messages, " +
+          "extraction deferred to a later flush) — e.g. when saving turn by " +
+          "turn with a single flush at session end. The primary trajectory " +
+          "path extracts episodic / case / skill memory; chat-dual-write " +
+          "backends may also update the user's Profile. Check profileUpdated " +
+          "for the derived profile verdict, and use mem_save_fact for " +
+          "deliberate durable user facts.",
         inputSchema: {
           type: "object",
           properties: {
@@ -288,21 +311,23 @@ export function createMcpServer({ logger, config } = {}) {
           "states something true about themselves that should outlive this " +
           "conversation (\"I love summer\", \"I take my coffee iced\", " +
           "\"sign my docs as Alice\").\n\n" +
-          "This is the profile-producing sibling of mem_save_turn. They are " +
-          "NOT interchangeable: mem_save_turn records conversation " +
-          "trajectories (→ episodic / agent_case / agent_skill) and does NOT " +
-          "update the profile; mem_save_fact writes plain user/assistant " +
+          "This is the direct profile-producing sibling of mem_save_turn. " +
+          "They are NOT interchangeable: mem_save_turn primarily records " +
+          "conversation trajectories (→ episodic / agent_case / agent_skill), " +
+          "though chat-dual-write backends may derive a profile update; " +
+          "mem_save_fact writes plain user/assistant " +
           "turns to the personal-memory path (→ profile + episodic) and does " +
           "NOT carry tool calls. For a stated user fact, prefer this tool.\n\n" +
           "Pass either `fact` (a single statement) OR `messages` " +
-          "[{role:'user'|'assistant', content, timestamp?}]. The call is " +
-          "synchronous and returns the real EverOS verdict. Async add + " +
-          "flush can return success-shaped responses while extracting " +
-          "nothing: `status:\"no_extraction\"` and `extracted:false` mean " +
-          "the profile did NOT update even though the tool call itself " +
-          "succeeded. Only `extracted:true` confirms the fact reached the " +
-          "profile. (flush defaults to true; flush:false skips extraction " +
-          "entirely — rarely what you want.)",
+          "[{role:'user'|'assistant', content, timestamp?}]. With flush=true " +
+          "(default) the call runs the synchronous materialise path and " +
+          "returns the real EverOS verdict: `status:\"no_extraction\"` and " +
+          "`extracted:false` / `profileUpdated:false` mean the profile did " +
+          "NOT update even though the tool call itself succeeded — never " +
+          "tell the user the fact was remembered in that case, and do not " +
+          "auto-retry. Only `extracted:true` / `profileUpdated:true` " +
+          "confirms the fact reached the profile. (flush:false skips " +
+          "extraction entirely — rarely what you want.)",
         inputSchema: {
           type: "object",
           properties: {
@@ -360,23 +385,32 @@ export function createMcpServer({ logger, config } = {}) {
           // envelope before the markdown was readable. The bundle's raw
           // field names (embed_text, contentItems, taskIntent) are also
           // not LLM-friendly without buildMemoryPrompt's rendering.
+          // The query is model-authored, so the prose in the tool description
+          // is a request, not a guarantee: models do paste whole transcripts.
+          // Extract the intent (strips host blocks, folds pastes, keeps the
+          // tail) and log the reduction, so a host that keeps over-sending is
+          // visible instead of silently tanking recall relevance.
+          const { query, stats } = extractUserIntent(args.query);
+          log.info?.(`[everme] mem_search query: ${formatQueryStats(stats)}`);
           const res = await searchMemory(
             client,
-            { query: args.query, topK: normalizeTopK(args.topK, cfg.topK || 10) },
+            { query, topK: normalizeTopK(args.topK, cfg.topK || 10) },
             log,
           );
           return okMarkdown(
-            redactError(renderSearchResultsAsMarkdown(args.query, res)),
+            redactError(renderSearchResultsAsMarkdown(query, res)),
           );
         }
 
         case "mem_context": {
           // Body accepts only { forceRefresh? }; agent is bound from auth.
+          // `query` is accepted for backwards compatibility but ignored —
+          // the endpoint is Profile-only and never searches.
           // Returns raw markdown for the same reason as mem_search above
           // — getContext already pre-renders into ctx.context, so the
           // earlier JSON.stringify({context, memoryCount, ...}) wrapping
           // was pure noise the LLM had to unwrap.
-          const ctx = await getContext(client, args.query, {}, log);
+          const ctx = await getContext(client, "", { forceRefresh: args.forceRefresh === true }, log);
           const rawText = ctx?.context || "_(no profile available — your EverMe account has no extracted memories yet)_";
           return okMarkdown(redactError(rawText));
         }
@@ -415,9 +449,12 @@ export function createMcpServer({ logger, config } = {}) {
           );
           return ok({
             saved: !!res,
+            accepted: !!res,
             status: res?.status || null,
             messageCount: res?.messageCount || 0,
             flushed: !!res?.flushed,
+            profileStatus: res?.personalStatus || null,
+            profileUpdated: !!res?.personalExtracted,
           });
         }
 
@@ -463,10 +500,14 @@ export function createMcpServer({ logger, config } = {}) {
           }
           return ok({
             saved: true,
+            accepted: true,
             status: res?.status || null,
             messageCount: res?.messageCount || 0,
             flushed: !!res?.flushed,
             extracted: !!res?.extracted,
+            // profileUpdated aliases extracted — the only signal that the
+            // fact really materialised into the profile.
+            profileUpdated: !!res?.extracted,
           });
         }
 
@@ -508,9 +549,12 @@ export function createMcpServer({ logger, config } = {}) {
         uri: MEM_RESOURCE_PROFILE_URI,
         name: "EverMe user profile",
         description:
-          "Persistent user profile from EverMe — preferences, projects, " +
-          "ongoing tasks, and facts known across sessions. Read this at the " +
-          "start of every conversation to load relevant context.",
+          "The user's durable Profile snapshot ONLY — preferences, habits, " +
+          "traits, and long-term decisions known across sessions. It never " +
+          "contains episodic memories, raw messages, agent cases, or agent " +
+          "skills, and reading it never performs semantic search. Read it " +
+          "once at the start of a conversation when no <everme_profile> " +
+          "block was injected; use mem://search for historical recall.",
         mimeType: "text/markdown",
       },
     ],

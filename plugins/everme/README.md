@@ -22,20 +22,23 @@ evercli plugin install codex
 
 That single command:
 
-1. Finds either the standalone `codex` CLI or the binary bundled with the
+1. Checks that a Node runtime (>= 18) is resolvable on `PATH` — the Hook runner
+   needs it — and stops with that requirement spelled out when it is missing,
+   before registering anything or minting a token.
+2. Finds either the standalone `codex` CLI or the binary bundled with the
    macOS ChatGPT/Codex desktop app, then registers this marketplace via
    `codex plugin marketplace add EverMind-AI/EverMe`.
    Codex's own CLI writes `[marketplaces.everme]` into `~/.codex/config.toml`
    (carrying its `source_type` / `source` / `last_updated` fields) — evercli
    does NOT overwrite this section.
-2. Runs `codex plugin add everme@everme --json` and verifies the returned
+3. Runs `codex plugin add everme@everme --json` and verifies the returned
    plugin cache contains `hooks/hooks.json` and the bundled `bin/hook.mjs`.
-3. Calls EverMe's `POST /agents` to mint a fresh `agent_id` + `evt_*` token
+4. Calls EverMe's `POST /agents` to mint a fresh `agent_id` + `evt_*` token
    bound to your machine and `platform=codex`.
-4. Upserts the `[plugins."everme@everme"]` and `[mcp_servers.everme.*]`
+5. Upserts the `[plugins."everme@everme"]` and `[mcp_servers.everme.*]`
    sections of `~/.codex/config.toml` with the freshly-minted credentials.
    Unrelated sections are preserved verbatim.
-5. Writes the same hook credentials to `~/.codex/everme.env` with mode `0600`.
+6. Writes the same hook credentials to `~/.codex/everme.env` with mode `0600`.
 
 Start a new Codex session after installation, open `/hooks`, and review and
 trust the EverMe hook commands. A changed hook command requires trust again.

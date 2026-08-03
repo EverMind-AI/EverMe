@@ -116,6 +116,6 @@ describe("prompt.buildMemoryPrompt", () => {
     assert.doesNotMatch(out, /### User profile/);
     assert.match(out, /### Agent skills/);
     assert.match(out, /### Past task cases/);
-    assert.match(out, /### Recent raw messages/);
+    assert.match(out, /### Recent unextracted transcript/);
   });
 });

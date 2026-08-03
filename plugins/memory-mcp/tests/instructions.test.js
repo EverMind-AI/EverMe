@@ -1,6 +1,6 @@
 /**
  * Verifies the MCP `initialize.instructions` field is set and references
- * the three EverMe tools. Auto-skips when the SDK is not installed, same
+ * the four EverMe tools. Auto-skips when the SDK is not installed, same
  * pattern as mcp.test.js.
  *
  * Two layers of assertion:
@@ -33,6 +33,17 @@ describe("mcp instructions", { skip: !sdkAvailable && "SDK not installed" }, () 
     assert.ok(EVERME_MCP_INSTRUCTIONS.includes("mem_save_turn"), "must reference mem_save_turn");
     assert.ok(EVERME_MCP_INSTRUCTIONS.includes("mem_save_fact"), "must reference mem_save_fact");
     assert.ok(EVERME_MCP_INSTRUCTIONS.includes("mem_search"), "must reference mem_search");
+  });
+
+  test("EVERME_MCP_INSTRUCTIONS carries the autonomy-contract semantics", async () => {
+    const { EVERME_MCP_INSTRUCTIONS } = await import("../src/mcp.js");
+    assert.match(EVERME_MCP_INSTRUCTIONS, /<everme_profile>/, "must dedupe against injected profile");
+    assert.match(EVERME_MCP_INSTRUCTIONS, /<everme_recall>/, "must dedupe against injected recall");
+    assert.match(EVERME_MCP_INSTRUCTIONS, /Profile ONLY/, "must brand mem_context Profile-only");
+    assert.match(EVERME_MCP_INSTRUCTIONS, /no_extraction/, "must spell out the extraction verdict");
+    assert.match(EVERME_MCP_INSTRUCTIONS, /profileUpdated/, "must name the profileUpdated signal");
+    assert.match(EVERME_MCP_INSTRUCTIONS, /chat-dual-write/, "must describe the derived profile verdict honestly");
+    assert.match(EVERME_MCP_INSTRUCTIONS, /provisional/, "raw rows must be branded provisional");
   });
 
   test("client receives instructions over initialize", async () => {

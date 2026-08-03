@@ -11,7 +11,7 @@ Automatic memory recall + persistence for Claude Code, backed by the EverMe gate
 
 Plus:
 
-- **MCP server** exposing `everme_search` + `everme_context` tools for explicit recall.
+- **MCP server** exposing the canonical `mem_search` / `mem_context` / `mem_save_fact` / `mem_save_turn` tools for explicit recall and saves.
 - **Slash commands** `/recall <q>` and `/everme-help`.
 - **Skill** (`memory-tools`) that tells Claude when/how to use the search tool.
 
@@ -76,7 +76,7 @@ In a new Claude Code session:
 /recall the postgres composite index decision
 ```
 
-…should call `everme_search`, summarise hits, and cite memory subjects.
+…should call `mem_search`, summarise hits, and cite memory subjects.
 
 ## Files
 
@@ -89,7 +89,7 @@ hooks/scripts/inject-memories.js     UserPromptSubmit handler
 hooks/scripts/store-memories.js      Stop handler
 hooks/scripts/session-start.js       SessionStart handler
 hooks/scripts/session-summary.js     SessionEnd handler
-hooks/scripts/mcp-server.js          MCP server (everme_search / everme_context tools)
+hooks/scripts/mcp-server.js          MCP server (canonical mem_* tools)
 hooks/scripts/lib/adapter.js         Claude Code stdin/transcript/stdout adapter
 hooks/scripts/lib/run-hook.js        thin shared-runtime entry helper
 hooks/scripts/lib/config.js          Env-var resolution (emk vs evt)

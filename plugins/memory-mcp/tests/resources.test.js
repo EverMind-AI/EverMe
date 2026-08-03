@@ -333,7 +333,7 @@ describe("renderSearchResultsAsMarkdown", { skip: !sdkAvailable && "SDK not inst
         ],
       }],
     });
-    assert.match(md, /### Recent raw messages/);
+    assert.match(md, /### Recent unextracted transcript/);
     assert.match(md, /I think the bug is in the marketplace add path/);
     assert.doesNotMatch(md, /\[object Object\]/,
       "array contentItems must be unwrapped, not String()-coerced — this is the original A.3 regression");

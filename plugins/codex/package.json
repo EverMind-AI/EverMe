@@ -1,6 +1,6 @@
 {
   "name": "@everme/codex",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "type": "module",
   "description": "Native EverMe lifecycle hooks for Codex.",
   "license": "Apache-2.0",
@@ -15,6 +15,8 @@
     "node": ">=18.0.0"
   },
   "scripts": {
+    "build:marketplace": "node scripts/build-marketplace.mjs",
+    "pretest": "npm run build:marketplace",
     "test": "node --test tests/transcript.test.js tests/adapter.test.js tests/hook.test.js"
   },
   "keywords": [
@@ -38,6 +40,9 @@
     "registry": "https://registry.npmjs.org"
   },
   "dependencies": {
-    "@everme/agent-sdk": "^0.4.1"
+    "@everme/agent-sdk": "^0.4.2"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.1"
   }
 }

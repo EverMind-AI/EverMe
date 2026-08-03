@@ -172,15 +172,14 @@ describe("inject-memories.js: UserPromptSubmit hook contract", () => {
     assert.match(parsed.systemMessage, /Recalling 1 relevant memory/);
   });
 
-  test("over-long prompt is truncated to the backend query limit", async () => {
+  test("over-long prompt is clamped to the backend query limit, keeping the tail", async () => {
     const before = backend.calls.length;
     // A huge paste (log dump / whole file) must not go to /mem/search
-    // verbatim: the backend (BizMemory.Search) rejects query > 1024 runes
-    // with ErrValidation, so an uncapped prompt would make recall fail.
-    // The SDK's searchMemory clamps the query at 1024 chars (mirroring
-    // MaxSearchQueryRunes); this is the end-to-end guard that the CC
-    // recall path stays under that bound. Keep this fixture longer.
-    const longPrompt = "word ".repeat(1000); // 5000 chars
+    // verbatim: the backend caps the query at 1024 runes. The clamp keeps the
+    // END of the prompt, because framework context and pasted material sit in
+    // front of the question — a head slice would search the preamble and drop
+    // what the user actually asked.
+    const longPrompt = `${"word ".repeat(1000)}why does recall miss this?`;
     assert.ok(longPrompt.length > 1024, "fixture must exceed the cap");
     const { code, stderr } = await runHook(
       "inject-memories.js",
@@ -190,16 +189,33 @@ describe("inject-memories.js: UserPromptSubmit hook contract", () => {
     assert.equal(code, 0, `expected exit 0, stderr=${stderr}`);
     const searchCalls = backend.calls.slice(before).filter((c) => c.path.endsWith("/mem/search"));
     assert.equal(searchCalls.length, 1, "exactly one /mem/search call");
-    assert.equal(searchCalls[0].body.query.length, 1024, "query capped at MAX_QUERY_CHARS");
+    const query = searchCalls[0].body.query;
+    assert.ok(query.length <= 1024, "query must not exceed the backend's MaxSearchQueryRunes");
     assert.ok(
-      searchCalls[0].body.query.length <= 1024,
-      "query must not exceed the backend's MaxSearchQueryRunes (1024)",
+      query.endsWith("why does recall miss this?"),
+      "the user's question must survive the clamp",
     );
-    assert.equal(
-      searchCalls[0].body.query,
-      longPrompt.slice(0, 1024),
-      "query must be the prompt's leading 1024 chars, not the whole paste",
+    assert.ok(!query.startsWith("ord "), "clamp starts on a word boundary");
+  });
+
+  test("host reminder blocks never reach /mem/search", async () => {
+    const before = backend.calls.length;
+    const prompt = [
+      "<system-reminder>",
+      "Project instructions: always run make test. ".repeat(50),
+      "</system-reminder>",
+      "how do I rotate the agent token?",
+    ].join("\n");
+    const { code, stderr } = await runHook(
+      "inject-memories.js",
+      { prompt, transcript_path: "/tmp/x.jsonl" },
+      { ...FAKE_CREDS, EVERME_API_BASE: backend.url },
     );
+    assert.equal(code, 0, `expected exit 0, stderr=${stderr}`);
+    const searchCalls = backend.calls.slice(before).filter((c) => c.path.endsWith("/mem/search"));
+    assert.equal(searchCalls.length, 1);
+    assert.equal(searchCalls[0].body.query, "how do I rotate the agent token?");
+    assert.match(stderr, /recall query: raw=\d+ query=\d+/, "the hook logs the reduction to stderr");
   });
 
   test("missing prompt → exit 0 silently, no backend call", async () => {

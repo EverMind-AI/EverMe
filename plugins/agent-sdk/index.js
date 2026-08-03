@@ -42,7 +42,7 @@ export { resolveConfig, assertConfigUsable, TIMEOUT_MS, UPLOAD_TIMEOUT_MS } from
 export { buildMemoryPrompt, MEMORY_TYPES, MEMORY_TYPE_LABELS } from "./src/prompt.js";
 export { toText, stripChannelMetadata, isSessionResetPrompt } from "./src/messages.js";
 export { resolveHookKnobs } from "./src/hooks/knobs.js";
-export { sanitizeRecallQuery } from "./src/hooks/query.js";
+export { sanitizeRecallQuery, extractUserIntent, formatQueryStats, QUERY_MAX_CHARS } from "./src/hooks/query.js";
 export { createSessionState, createTurnCounter } from "./src/hooks/state.js";
 export { runHook } from "./src/hooks/runtime.js";
 export { renderProfileBlock, profileItemCount } from "./src/hooks/session-start.js";

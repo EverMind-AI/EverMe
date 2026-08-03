@@ -51,7 +51,7 @@ export async function runHostHook(event, rawInput, adapter, deps = {}) {
     if (canonicalEvent === "SessionStart") {
       result = await requireOperation(deps.runSessionStart, "runSessionStart")({ input, client, config });
     } else if (canonicalEvent === "UserPromptSubmit") {
-      result = await requireOperation(deps.runInject, "runInject")({ input, client, config, search: deps.searchMemory });
+      result = await requireOperation(deps.runInject, "runInject")({ input, client, config, search: deps.searchMemory, log: deps.log });
     } else if (canonicalEvent === "Stop") {
       const counter = deps.counter || requireOperation(deps.createTurnCounter, "createTurnCounter")({ stateDir: env.EVERME_STATE_DIR });
       result = await requireOperation(deps.runStore, "runStore")({

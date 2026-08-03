@@ -29,6 +29,8 @@ import {
   toText,
   isSessionResetPrompt,
   buildMemoryPrompt,
+  extractUserIntent,
+  formatQueryStats,
   AGENT_MEMORY_ROLES,
 } from "@everme/agent-sdk";
 
@@ -188,7 +190,14 @@ export function createContextEngine(pluginMeta, hostConfig, hostLogger) {
       pruneStale();
       if (sessionKey) ensure(sessionKey);
 
-      const query = toText(prompt) || toText(lastUser(messages || [])?.content);
+      // The host prompt is an assembled message, not a question: it can carry
+      // injected skill content, reminder blocks, and — because OpenClaw echoes
+      // the previous user message — our own memory block from last turn. Feed
+      // the extracted intent to /mem/search instead, and log the reduction so
+      // the noise contribution of this host is measurable rather than assumed.
+      const raw = toText(prompt) || toText(lastUser(messages || [])?.content);
+      const { query, stats } = extractUserIntent(raw);
+      log.info?.(`${L} assemble[${engineId}]: recall query ${formatQueryStats(stats)}`);
       if (!query || query.length < 3) return { messages, estimatedTokens: 0 };
       if (isSessionResetPrompt(query)) return { messages, estimatedTokens: 0 };
 
