@@ -345,6 +345,58 @@ func (*codexWriter) Commit(_ context.Context, plan *WritePlan, params WriteParam
 	}, nil
 }
 
+// Remove parses ~/.codex/config.toml and strips all EverMe-owned sections:
+// the MCP server, the plugin enablement, and the marketplace registration.
+// It implements the Remover interface to restore uninstall capabilities.
+func (w *codexWriter) Remove(_ context.Context, configPath string) (bool, error) {
+	// 1. Safely read the TOML file.
+	cfg, exists, err := readCodexConfig(configPath)
+	if err != nil {
+		return false, err
+	}
+	if !exists {
+		return false, nil // File doesn't exist, nothing to remove
+	}
+
+	modified := false
+
+	// 2. Strip the active MCP Server (and its nested token)
+	if mcpServers, ok := cfg["mcp_servers"].(map[string]interface{}); ok {
+		if _, present := mcpServers[codexMcpEntryName]; present {
+			delete(mcpServers, codexMcpEntryName)
+			modified = true
+		}
+	}
+
+	// 3. Strip the Plugin enablement
+	if plugins, ok := cfg["plugins"].(map[string]interface{}); ok {
+		if _, present := plugins[codexPluginSpec]; present {
+			delete(plugins, codexPluginSpec)
+			modified = true
+		}
+	}
+
+	// 4. Strip the Marketplace registration
+	if marketplaces, ok := cfg["marketplaces"].(map[string]interface{}); ok {
+		if _, present := marketplaces[codexMarketplaceName]; present {
+			delete(marketplaces, codexMarketplaceName)
+			modified = true
+		}
+	}
+
+	// If we didn't find any EverMe entries, bail out early to avoid a useless disk write
+	if !modified {
+		return false, nil
+	}
+
+	// 5. Safely write the cleaned TOML back to disk
+	if err := writeCodexConfig(configPath, cfg); err != nil {
+		return false, err
+	}
+
+	return true, nil
+}
+
 // Verify re-reads the on-disk config and asserts the three sections
 // the install workflow depends on are present:
 //   - `[marketplaces.everme]` (written by Codex CLI in Prepare)

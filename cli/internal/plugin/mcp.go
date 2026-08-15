@@ -155,6 +155,40 @@ func (m *mcpWriter) Commit(_ context.Context, plan *WritePlan, params WriteParam
 	}, nil
 }
 
+// Remove strips the everme-memory entry from the MCP JSON config if it exists.
+// It implements the Remover interface to restore uninstall capabilities.
+func (m *mcpWriter) Remove(_ context.Context, configPath string) (bool, error) {
+	// 1. Safely read the JSON. If it's malformed, readConfig returns an error.
+	cfg, exists, err := readConfig(configPath)
+	if err != nil {
+		return false, err
+	}
+	if !exists {
+		return false, nil // File doesn't exist, nothing to remove
+	}
+
+	// 2. Walk the JSON tree to find the target block (e.g., "mcpServers")
+	servers := walkServersMap(cfg, m.serversPath)
+	if servers == nil {
+		return false, nil // Parent object doesn't exist, nothing to remove
+	}
+
+	// 3. Check if the EverMe entry is actually there
+	if _, present := servers[mcpEntryName]; !present {
+		return false, nil // EverMe is not installed here
+	}
+
+	// 4. Safely delete the target key from the Go map
+	delete(servers, mcpEntryName)
+
+	// 5. Use their secure, atomic writer to save the file back to disk
+	if err := writeConfigAtomic(configPath, cfg); err != nil {
+		return false, err
+	}
+
+	return true, nil
+}
+
 // ---- helpers ---------------------------------------------------------
 
 // readConfig parses the JSON config at path. Returns (cfg, exists, err).
