@@ -23,11 +23,10 @@ const noop = { info() {}, warn() {} };
  * accidentally lands in an error message (defense-in-depth, the same
  * shape evercli's output.redact uses).
  */
-// Token regex: case-insensitive on both alphabet AND prefix. Current
-// issuance is lowercase hex but defense-in-depth covers a future
-// alphabet change without us having to chase every log/error sink.
-const evtRe = /evt_[a-zA-Z0-9]{32}/g;
-const emkRe = /emk_[a-zA-Z0-9]{32}/g;
+// Match evercli's output.redact: ≥20 chars, tolerate _/- so a future
+// key-format change (and any non-32-char token) is still masked (#7).
+const evtRe = /evt_[A-Za-z0-9_\-]{20,}/g;
+const emkRe = /emk_[A-Za-z0-9_\-]{20,}/g;
 
 // AWS S3 presigned-POST / GET URLs carry short-lived but real
 // credentials. The query-string fields below are issued for ~15 min
