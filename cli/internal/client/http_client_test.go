@@ -87,6 +87,25 @@ func TestListAgents_HappyAttachesAuthorization(t *testing.T) {
 	assert.True(t, strings.HasPrefix(auth, "Bearer emk_"), "Bearer header must be set, got %q", auth)
 }
 
+func TestNon2xxEnvelopeWithZeroStatusIsNotSuccess(t *testing.T) {
+	// A 500 whose JSON body looks like the success envelope (status omitted
+	// → unmarshals as 0) used to return err == nil and decode Result (#6).
+	srv, cli := newTestClient(t)
+	srv.Handle("POST /agents/list", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"requestId":"req-mock","result":{"items":[]}}`))
+	})
+
+	_, err := cli.ListAgents(context.Background(), client.AgentFilter{})
+	require.Error(t, err)
+
+	ce, ok := output.AsCLIError(err)
+	require.True(t, ok)
+	assert.Equal(t, output.TypeUpstream, ce.Type)
+	assert.Equal(t, http.StatusInternalServerError, ce.Code)
+}
+
 // (Me / DisconnectAgent tests retired with the slimming pass.)
 
 // ---- Auth-space errno classification --------------------------------

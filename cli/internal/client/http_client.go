@@ -276,6 +276,21 @@ func (c *httpClient) do(
 	}
 
 	if env.Status == 0 {
+		// json.Unmarshal zeroes missing `status`, so a 5xx whose body
+		// happens to look like the envelope is indistinguishable from
+		// success unless we also require a 2xx HTTP status (#6).
+		if resp.StatusCode/100 != 2 {
+			switch {
+			case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+				return output.AuthErr("unauthorized", "Run `evercli auth login` to re-authenticate", "")
+			default:
+				msg := env.Error
+				if msg == "" {
+					msg = http.StatusText(resp.StatusCode)
+				}
+				return output.Upstream(resp.StatusCode, msg, env.RequestID)
+			}
+		}
 		if out != nil && len(env.Result) > 0 && string(env.Result) != "null" {
 			if err := json.Unmarshal(env.Result, out); err != nil {
 				return output.Internal(fmt.Errorf("decode result: %w", err))
