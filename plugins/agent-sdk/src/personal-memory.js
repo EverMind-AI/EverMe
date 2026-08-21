@@ -9,6 +9,7 @@
  * — the personal endpoint ignores them.
  */
 
+import { requestMeta } from "./client.js";
 import { toText, stripChannelMetadata } from "./messages.js";
 import { capRunes } from "./truncate.js";
 
@@ -22,13 +23,13 @@ export async function savePersonalMemory(client, { conversationId, messages = []
     .filter(Boolean);
   if (!converted.length) return null;
 
-  const res = await client.request("POST", "/mem/personal", {
+  const { result: res, requestId } = await requestMeta(client, "POST", "/mem/personal", {
     conversationId,
     messages: converted,
     flush,
   });
-  log.info?.(`[everme] savePersonalMemory ok: messages=${converted.length} flushed=${Boolean(res?.flushed)}`);
-  return res;
+  log.info?.(`[everme] savePersonalMemory ok: messages=${converted.length} flushed=${Boolean(res?.flushed)} requestId=${requestId}`);
+  return res == null ? res : { ...res, requestId };
 }
 
 export function convertPersonalMessage(msg, fallbackTimestamp) {

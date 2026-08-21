@@ -17,7 +17,7 @@
 // and there are `type`/`enabled` fields — so we can't reuse mcpWriter's
 // buildEntry. We DO reuse the shared JSON read / atomic-write / TOCTOU /
 // upsert helpers from mcp.go. The entry key is the canonical
-// `everme-memory` (mcpEntryName), same as the Cursor/Gemini family.
+// `everme-memory` (mcpEntryName), same as the Cursor family.
 //
 // We only write opencode.json (not opencode.jsonc): round-tripping JSONC
 // comments through encoding/json is lossy. Documented caveat.
@@ -106,6 +106,37 @@ func newOpenCodeWriter() *opencodeWriter { return &opencodeWriter{} }
 
 func (*opencodeWriter) Platform() Platform { return PlatformOpenCode }
 
+func (*opencodeWriter) Remove(_ context.Context, configPath string) (*RemoveResult, error) {
+	abs, err := filepath.Abs(configPath)
+	if err != nil {
+		return nil, output.IOErr(configPath, "abs-path", err)
+	}
+	cfg, exists, err := readConfig(abs)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return &RemoveResult{Platform: PlatformOpenCode, ConfigPath: abs}, nil
+	}
+	if !nestedMcpServersHasEntry(cfg, opencodeServersPath, mcpEntryName) {
+		return &RemoveResult{Platform: PlatformOpenCode, ConfigPath: abs}, nil
+	}
+	// protected=true: opencode.json carries the live agent token in the
+	// MCP entry's environment, so the backup must be 0600. backupFile
+	// also propagates read errors instead of silently writing an empty
+	// .bak and then still rewriting the original.
+	backup, err := backupFile(abs, true)
+	if err != nil {
+		return nil, err
+	}
+	nestedMcpDeleteEntry(cfg, opencodeServersPath, mcpEntryName)
+	// Our token is gone from cfg by now, so leave the host's mode alone.
+	if err := writeConfigAtomic(abs, cfg, configHasNoToken); err != nil {
+		return nil, err
+	}
+	return &RemoveResult{Platform: PlatformOpenCode, ConfigPath: abs, BackupPath: backup, Removed: true}, nil
+}
+
 // Plan reads opencode.json to decide WillCreate / WillReplace, stages a
 // single BackupPath, and snapshots mtime/size for the TOCTOU check.
 func (*opencodeWriter) Plan(_ context.Context, configPath string) (*WritePlan, error) {
@@ -184,7 +215,8 @@ func (*opencodeWriter) Commit(_ context.Context, plan *WritePlan, params WritePa
 		)
 	}
 
-	if err := writeConfigAtomic(plan.ConfigPath, cfg); err != nil {
+	// The MCP entry's `environment` carries the freshly minted evt token.
+	if err := writeConfigAtomic(plan.ConfigPath, cfg, configCarriesToken); err != nil {
 		return nil, err
 	}
 
@@ -203,7 +235,7 @@ func (*opencodeWriter) Commit(_ context.Context, plan *WritePlan, params WritePa
 func buildOpenCodeEntry(apiBaseURL, agentID, agentToken string) map[string]interface{} {
 	return map[string]interface{}{
 		"type":    "local",
-		"command": []interface{}{npxCommand(), "-y", "@everme/memory-mcp"},
+		"command": []interface{}{npxCommand(), "-y", "@everme/memory-mcp@latest"},
 		"environment": map[string]interface{}{
 			"EVERME_API_BASE":    apiBaseURL,
 			"EVERME_AGENT_ID":    agentID,

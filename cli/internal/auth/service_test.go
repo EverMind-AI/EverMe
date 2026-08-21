@@ -16,6 +16,7 @@ import (
 	"evercli/internal/credential"
 	"evercli/internal/httpmock"
 	"evercli/internal/output"
+	"evercli/internal/runctx"
 )
 
 // authFixture wires a Service against httpmock + tmp paths + mem cred.
@@ -188,6 +189,149 @@ func TestLogin_DeviceCode_ExpiredAuthError(t *testing.T) {
 	ce, ok := output.AsCLIError(err)
 	require.True(t, ok)
 	assert.Equal(t, output.TypeAuth, ce.Type)
+}
+
+// ---- blocking Device Flow deadline (ECA-686) ------------------------
+
+// The global --timeout (60s default) is delivered to the service as a
+// parent-context deadline. The blocking Device Flow waits on a human in
+// their browser, so it must NOT be clipped by that inherited deadline —
+// the server-issued expiresIn (e.g. 300s / 5 min) governs instead.
+//
+// We prove the deadline is fully detached by handing the service a parent
+// whose deadline has ALREADY elapsed: the buggy code threads that dead
+// context straight into DeviceStart / the poll loop and aborts instantly;
+// the fixed code strips the inherited deadline and completes approval.
+func TestLogin_DeviceBlocking_IgnoresInheritedDeadline(t *testing.T) {
+	f := newAuthFixture(t)
+	f.srv.HandleEnvelope("POST /auth/device", client.DeviceStartResp{
+		DeviceCode:      "dc_x",
+		UserCode:        "ABCD-EFGH",
+		VerificationURL: "https://everme.evermind.ai/auth/device?code=ABCD-EFGH",
+		ExpiresIn:       300,
+		Interval:        1,
+	})
+	f.srv.HandleEnvelope("POST /auth/token", client.DeviceTokenResp{
+		Status:       "approved",
+		APIKey:       "emk_0123456789abcdef0123456789abcdef",
+		APIKeyPrefix: "emk_a1b2",
+		IsNewKey:     true,
+		Scopes:       []string{"mem:read"},
+	})
+	f.srv.HandleEnvelope("POST /auth/login", client.LoginResp{
+		AccountID: "acct_xyz", Email: "user@example.com", APIKeyPrefix: "emk_a1b2",
+	})
+	f.srv.HandleEnvelope("POST /agents", client.RegisterAgentResp{AgentToken: "evt_new"})
+
+	// Mirror cmdctx wiring: an un-deadlined source (alive) with an
+	// already-elapsed --timeout layered on top and the source stashed —
+	// i.e. the 60s --timeout wrap has elapsed during the human-approval
+	// wait but no SIGINT has fired.
+	base := context.Background()
+	ctx, cancel := context.WithDeadline(base, time.Now().Add(-time.Second))
+	defer cancel()
+	ctx = runctx.WithBaseContext(ctx, base)
+
+	res, err := f.service.Login(ctx, auth.LoginOptions{}) // blocking flavor
+	require.NoError(t, err, "an elapsed inherited deadline must not abort the blocking flow")
+	assert.Equal(t, "approved", res.Status)
+}
+
+// A genuine cancellation (SIGINT / user abort) MUST still abort the
+// blocking flow — detaching the deadline must not also drop cancellation.
+func TestLogin_DeviceBlocking_PropagatesCancellation(t *testing.T) {
+	f := newAuthFixture(t)
+	f.srv.HandleEnvelope("POST /auth/device", client.DeviceStartResp{
+		DeviceCode: "dc_x", UserCode: "ABCD-EFGH", ExpiresIn: 300, Interval: 1,
+	})
+	// Would approve if reached — but a cancelled parent must prevent it.
+	f.srv.HandleEnvelope("POST /auth/token", client.DeviceTokenResp{
+		Status:       "approved",
+		APIKey:       "emk_0123456789abcdef0123456789abcdef",
+		APIKeyPrefix: "emk_a1b2",
+	})
+	f.srv.HandleEnvelope("POST /auth/login", client.LoginResp{AccountID: "acct_xyz"})
+	f.srv.HandleEnvelope("POST /agents", client.RegisterAgentResp{AgentToken: "evt_new"})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // user already aborted before the flow runs
+
+	res, err := f.service.Login(ctx, auth.LoginOptions{})
+	require.Error(t, err, "a cancelled parent must abort the blocking flow, not detach into a long wait")
+	assert.Nil(t, res)
+}
+
+// Detaching the inherited --timeout (ECA-686) must not cost prompt Ctrl-C.
+// The regression: once the inherited deadline has ELAPSED, the parent's
+// Err freezes to DeadlineExceeded, so a cancel arriving afterwards is
+// invisible through the parent and the flow hangs until the server-issued
+// expiresIn. The fix tracks the un-deadlined cancellation source that
+// cmdctx stashes via runctx.WithBaseContext, so a genuine post-deadline
+// Ctrl-C still aborts immediately.
+func TestLogin_DeviceBlocking_CancelAfterInheritedDeadlineElapsed(t *testing.T) {
+	f := newAuthFixture(t)
+	f.srv.HandleEnvelope("POST /auth/device", client.DeviceStartResp{
+		DeviceCode: "dc_x", UserCode: "ABCD-EFGH", ExpiresIn: 1, Interval: 5,
+	})
+	// Poll always returns pending so only ctx cancellation (or the server
+	// expiresIn) can end the flow.
+	f.srv.HandleEnvelope("POST /auth/token", client.DeviceTokenResp{Status: "pending"})
+
+	// Mirror the cmdctx wiring: a cancellable signal ctx (the un-deadlined
+	// cancellation source) with the global --timeout layered on top, and
+	// the signal ctx stashed so the device flow can reach it.
+	base, cancelBase := context.WithCancel(context.Background())
+	defer cancelBase()
+	parent, cancelTimeout := context.WithTimeout(base, 50*time.Millisecond)
+	defer cancelTimeout()
+	parent = runctx.WithBaseContext(parent, base)
+
+	// Genuine Ctrl-C arrives AFTER the 50ms inherited deadline has elapsed,
+	// but well before the 1s server expiresIn.
+	time.AfterFunc(150*time.Millisecond, cancelBase)
+
+	start := time.Now()
+	res, err := f.service.Login(parent, auth.LoginOptions{})
+	elapsed := time.Since(start)
+
+	assert.Nil(t, res)
+	assert.ErrorIs(t, err, context.Canceled,
+		"a Ctrl-C after the inherited --timeout elapsed must abort as cancellation, not time out on the server deadline")
+	assert.Less(t, elapsed, 800*time.Millisecond,
+		"abort must be prompt on cancel, not wait out the ~1s server expiresIn")
+}
+
+// ---- evt hygiene on account switch (ECA-689) ------------------------
+
+// ensureSelfAgent failure is intentionally non-fatal (login still
+// succeeds for status/me), but it MUST NOT leave a stale evt behind: if
+// the user switched EverMe accounts, the cached evt belonged to the OLD
+// account and a later `import run` would silently upload under it. On
+// failure we delete the stale evt so import fails loudly (NotLoggedIn)
+// and the user re-runs `auth login` instead of misrouting data.
+func TestLogin_APIKey_EnsureSelfAgentFailure_DeletesStaleEvt(t *testing.T) {
+	f := newAuthFixture(t)
+	ctx := context.Background()
+
+	// Pre-seed an evt from a previous (old-account) login.
+	require.NoError(t, f.cred.Set(ctx, credential.AgentToken(), "evt_old_account"))
+
+	f.srv.HandleEnvelope("POST /auth/login", client.LoginResp{
+		AccountID: "acct_new", Email: "new@example.com", APIKeyPrefix: "emk_a1b2",
+	})
+	// ensureSelfAgent's RegisterAgent call fails.
+	f.srv.HandleEnvelopeError("POST /agents", 50000, "ErrInternal")
+
+	res, err := f.service.Login(ctx, auth.LoginOptions{
+		APIKey: "emk_0123456789abcdef0123456789abcdef",
+	})
+	require.NoError(t, err, "ensureSelfAgent failure stays non-fatal for login")
+	assert.Equal(t, "approved", res.Status)
+
+	// The stale evt must be gone, not silently retained.
+	_, err = f.cred.Get(ctx, credential.AgentToken())
+	assert.ErrorIs(t, err, credential.ErrNotFound,
+		"stale evt from the previous account must be deleted when re-registration fails")
 }
 
 // ---- Logout ----------------------------------------------------------

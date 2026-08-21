@@ -12,13 +12,18 @@ import (
 
 // Not installed: config dir does not exist, no opencode CLI. Detect must
 // still return a usable Detection with ConfigPath set. NOTE: opencode's
-// "installed" signal is os.Stat(filepath.Dir(configPath)), so the dir
-// must NOT exist here or Installed would be wrongly true.
+// "installed" signal is a dual heuristic — os.Stat(filepath.Dir(configPath))
+// OR `opencode` on PATH — so this test must neutralize BOTH: the config dir
+// must NOT exist, AND PATH must be empty of an opencode binary (otherwise a
+// dev machine with opencode installed makes Installed wrongly true).
 func TestOpenCodeDetector_NoConfig_NotInstalled(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "does-not-exist")
 	t.Setenv("EVERCLI_OPENCODE_CONFIG_DIR", dir)
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", "")
+	// Point PATH at an empty dir so exec.LookPath("opencode") fails
+	// regardless of what is installed on the host running the tests.
+	t.Setenv("PATH", t.TempDir())
 
 	d, err := opencodeDetector{}.Detect(context.Background())
 	require.NoError(t, err)
@@ -98,7 +103,7 @@ func TestOpenCodeWriter_WritesOpenCodeShape(t *testing.T) {
 	assert.Equal(t, true, entry["enabled"])
 	cmd, ok := entry["command"].([]interface{})
 	require.True(t, ok, "command must be an array")
-	assert.Equal(t, []interface{}{"npx", "-y", "@everme/memory-mcp"}, cmd)
+	assert.Equal(t, []interface{}{"npx", "-y", "@everme/memory-mcp@latest"}, cmd)
 	env, ok := entry["environment"].(map[string]interface{})
 	require.True(t, ok, "environment (not env) required")
 	assert.Equal(t, "agt_oc", env["EVERME_AGENT_ID"])

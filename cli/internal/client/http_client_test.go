@@ -87,6 +87,21 @@ func TestListAgents_HappyAttachesAuthorization(t *testing.T) {
 	assert.True(t, strings.HasPrefix(auth, "Bearer emk_"), "Bearer header must be set, got %q", auth)
 }
 
+func TestDisconnectAgent_PostsAgentIDWithEMKAuthorization(t *testing.T) {
+	srv, cli := newTestClient(t)
+	srv.HandleEnvelope("POST /agents/disconnect", map[string]bool{"ok": true})
+
+	err := cli.DisconnectAgent(context.Background(), "agt_disconnect")
+	require.NoError(t, err)
+
+	request := srv.LastRequest("POST /agents/disconnect")
+	require.NotNil(t, request)
+	assert.True(t, strings.HasPrefix(request.Authorization, "Bearer emk_"))
+	var body map[string]interface{}
+	require.NoError(t, json.Unmarshal(request.Body, &body))
+	assert.Equal(t, map[string]interface{}{"agentId": "agt_disconnect"}, body)
+}
+
 // (Me / DisconnectAgent tests retired with the slimming pass.)
 
 // ---- Auth-space errno classification --------------------------------

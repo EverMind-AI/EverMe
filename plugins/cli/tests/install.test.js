@@ -45,7 +45,7 @@ test("resolveMirrorUrls ignores http-only / malformed registries", () => {
 
 test("assertAllowedHost passes for github.com", () => {
   assert.doesNotThrow(() =>
-    assertAllowedHost("https://github.com/EverMind-AI/EverMe/releases/download/v0.1.0/x"),
+    assertAllowedHost("https://github.com/EverMind-AI/EverMe/releases/download/cli/v0.1.0/x"),
   );
 });
 

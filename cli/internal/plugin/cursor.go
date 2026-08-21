@@ -79,5 +79,22 @@ func cursorConfigPath() (string, error) {
 // upsert / TOCTOU / atomic-write machinery from mcp.go is reused
 // verbatim.
 func newCursorWriter() Writer {
-	return newMCPWriter(PlatformCursor)
+	return newNativeHookWriter(
+		PlatformCursor,
+		func(configPath string) string { return filepath.Join(filepath.Dir(configPath), "hooks.json") },
+		func(cfg map[string]interface{}) error {
+			if _, exists := cfg["version"]; !exists {
+				cfg["version"] = 1
+			}
+			return mergeFlatHooks(cfg, "@everme/cursor", []hookSpec{
+				{Event: "sessionStart", Entry: map[string]interface{}{"command": "npx -y @everme/cursor@latest hook sessionStart"}},
+				{Event: "stop", Entry: map[string]interface{}{"command": "npx -y @everme/cursor@latest hook stop"}},
+				{Event: "preCompact", Entry: map[string]interface{}{"command": "npx -y @everme/cursor@latest hook preCompact"}},
+				// Cursor's transcript intentionally omits tool outputs;
+				// postToolUse spools each call locally so the stop hook can
+				// upload the turn with its tool calls attached.
+				{Event: "postToolUse", Entry: map[string]interface{}{"command": "npx -y @everme/cursor@latest hook postToolUse"}},
+			})
+		},
+	)
 }

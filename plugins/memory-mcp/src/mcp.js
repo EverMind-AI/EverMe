@@ -74,6 +74,7 @@ import {
   assertConfigUsable,
   createClient,
   redactError,
+  describeError,
   saveAgentMemory,
   savePersonalMemory,
   searchMemory,
@@ -398,7 +399,7 @@ export function createMcpServer({ logger, config } = {}) {
             log,
           );
           return okMarkdown(
-            redactError(renderSearchResultsAsMarkdown(query, res)),
+            appendRequestID(redactError(renderSearchResultsAsMarkdown(query, res)), res?.requestId),
           );
         }
 
@@ -412,7 +413,7 @@ export function createMcpServer({ logger, config } = {}) {
           // was pure noise the LLM had to unwrap.
           const ctx = await getContext(client, "", { forceRefresh: args.forceRefresh === true }, log);
           const rawText = ctx?.context || "_(no profile available — your EverMe account has no extracted memories yet)_";
-          return okMarkdown(redactError(rawText));
+          return okMarkdown(appendRequestID(redactError(rawText), ctx?.requestId));
         }
 
         case "mem_save_turn": {
@@ -455,6 +456,7 @@ export function createMcpServer({ logger, config } = {}) {
             flushed: !!res?.flushed,
             profileStatus: res?.personalStatus || null,
             profileUpdated: !!res?.personalExtracted,
+            requestId: res?.requestId || null,
           });
         }
 
@@ -508,6 +510,7 @@ export function createMcpServer({ logger, config } = {}) {
             // profileUpdated aliases extracted — the only signal that the
             // fact really materialised into the profile.
             profileUpdated: !!res?.extracted,
+            requestId: res?.requestId || null,
           });
         }
 
@@ -520,7 +523,7 @@ export function createMcpServer({ logger, config } = {}) {
       // / fetch errors whose .message may carry presigned-URL signing
       // params, evt tokens, etc. The host LLM sees this text verbatim
       // — so the scrub MUST run here, not just in EvermeError.
-      const safe = redactError(err?.message || String(err));
+      const safe = describeError(err);
       log.warn?.(`[everme-mcp] tool ${name} failed: ${safe}`);
       return errResp(safe);
     }
@@ -642,7 +645,7 @@ export function createMcpServer({ logger, config } = {}) {
       // params and evt tokens can leak into upstream error messages,
       // and resources/read text is shown verbatim to the LLM (and
       // sometimes the human via host UI).
-      const safe = redactError(err?.message || String(err));
+      const safe = describeError(err);
       log.warn?.(`[everme-mcp] resources/read ${uri} failed: ${safe}`);
       // Re-throw so the SDK converts to a JSON-RPC error envelope
       // (-32603 internal error or -32602 invalid params depending on
@@ -797,6 +800,13 @@ function okMarkdown(text) {
   return {
     content: [{ type: "text", text: String(text ?? "") }],
   };
+}
+
+// appendRequestID tacks the trace id onto a markdown payload so a user can
+// quote it to support; empty ids (test stubs, degraded paths) add nothing.
+function appendRequestID(text, requestId) {
+  if (!requestId) return text;
+  return `${text}\n\n_(requestId: ${requestId})_`;
 }
 
 // errResp accepts pre-redacted text. Callers MUST run redactError on

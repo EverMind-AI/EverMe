@@ -120,6 +120,10 @@ describe("agent memory", () => {
     assert.equal(calls.length, 3);
     assert.deepEqual(calls.map((call) => call.body.messages.length), [500, 500, 203]);
     assert.deepEqual(calls.map((call) => call.body.flush), [false, false, true]);
+    // Leading batches must keep the synchronous-add guarantee (sync=true):
+    // async leading batches can still be invisible to the final request's
+    // flush — the first-flush data-loss shape, per request this time.
+    assert.deepEqual(calls.map((call) => call.body.sync), [true, true, undefined]);
     assert.ok(calls.every((call) => call.path === "/mem/agent-memory" && call.body.conversationId === "sess-big"));
     assert.equal(calls[0].body.messages[0].content, "message 0");
     assert.equal(calls[2].body.messages[202].content, "message 1202");
@@ -144,6 +148,8 @@ describe("agent memory", () => {
     await saveAgentMemory(client, { conversationId: "sess-nf", messages, flush: false });
 
     assert.deepEqual(calls.map((body) => body.flush), [false, false]);
+    assert.ok(calls.every((body) => body.sync === undefined),
+      "append-only uploads must not force the sync path");
     assert.deepEqual(calls.map((body) => body.messages.length), [500, 1]);
   });
 

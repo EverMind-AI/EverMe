@@ -1,0 +1,5 @@
+# Native EverMe lifecycle hooks. Credentials come from DSH's layered environment.
+- insert:
+    - id: memory-everme-native
+      name: '@everme/dsh'
+      config: {}

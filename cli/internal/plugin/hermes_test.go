@@ -44,6 +44,32 @@ func TestHermesDetector_NoConfig_NotInstalled(t *testing.T) {
 	assert.False(t, d.HasEverMeEntry)
 }
 
+func TestHermesWriter_RemovePreservesSiblingState(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("EVERCLI_HERMES_CONFIG_DIR", dir)
+	t.Setenv("HOME", t.TempDir())
+	path := filepath.Join(dir, "config.yaml")
+	body := "memory:\n  provider: everme\n  keep: true\nmcp_servers:\n  everme:\n    command: npx\n  other:\n    command: other\n"
+	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "plugins", "everme"), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "plugins", "everme", "__init__.py"), []byte("x"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "everme.env"), []byte("EVERME_AGENT_TOKEN=evt_secret\n"), 0o600))
+
+	res, err := newHermesWriter().Remove(context.Background(), path)
+	require.NoError(t, err)
+	assert.True(t, res.Removed)
+	assert.FileExists(t, res.BackupPath)
+	cfg, exists, err := readHermesConfig(path)
+	require.NoError(t, err)
+	require.True(t, exists)
+	assert.NotEqual(t, "everme", cfg["memory"].(map[string]interface{})["provider"])
+	assert.Equal(t, true, cfg["memory"].(map[string]interface{})["keep"])
+	assert.Contains(t, cfg["mcp_servers"].(map[string]interface{}), "other")
+	assert.NotContains(t, cfg["mcp_servers"].(map[string]interface{}), "everme")
+	assert.NoDirExists(t, filepath.Join(dir, "plugins", "everme"))
+	assert.NoFileExists(t, filepath.Join(dir, "everme.env"))
+}
+
 // TestHermesDetector_InstalledFromHomeDir confirms that presence of
 // ~/.hermes/ alone (without a `hermes` CLI on PATH) flags Hermes as
 // installed. Hermes's installer creates the home dir before linking

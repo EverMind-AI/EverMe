@@ -512,6 +512,38 @@ def _render_search(res: Any) -> str:
             for fact in it.get("atomicFacts") or []:
                 if fact:
                     lines.append(f"  - {fact}")
+
+    # agentMemory.{cases,skills} are the products of this provider's
+    # /mem/agent-memory writes; surfacing episodes only (the original bug)
+    # meant recall could never read back the cases/skills those writes
+    # produced. Field names are the EverMe BFF camelCase shape.
+    agent_memory = res.get("agentMemory")
+    if isinstance(agent_memory, dict):
+        for c in agent_memory.get("cases") or []:
+            if not isinstance(c, dict):
+                continue
+            intent = (c.get("taskIntent") or "").strip()
+            approach = (c.get("approach") or "").strip()
+            if not intent and not approach:
+                continue
+            if intent:
+                lines.append(f"- Task: {intent}")
+            if approach:
+                lines.append(f"  - Approach: {approach}")
+        for s in agent_memory.get("skills") or []:
+            if not isinstance(s, dict):
+                continue
+            name = (s.get("name") or "").strip()
+            desc = (s.get("description") or "").strip()
+            content = (s.get("content") or "").strip()
+            if not (name or desc or content):
+                continue
+            head = f"- Skill: {name}" if name else "- Skill"
+            if desc:
+                head += f" — {desc}"
+            lines.append(head)
+            if content:
+                lines.append(f"  - {content}")
     return "\n".join(lines)
 
 

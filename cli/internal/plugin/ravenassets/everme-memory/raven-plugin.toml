@@ -1,0 +1,31 @@
+# EverMe memory backend for Raven (user-dir plugin).
+#
+# Installed by `evercli plugin install raven` into
+# ~/.raven/plugins/everme-memory/ — the directory name MUST equal the
+# plugin id below (Raven's discovery scans <user_dir>/<plugin_id>/
+# raven-plugin.toml and logs a mismatch).
+#
+# The id is also the config key under plugins.config.<id> in
+# ~/.raven/config.json and the value evercli's raven.go writer keeps in
+# sync (RavenPluginID). Change one, change all.
+[plugin]
+id                 = "everme-memory"
+version            = "0.1.0"
+display_name       = "EverMe memory"
+raven              = ">=0.1"
+enabled_by_default = true
+
+[[plugin.contributes.memory_backends]]
+name    = "everme"
+factory = "everme_raven.backend:make_backend"
+
+# Config schema sketch — the registry passes the user's
+# plugins.config["everme-memory"] dict to make_backend(ctx) verbatim
+# (same contract as the bundled everos-memory plugin). agent_token is
+# minted by the EverMe backend at install time; evercli writes it here.
+[plugin.config_schema]
+api_base          = { type = "string", default = "https://api.everme.evermind.ai" }
+agent_id          = { type = "string" }
+agent_token       = { type = "string", secret = true }
+flush_every_turns = { type = "integer", default = 1 }
+timeout_s         = { type = "number", default = 30.0 }

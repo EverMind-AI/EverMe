@@ -26,7 +26,7 @@
  * dedicated module rather than reviving the multi-layer buffer.
  */
 
-export { createClient, EvermeError, redactError } from "./src/client.js";
+export { createClient, EvermeError, redactError, describeError, requestMeta } from "./src/client.js";
 export {
   saveAgentMemory,
   flushAgentMemory,
@@ -42,7 +42,17 @@ export { resolveConfig, assertConfigUsable, TIMEOUT_MS, UPLOAD_TIMEOUT_MS } from
 export { buildMemoryPrompt, MEMORY_TYPES, MEMORY_TYPE_LABELS } from "./src/prompt.js";
 export { toText, stripChannelMetadata, isSessionResetPrompt } from "./src/messages.js";
 export { resolveHookKnobs } from "./src/hooks/knobs.js";
+export {
+  boundedTimeoutMs,
+  HOOK_SAFETY_MARGIN_MS,
+  HOST_HOOK_TIMEOUT_S,
+  hookBudgetMs,
+  MIN_REQUEST_BUDGET_MS,
+  startHookWatchdog,
+} from "./src/hooks/deadline.js";
 export { sanitizeRecallQuery, extractUserIntent, formatQueryStats, QUERY_MAX_CHARS } from "./src/hooks/query.js";
 export { createSessionState, createTurnCounter } from "./src/hooks/state.js";
+export { createToolEventBuffer } from "./src/hooks/toolbuffer.js";
 export { runHook } from "./src/hooks/runtime.js";
+export { runInject } from "./src/hooks/inject.js";
 export { renderProfileBlock, profileItemCount } from "./src/hooks/session-start.js";

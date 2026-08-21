@@ -10,6 +10,7 @@ import (
 	doctorcmd "evercli/cmd/doctor"
 	importscmd "evercli/cmd/imports"
 	plugincmd "evercli/cmd/plugin"
+	skillcmd "evercli/cmd/skill"
 	"evercli/internal/cmdctx"
 )
 
@@ -61,6 +62,7 @@ become a structured envelope rather than an interactive prompt.`,
 	root.AddCommand(plugincmd.New())
 	root.AddCommand(importscmd.New())
 	root.AddCommand(doctorcmd.New())
+	root.AddCommand(skillcmd.New())
 
 	return root
 }

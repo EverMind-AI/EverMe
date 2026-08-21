@@ -13,7 +13,7 @@ import (
 //
 // The serialization shape of FormatJSON / FormatYAML is the stable ABI;
 // FormatText output is human-only and may evolve between versions
-// (see docs/contracts.md).
+// (see AGENTS.md "Output contract is sacred").
 type Format string
 
 const (

@@ -1,0 +1,12 @@
+{"type":"user","message":{"content":[{"type":"text","text":"old question"}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"old answer"}]}}
+{"type":"turn_ended","status":"completed"}
+{"type":"user","message":{"content":"run the tests"}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"running now"},{"type":"tool_use","id":"call_inline","name":"shell","input":{"command":"npm test"}}]}}
+{"type":"tool_call","tool_call":{"id":"call_standalone","name":"read_file","arguments":{"path":"a.js"}}}
+{"type":"tool_result","tool_call_id":"call_standalone","message":{"content":"file body"}}
+{"type":"tool_result","message":{"content":"orphan result without id"}}
+{"type":"reasoning","message":{"content":"private reasoning"}}
+{"type":"future_record_kind","payload":{"anything":true}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"all green"}]}}
+{"type":"turn_ended","status":"completed"}

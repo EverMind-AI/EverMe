@@ -1,6 +1,6 @@
 {
   "name": "@everme/cli",
-  "version": "0.2.4",
+  "version": "0.32.0",
   "description": "EverMe CLI — npm wrapper that downloads and runs the platform-native evercli binary on first use.",
   "license": "Apache-2.0",
   "bin": {
@@ -8,7 +8,7 @@
   },
   "scripts": {
     "postinstall": "node scripts/install.js",
-    "test": "node --test tests/install.test.js"
+    "test": "node --test tests/install.test.js tests/upgrade-plugins.test.js"
   },
   "os": [
     "darwin",
@@ -26,6 +26,7 @@
     "scripts/install.js",
     "scripts/install-wizard.js",
     "scripts/run.js",
+    "scripts/upgrade-plugins.js",
     "sha256sums.txt",
     "LICENSE",
     "README.md"
@@ -50,6 +51,5 @@
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org"
-  },
-  "dependencies": {}
+  }
 }

@@ -13,8 +13,10 @@
  *    / save / search) decides whether to surface the error or degrade.
  */
 
+import { randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { TIMEOUT_MS } from "./config.js";
+import { boundedTimeoutMs } from "./hooks/deadline.js";
 
 const noop = { info() {}, warn() {} };
 
@@ -79,6 +81,40 @@ export class EvermeError extends Error {
     this.requestId = requestId;
     this.type = type;
   }
+
+  /**
+   * Support-friendly one-liner: message plus the errno and requestId a user
+   * can quote to correlate with server-side logs. Every user-facing error
+   * sink (MCP errResp, hook diagnostics, engine warns) should prefer this
+   * over .message.
+   */
+  describe() {
+    const parts = [];
+    if (this.code) parts.push(`errno=${this.code}`);
+    if (this.requestId) parts.push(`requestId=${this.requestId}`);
+    return parts.length ? `${this.message} (${parts.join(", ")})` : this.message;
+  }
+}
+
+/**
+ * Render any error for user-facing sinks: EvermeError gets its describe()
+ * form (errno + requestId), everything else falls back to redactError.
+ */
+export function describeError(err) {
+  if (err instanceof EvermeError) return err.describe();
+  return redactError(err?.message || String(err));
+}
+
+/**
+ * Meta-aware call helper for SDK wrappers. Real clients expose
+ * requestWithMeta; test stubs and host-provided fakes may only implement
+ * request — fall back gracefully with an empty requestId.
+ */
+export async function requestMeta(client, method, path, body, opts) {
+  if (typeof client?.requestWithMeta === "function") {
+    return client.requestWithMeta(method, path, body, opts);
+  }
+  return { result: await client.request(method, path, body, opts), requestId: "" };
 }
 
 /**
@@ -86,26 +122,43 @@ export class EvermeError extends Error {
  * individual methods (e.g. inject a fake fetch via cfg).
  */
 export function createClient(cfg, log = noop) {
-  const headers = () => ({
+  const headers = (requestId) => ({
     "Content-Type": "application/json",
     Accept: "application/json",
     Authorization: `Bearer ${cfg.agentToken}`,
     "User-Agent": `everme-memory-mcp/0.1 (agentId=${cfg.agentId})`,
+    // Client-generated trace id. The gateway reuses a valid inbound value,
+    // so plugin logs, EverMe ELK, and the cloud platform all join on it —
+    // even when the request times out before any response arrives.
+    requestId,
   });
 
   /**
    * Single-funnel request helper. Path is appended to cfg.baseUrl.
-   * `body` may be undefined for GET. Returns the envelope's result or
-   * throws an EvermeError.
+   * `body` may be undefined for GET. Resolves to { result, requestId } or
+   * throws an EvermeError (which carries the same requestId).
    */
-  async function request(method, path, body, { timeoutMs = TIMEOUT_MS, query } = {}) {
+  async function requestWithMeta(method, path, body, { timeoutMs = TIMEOUT_MS, query } = {}) {
+    const requestId = randomUUID();
     const url = buildUrl(cfg.baseUrl, path, query);
     const init = {
       method,
-      headers: headers(),
+      headers: headers(requestId),
       body: body == null ? undefined : JSON.stringify(body),
     };
-    return execWithRetry(url, init, timeoutMs, log);
+    // cfg.deadlineAt is set when the caller runs under a host deadline (a
+    // native hook). Clamping here is what makes sequential requests share
+    // one budget instead of each taking a fresh timeoutMs.
+    return execWithRetry(url, init, boundedTimeoutMs(timeoutMs, cfg.deadlineAt), log, requestId);
+  }
+
+  /**
+   * Back-compat helper: same as requestWithMeta but resolves to the bare
+   * envelope result. Callers that need the trace id use requestWithMeta.
+   */
+  async function request(method, path, body, opts) {
+    const { result } = await requestWithMeta(method, path, body, opts);
+    return result;
   }
 
   /**
@@ -118,6 +171,7 @@ export function createClient(cfg, log = noop) {
    * reject the upload as malformed.
    */
   async function rawPost(uploadUrl, body, contentType, { timeoutMs = TIMEOUT_MS } = {}) {
+    timeoutMs = boundedTimeoutMs(timeoutMs, cfg.deadlineAt);
     const ac = new AbortController();
     const t = setTimeout(() => ac.abort(), timeoutMs);
     try {
@@ -187,7 +241,7 @@ export function createClient(cfg, log = noop) {
     }
   }
 
-  return { request, rawPost };
+  return { request, requestWithMeta, rawPost };
 }
 
 function buildUrl(base, path, query) {
@@ -203,9 +257,9 @@ function buildUrl(base, path, query) {
   return q ? `${base}${path}?${q}` : `${base}${path}`;
 }
 
-async function execWithRetry(url, init, timeoutMs, log) {
+async function execWithRetry(url, init, timeoutMs, log, requestId) {
   try {
-    return await execOnce(url, init, timeoutMs);
+    return await execOnce(url, init, timeoutMs, requestId);
   } catch (err) {
     if (err instanceof EvermeError) {
       // Application-level errors don't get retried — only transport.
@@ -220,13 +274,13 @@ async function execWithRetry(url, init, timeoutMs, log) {
     if (method !== "GET" && method !== "HEAD") {
       throw err;
     }
-    log.warn?.(`[everme] ${method} failed, retrying once: ${redactError(err?.message)}`);
+    log.warn?.(`[everme] ${method} failed, retrying once (requestId=${requestId}): ${redactError(err?.message)}`);
     await sleep(150);
-    return execOnce(url, init, timeoutMs);
+    return execOnce(url, init, timeoutMs, requestId);
   }
 }
 
-async function execOnce(url, init, timeoutMs) {
+async function execOnce(url, init, timeoutMs, requestId = "") {
   const ac = new AbortController();
   const t = setTimeout(() => ac.abort(), timeoutMs);
   let res;
@@ -246,6 +300,7 @@ async function execOnce(url, init, timeoutMs) {
         message: aborted
           ? `timed out after ${timeoutMs}ms`
           : redactError(err?.message || String(err)),
+        requestId,
         type: aborted ? "timeout" : "upstream",
       });
     }
@@ -262,6 +317,7 @@ async function execOnce(url, init, timeoutMs) {
         message: aborted
           ? `timed out reading body after ${timeoutMs}ms`
           : redactError(`body read failed: ${err?.message || String(err)}`),
+        requestId,
         type: aborted ? "timeout" : "upstream",
       });
     }
@@ -273,16 +329,19 @@ async function execOnce(url, init, timeoutMs) {
   try {
     env = text ? JSON.parse(text) : {};
   } catch {
-    // Non-JSON response (load shedder, proxy 502 page, etc).
+    // Non-JSON response (load shedder, proxy 502 page, etc). The gateway
+    // echoes the id on the response header even when a proxy mangles the
+    // body, so prefer that before falling back to our own id.
     throw new EvermeError({
       message: `HTTP ${res.status}${text ? " — " + text.slice(0, 200) : ""}`,
       status: res.status,
+      requestId: res.headers?.get?.("requestId") || requestId,
       type: res.status === 401 || res.status === 403 ? "auth" : "upstream",
     });
   }
 
   if (env && env.status === 0) {
-    return env.result ?? null;
+    return { result: env.result ?? null, requestId: env.requestId || requestId };
   }
   // Envelope-encoded failure or missing status.
   const code = Number(env?.status) || 0;
@@ -291,7 +350,7 @@ async function execOnce(url, init, timeoutMs) {
     message: env?.error || `HTTP ${res.status}`,
     status: res.status,
     code,
-    requestId: env?.requestId,
+    requestId: env?.requestId || requestId,
     type: errType,
   });
 }

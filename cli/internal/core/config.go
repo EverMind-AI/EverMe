@@ -33,6 +33,30 @@ type Config struct {
 	APIBaseURL string        `valid:"required,url"`
 	Timeout    time.Duration `valid:"-"`
 	Paths      *Paths        `valid:"-"`
+	Skill      SkillConfig   `valid:"-"`
+}
+
+// SkillConfig holds settings for the `evercli skill` subcommand family.
+//
+// HubBaseURL is intentionally not documented for end users — it exists
+// for dev/debug overrides only.
+// TODO: future multi-hub-source selection (everme skillhub / github / custom).
+type SkillConfig struct {
+	// HubBaseURL is the base URL of the skill-hub-base service.
+	// Default: "https://skillhub.evermind.ai". Override via env EVERCLI_SKILL_HUB_BASE_URL.
+	HubBaseURL string
+
+	// Agents is the list of agent platforms (e.g. ["claude-code","cursor"])
+	// that skills are copied into after install.
+	// Populated during first-use agent selection.
+	Agents []string
+
+	// LoginPrompt tracks whether the user has been shown the everme login
+	// nudge on first use.
+	//   "pending"          — not yet shown; show on next skill command
+	//   "snoozed:<RFC3339>" — user chose "remind later"; re-show after that time
+	//   "dismissed"        — user chose "don't ask again"; never show again
+	LoginPrompt string
 }
 
 // LoadConfig resolves Paths, then loads config.yaml (if present) merged
@@ -55,6 +79,8 @@ func LoadConfig(configPath string) (*Config, error) {
 
 	v.SetDefault("api_base_url", "https://api.everme.evermind.ai")
 	v.SetDefault("timeout", "60s")
+	v.SetDefault("skill.hub_base_url", "https://skillhub.evermind.ai")
+	v.SetDefault("skill.login_prompt", "pending")
 
 	if configPath == "" {
 		configPath = paths.ConfigFile()
@@ -80,6 +106,11 @@ func LoadConfig(configPath string) (*Config, error) {
 		APIBaseURL: strings.TrimSpace(v.GetString("api_base_url")),
 		Timeout:    timeout,
 		Paths:      paths,
+		Skill: SkillConfig{
+			HubBaseURL:  strings.TrimSpace(v.GetString("skill.hub_base_url")),
+			Agents:      v.GetStringSlice("skill.agents"),
+			LoginPrompt: v.GetString("skill.login_prompt"),
+		},
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -123,3 +154,27 @@ func (c *Config) EnsureDirs() error {
 // ConfigPath returns the file viper would read for this Config. Useful
 // for `evercli config show --format text` and doctor diagnostics.
 func (c *Config) ConfigPath() string { return filepath.Join(c.Paths.ConfigDir, "config.yaml") }
+
+// SaveSkillConfig persists the current Skill section back to config.yaml.
+// It reads the existing file, merges the skill block, and rewrites atomically.
+// Other top-level keys (api_base_url, timeout) are left untouched.
+func (c *Config) SaveSkillConfig() error {
+	v := viper.New()
+	v.SetConfigFile(c.ConfigPath())
+	// Best-effort: load existing config if present; ignore missing-file errors.
+	if err := v.ReadInConfig(); err != nil {
+		var nf viper.ConfigFileNotFoundError
+		if !errors.As(err, &nf) && !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("read config for update: %w", err)
+		}
+	}
+
+	v.Set("skill.hub_base_url", c.Skill.HubBaseURL)
+	v.Set("skill.agents", c.Skill.Agents)
+	v.Set("skill.login_prompt", c.Skill.LoginPrompt)
+
+	if err := os.MkdirAll(c.Paths.ConfigDir, 0o700); err != nil {
+		return fmt.Errorf("ensure config dir: %w", err)
+	}
+	return v.WriteConfigAs(c.ConfigPath())
+}

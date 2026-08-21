@@ -1,6 +1,6 @@
 {
   "name": "@everme/codex",
-  "version": "0.4.2",
+  "version": "0.6.1",
   "type": "module",
   "description": "Native EverMe lifecycle hooks for Codex.",
   "license": "Apache-2.0",
@@ -40,7 +40,7 @@
     "registry": "https://registry.npmjs.org"
   },
   "dependencies": {
-    "@everme/agent-sdk": "^0.4.2"
+    "@everme/agent-sdk": "^0.6.1"
   },
   "devDependencies": {
     "esbuild": "^0.28.1"

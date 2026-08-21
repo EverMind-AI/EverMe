@@ -12,7 +12,7 @@ import (
 	"evercli/internal/output"
 )
 
-// Build-time variables injected via -ldflags.
+// Build-time variables injected via -ldflags by goreleaser.
 var (
 	version = "dev"
 	commit  = "none"

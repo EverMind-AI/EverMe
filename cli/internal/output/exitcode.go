@@ -3,7 +3,7 @@ package output
 // ExitCode is the process exit code returned to the OS.
 //
 // The set of exit codes is part of EverCli's stable ABI for AI Agents
-// (see docs/contracts.md). Six buckets, no more — finer
+// (see AGENTS.md "Output contract is sacred"). Six buckets, no more — finer
 // grained errors flow through ErrorType in the JSON envelope.
 type ExitCode int
 

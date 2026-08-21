@@ -13,8 +13,7 @@ import (
 
 // TestClaudeDesktopConfigPath_PerOS pins the per-OS layout. Anthropic's
 // Claude Desktop writes to a different parent directory on each OS,
-// and the installer matrix in docs/mcp-codex-hermes-iteration-plan-
-// 2026-05-26.md treats all three cells as load-bearing. Use the
+// and the installer matrix treats all three cells as load-bearing. Use the
 // runtimeGOOSFn indirection (not build tags) so the test runs on any
 // CI host.
 func TestClaudeDesktopConfigPath_PerOS(t *testing.T) {

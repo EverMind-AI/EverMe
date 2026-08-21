@@ -97,12 +97,16 @@ and never mutates a file.`,
 				body.Hint = "See error.detail.failed for per-platform reasons; retry that platform alone"
 				return deps.Out.Err(body)
 			}
-			return deps.Out.OK(rep, &output.Meta{Count: len(rep.Installed)})
+			return completeInstall(deps.Out, rep)
 		},
 	}
 	c.Flags().BoolVar(&force, "force", false, "proceed even when the target Agent is not detected on this machine")
 	c.Flags().BoolVar(&dryRun, "dry-run", false, "run the local pre-check only; do not call the backend or mutate any file")
 	return c
+}
+
+func completeInstall(out *output.Writer, report *plugin.InstallReport) error {
+	return out.OK(report, &output.Meta{Count: len(report.Installed)})
 }
 
 // buildPrompt returns the PromptFn passed into Service.Install. With
@@ -149,6 +153,15 @@ func renderInstall(w io.Writer, data interface{}) error {
 				return err
 			}
 			warningCount++
+		}
+		// NextSteps are required manual follow-ups (e.g. Kimi Code's TUI
+		// `/plugins install` registration). Unlike warnings they are not a
+		// tripped sanity check, so they render as a plain arrow and never
+		// trigger the doctor hint.
+		for _, step := range e.NextSteps {
+			if _, err := fmt.Fprintf(w, "  → %s\n", step); err != nil {
+				return err
+			}
 		}
 	}
 	for _, s := range rep.Skipped {

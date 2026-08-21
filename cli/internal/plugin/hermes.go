@@ -27,10 +27,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 
 	"gopkg.in/yaml.v3"
 
+	"evercli/internal/core"
 	"evercli/internal/output"
 )
 
@@ -39,75 +39,16 @@ import (
 // removeLegacyMcpEntry can delete a leftover entry during migration.
 const hermesMcpEntryName = "everme"
 
-// hermesCommand resolves the `hermes` CLI. EVERCLI_HERMES_CMD lets tests
-// point at a stub so we don't shell out (or PATH-probe) the real CLI.
-// Same pattern as EVERCLI_CODEX_CMD.
-func hermesCommand() string {
-	if v := os.Getenv("EVERCLI_HERMES_CMD"); v != "" {
-		return v
-	}
-	return "hermes"
-}
+// hermesCommand resolves the `hermes` CLI. Delegates to the shared
+// core resolver so internal/importer can reuse the same logic without
+// importing internal/plugin.
+func hermesCommand() string { return core.HermesCommand() }
 
-// hermesHome resolves the Hermes home directory using the priority chain
-// mandated by Hermes maintainers: installer code MUST NOT hard-guess
-// `~/.hermes` when a user has overridden the location. Order:
-//
-//  1. EVERCLI_HERMES_CONFIG_DIR  — test / advanced override; if set,
-//     wins outright. Same env var the Detector / Writer use to pin
-//     the config dir in unit tests.
-//  2. HERMES_HOME  — Hermes's own well-known env var; multi-instance
-//     setups (dev / prod) use this to keep separate config trees.
-//  3. `hermes config path` — authoritative source of truth from the
-//     installed Hermes CLI itself; works on any user who has Hermes
-//     on PATH, regardless of how they configured home. Returns the
-//     full config.yaml path; we strip the basename to recover home.
-//  4. `$HOME/.hermes` — last-resort fallback only when none of the
-//     above resolve (no env override, no CLI on PATH). Matches what
-//     a fresh Hermes install does.
-//
-// Returns (home, err) where err is non-nil only on a genuine OS
-// failure (e.g. user has no $HOME) — the three preceding steps all
-// degrade gracefully so the fallback fires when no signal is present.
-func hermesHome() (string, error) {
-	if v := os.Getenv("EVERCLI_HERMES_CONFIG_DIR"); v != "" {
-		return v, nil
-	}
-	if v := os.Getenv("HERMES_HOME"); v != "" {
-		return v, nil
-	}
-	if p, ok := probeHermesConfigPathCLI(); ok {
-		// `hermes config path` prints the config.yaml absolute path; we
-		// want the parent directory.
-		return filepath.Dir(p), nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", output.IOErr("hermes", "resolve-home", err)
-	}
-	return filepath.Join(home, ".hermes"), nil
-}
-
-// probeHermesConfigPathCLI runs `hermes config path` and returns the
-// trimmed stdout when it succeeds (one absolute file path per Hermes
-// v0.14+ contract). Best-effort: any failure — CLI not on PATH,
-// non-zero exit, garbage output — returns ("", false) so the caller
-// falls through to the next priority level. We intentionally do NOT
-// surface the exec error: Hermes may not be installed yet (Detector
-// path) or the user may have explicitly broken it, and the fallback
-// is correct in both cases.
-func probeHermesConfigPathCLI() (string, bool) {
-	cmd := exec.Command(hermesCommand(), "config", "path")
-	out, err := cmd.Output()
-	if err != nil {
-		return "", false
-	}
-	p := strings.TrimSpace(string(out))
-	if p == "" || !filepath.IsAbs(p) {
-		return "", false
-	}
-	return p, true
-}
+// hermesHome resolves the Hermes home directory using the four-step
+// priority chain in core.HermesHome (EVERCLI_HERMES_CONFIG_DIR →
+// HERMES_HOME → `hermes config path` → $HOME/.hermes). Delegates so
+// internal/importer can call core directly without importing this package.
+func hermesHome() (string, error) { return core.HermesHome() }
 
 // hermesConfigPath returns the absolute path to Hermes's config.yaml,
 // resolved via hermesHome's four-step priority chain.
@@ -177,6 +118,66 @@ func (hermesDetector) Detect(_ context.Context) (*Detection, error) {
 type hermesWriter struct{}
 
 func newHermesWriter() *hermesWriter { return &hermesWriter{} }
+
+func (*hermesWriter) Remove(_ context.Context, configPath string) (*RemoveResult, error) {
+	abs, err := filepath.Abs(configPath)
+	if err != nil {
+		return nil, output.IOErr(configPath, "abs-path", err)
+	}
+	cfg, exists, err := readHermesConfig(abs)
+	if err != nil {
+		return nil, err
+	}
+	home := filepath.Dir(abs)
+	result := &RemoveResult{Platform: PlatformHermes, ConfigPath: abs}
+	changed := false
+	if exists {
+		if memory, ok := cfg["memory"].(map[string]interface{}); ok {
+			if provider, _ := memory["provider"].(string); provider == "everme" {
+				delete(memory, "provider")
+				changed = true
+			}
+		}
+		if servers, ok := cfg["mcp_servers"].(map[string]interface{}); ok {
+			if _, ok := servers[hermesMcpEntryName]; ok {
+				delete(servers, hermesMcpEntryName)
+				changed = true
+			}
+		}
+	}
+	pluginDir := filepath.Join(home, "plugins", "everme")
+	envPath := filepath.Join(home, "everme.env")
+	if _, statErr := os.Stat(pluginDir); statErr == nil {
+		changed = true
+	}
+	if _, statErr := os.Stat(envPath); statErr == nil {
+		changed = true
+	}
+	if !changed {
+		return result, nil
+	}
+	if exists && (cfg != nil) {
+		// protected=true: the config may still carry a legacy
+		// mcp_servers entry with a live agent token.
+		backup, berr := backupFile(abs, true)
+		if berr != nil {
+			return nil, berr
+		}
+		// Our token is gone from cfg by now, so leave the host's mode alone.
+		if err := writeHermesConfig(abs, cfg, configHasNoToken); err != nil {
+			return nil, err
+		}
+		result.BackupPath = backup
+	}
+	if err := os.RemoveAll(pluginDir); err != nil {
+		return nil, output.IOErr(pluginDir, "remove-plugin", err)
+	}
+	if err := os.Remove(envPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, output.IOErr(envPath, "remove-env", err)
+	}
+	result.Removed = true
+	return result, nil
+}
 
 func (*hermesWriter) Platform() Platform { return PlatformHermes }
 
@@ -272,7 +273,9 @@ func (*hermesWriter) Commit(_ context.Context, plan *WritePlan, params WritePara
 		return nil, err
 	}
 	removeLegacyMcpEntry(cfg)
-	if err := writeHermesConfig(plan.ConfigPath, cfg); err != nil {
+	// config.yaml only selects the provider; the credential goes to
+	// everme.env (writeEvermeEnv, 0600).
+	if err := writeHermesConfig(plan.ConfigPath, cfg, configHasNoToken); err != nil {
 		return nil, err
 	}
 
@@ -384,9 +387,10 @@ func readHermesConfig(path string) (map[string]interface{}, bool, error) {
 
 // writeHermesConfig serialises cfg as YAML (2-space indent matching
 // hermes_cli/mcp_config.py's save_config output) and atomically replaces
-// path. Mode inheritance: existing files keep their mode (Hermes writes
-// 0600), fresh files land 0600 because they carry a token.
-func writeHermesConfig(path string, cfg map[string]interface{}) error {
+// path. Mode selection follows configWriteMode; the caller says whether
+// cfg holds a credential (config.yaml does not — the token lives in
+// everme.env, written separately at 0600).
+func writeHermesConfig(path string, cfg map[string]interface{}, secrecy configSecrecy) error {
 	var buf bytes.Buffer
 	enc := yaml.NewEncoder(&buf)
 	enc.SetIndent(2)
@@ -398,14 +402,7 @@ func writeHermesConfig(path string, cfg map[string]interface{}) error {
 		return output.Internal(fmt.Errorf("close yaml encoder: %w", err))
 	}
 
-	mode := os.FileMode(0o600)
-	if info, err := os.Stat(path); err == nil {
-		mode = info.Mode().Perm()
-	}
-	if err := writeFileAtomic(path, buf.Bytes(), mode); err != nil {
-		return output.IOErr(path, "write-config", err)
-	}
-	return nil
+	return writeConfigFileAtomic(path, buf.Bytes(), secrecy)
 }
 
 // hermesProviderInstalled reports whether the EverMe provider is wired:

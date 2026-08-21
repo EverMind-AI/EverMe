@@ -12,6 +12,7 @@ import (
 	"evercli/internal/logger"
 	"evercli/internal/machineid"
 	"evercli/internal/output"
+	"evercli/internal/runctx"
 	"evercli/internal/validate"
 )
 
@@ -143,6 +144,7 @@ func (s *Service) loginAPIKey(ctx context.Context, key string) (*LoginResult, er
 		logger.L().Warnw("loginAPIKey: ensureSelfAgent failed (uploads will require manual re-auth)",
 			"err", err.Error(),
 		)
+		s.discardStaleAgentToken(ctx, "loginAPIKey")
 	}
 	return &LoginResult{
 		Status:       "approved",
@@ -174,6 +176,23 @@ func (s *Service) ensureSelfAgent(ctx context.Context) error {
 		return fmt.Errorf("persist evt: %w", err)
 	}
 	return nil
+}
+
+// discardStaleAgentToken removes any cached evt after a failed
+// ensureSelfAgent. On an account switch the cached evt belonged to the
+// PREVIOUS account; leaving it in place would let a later `import run`
+// silently upload under the old account (ECA-689). Deleting it forces a
+// loud NotLoggedIn on the next upload so the user re-runs `auth login`
+// instead. Best-effort: ErrNotFound (nothing to drop) and ErrReadOnly
+// (EnvProvider — evt supplied out-of-band) are both fine.
+func (s *Service) discardStaleAgentToken(ctx context.Context, where string) {
+	if err := s.cred.Delete(ctx, credential.AgentToken()); err != nil &&
+		!errors.Is(err, credential.ErrNotFound) && !errors.Is(err, credential.ErrReadOnly) {
+		logger.L().Warnw("discard stale evt failed; a later import may target the previous account",
+			"where", where,
+			"err", err.Error(),
+		)
+	}
 }
 
 func (s *Service) loginDeviceStartOnly(ctx context.Context, opts LoginOptions) (*LoginResult, error) {
@@ -251,12 +270,20 @@ func (s *Service) bestEffortDeleteSession(reason string) {
 
 // loginDeviceBlocking runs DeviceStart, then polls DeviceToken every
 // resp.Interval seconds until approved or the server-issued deadline
-// passes. Honors ctx cancellation throughout.
+// passes. Honors genuine ctx cancellation throughout.
 //
-// We extend ctx beyond --timeout to match the server's expiresIn so the
-// global 60s default doesn't kill a flow that legitimately waits for the
-// user to click in their browser.
+// The global --timeout (60s default) reaches us as a parent-context
+// deadline (cmdctx.BuildDeps wraps cmd.Context with it). This flow waits
+// on a human clicking "approve" in their browser, so that 60s default
+// would kill it long before the server-issued expiresIn (~5 min) elapses
+// — the displayed "expires in 300s" then contradicts the real timeout
+// (ECA-686). We detach the inherited deadline up front and let the
+// server's expiresIn govern instead; each network call below keeps its
+// own bounded sub-timeout, and Ctrl-C still aborts promptly.
 func (s *Service) loginDeviceBlocking(ctx context.Context, opts LoginOptions) (*LoginResult, error) {
+	ctx, baseCancel := detachInheritedDeadline(ctx)
+	defer baseCancel()
+
 	// Drop any stale --no-wait session left from a previous run so the
 	// blocking flow doesn't accidentally inherit a dead deviceCode if a
 	// later resume command attempts to read this file.
@@ -355,6 +382,7 @@ func (s *Service) completeApproved(ctx context.Context, token *client.DeviceToke
 		logger.L().Warnw("completeApproved: ensureSelfAgent failed (uploads will require manual re-auth)",
 			"err", err.Error(),
 		)
+		s.discardStaleAgentToken(ctx, "completeApproved")
 	}
 
 	return &LoginResult{
@@ -367,6 +395,25 @@ func (s *Service) completeApproved(ctx context.Context, token *client.DeviceToke
 	}, nil
 }
 
+// detachInheritedDeadline returns a child that drops the inherited
+// --timeout deadline but still cancels on a genuine SIGINT / user abort.
+// Used by the blocking Device Flow so the global --timeout default
+// doesn't clip the human-approval wait, while Ctrl-C still aborts
+// promptly (ECA-686).
+//
+// We branch off the un-deadlined cancellation source (the signal context
+// cmdctx stashes via runctx) rather than the deadline-bearing parent.
+// This matters precisely after the inherited deadline elapses: a
+// context's Err freezes to DeadlineExceeded on the FIRST done, so a
+// cancel arriving later is never observable through the parent again —
+// watching parent would hang the flow until the server expiresIn. The
+// un-deadlined source carries no deadline to freeze, so a post-deadline
+// Ctrl-C still propagates. When no source was stashed (timeout=0, tests),
+// runctx.BaseContext returns parent and behaviour is unchanged.
+func detachInheritedDeadline(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithCancel(runctx.BaseContext(parent))
+}
+
 func deviceStartReq(opts LoginOptions) client.DeviceStartReq {
 	name := opts.ClientName
 	if name == "" {
@@ -376,6 +423,7 @@ func deviceStartReq(opts LoginOptions) client.DeviceStartReq {
 	if ver == "" {
 		ver = "dev"
 	}
+	ver = core.TruncateClientVersion(ver)
 	const platform = "evercli"
 	return client.DeviceStartReq{
 		ClientName:         name,

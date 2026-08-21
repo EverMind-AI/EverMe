@@ -12,7 +12,7 @@ npx @everme/cli --version
 
 ## What this package does
 
-`@everme/cli` is a thin Node-side installer + runner; the actual CLI is a pre-compiled binary downloaded from `EverMind-AI/EverMe` GitHub Releases on first install. On `npm install`:
+`@everme/cli` is a thin Node-side installer + runner; the actual CLI is a pre-compiled binary downloaded on first install. On `npm install`:
 
 1. Detect platform / arch (darwin/linux/windows × amd64/arm64)
 2. Download the matching archive from `https://github.com/EverMind-AI/EverMe/releases/download/v<version>/evercli_<os>_<arch>.{tar.gz|zip}`
@@ -27,7 +27,7 @@ If `postinstall` was skipped (some `npx` flows, restricted CI), the installer ru
 The installer tries download sources in this order:
 
 1. `https://github.com/EverMind-AI/EverMe/releases/...` (canonical)
-2. The npm registry's binary mirror path (`<registry>/-/binary/everme-cli/...`), if your `npm_config_registry` is non-default. `everme-cli` here is only the binary mirror namespace.
+2. The npm registry's binary mirror path (`<registry>/-/binary/everme-cli/...`), if your `npm_config_registry` is non-default
 3. `https://registry.npmmirror.com/-/binary/everme-cli/...` (always tried as final fallback)
 
 The first source to succeed wins. SHA-256 verification runs regardless of source.

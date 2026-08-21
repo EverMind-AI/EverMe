@@ -5,11 +5,16 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 
 	"evercli/internal/client"
+	"evercli/internal/core"
 	"evercli/internal/machineid"
 	"evercli/internal/output"
+	"evercli/internal/runctx"
 )
+
+const dshOperationTimeoutFloor = 5 * time.Minute
 
 // defaultMachineFn adapts machineid.Fingerprint to the per-platform
 // signature used internally. Kept as a function so tests can swap it via
@@ -216,6 +221,9 @@ type InstallEntry struct {
 	ConfigPath  string   `json:"configPath"`
 	BackupPath  string   `json:"backupPath,omitempty"`
 	Warnings    []string `json:"warnings,omitempty"`
+	// NextSteps are required manual follow-ups carried up from
+	// WriteResult.NextSteps (e.g. Kimi Code's TUI `/plugins install`).
+	NextSteps []string `json:"nextSteps,omitempty"`
 }
 
 // SkipEntry covers --no-prompt + not-detected and similar voluntary
@@ -255,6 +263,9 @@ func (s *Service) Install(ctx context.Context, platforms []Platform, opts Instal
 	if len(platforms) == 0 {
 		return nil, output.Invalid("at least one platform is required", "Pass platform names, e.g. `evercli plugin install claude-code`")
 	}
+	ctx, cancel := installOperationContext(ctx, platforms)
+	defer cancel()
+
 	rep := &InstallReport{}
 	for _, p := range platforms {
 		if !s.reg.Has(p) {
@@ -359,9 +370,8 @@ func (s *Service) installOne(ctx context.Context, p Platform, opts InstallOption
 	// the previous evt. The retry path is "rerun install": same-platform
 	// + same-fingerprint upsert on /agents auto-rotates the token, so
 	// a stranded server-side token from a failed Commit self-heals on
-	// the next install attempt. See H.4 in
-	// docs/mcp-codex-hermes-iteration-plan-2026-05-26.md for why V1
-	// doesn't restore Client.DisconnectAgent.
+	// the next install attempt. V1 deliberately doesn't restore
+	// Client.DisconnectAgent.
 	res, err := wr.Commit(ctx, plan, WriteParams{
 		AgentID:    regResp.AgentID,
 		AgentToken: regResp.AgentToken,
@@ -397,6 +407,7 @@ func (s *Service) installOne(ctx context.Context, p Platform, opts InstallOption
 		TokenPrefix: regResp.TokenPrefix,
 		ConfigPath:  res.ConfigPath,
 		BackupPath:  res.BackupPath,
+		NextSteps:   res.NextSteps,
 	}
 	if vr, ok := wr.(Verifier); ok {
 		if err := vr.Verify(ctx, res); err != nil {
@@ -444,12 +455,107 @@ func failedFromWithHint(p Platform, err error, extraHint string) FailedEntry {
 	}
 }
 
-// (Service.Uninstall / findCloudAgent / classifyDisconnectErr and the
-// associated UninstallResult / UninstallOptions / DisconnectErrorDetail
-// types were retired in the slimming pass. The plugin lifecycle is now
-// "install-only"; users disconnect agents from the EverMe web UI and
-// remove local MCP entries by hand if needed. Writer.Remove is also
-// gone — see types.go and the per-writer files.)
+func (s *Service) Uninstall(ctx context.Context, p Platform, opts UninstallOptions) (*UninstallResult, error) {
+	if !s.reg.Has(p) {
+		return nil, output.Invalid(fmt.Sprintf("unknown platform %q", p), "")
+	}
+	if p == PlatformDSH {
+		var cancel context.CancelFunc
+		ctx, cancel = dshOperationContext(ctx)
+		defer cancel()
+	}
+	detection, detErr := s.reg.detector(p).Detect(ctx)
+	if detection == nil {
+		detection = &Detection{Platform: p, DisplayName: string(p)}
+	}
+	wr := s.reg.writer(p)
+	rm, ok := wr.(Remover)
+	if !ok {
+		return nil, output.Invalid(fmt.Sprintf("platform %s does not support uninstall", p), "Upgrade evercli or remove the EverMe entry manually")
+	}
+	res, err := rm.Remove(ctx, detection.ConfigPath)
+	if err != nil {
+		return nil, err
+	}
+	out := &UninstallResult{Platform: p, Removed: res.Removed, ConfigPath: res.ConfigPath, BackupPath: res.BackupPath}
+	if advisor, ok := wr.(UninstallAdvisor); ok {
+		out.NextSteps = append([]string(nil), advisor.UninstallNextSteps()...)
+	}
+	if detErr != nil {
+		ce := output.ClassifyError(detErr)
+		out.LocalDetectError = &DetectErrorItem{Type: string(ce.Type), Code: ce.Code, Message: ce.Message, Hint: ce.Hint}
+	}
+	// Local cleanup is idempotent. Even when the entry was already removed
+	// manually, uninstall must still converge the cloud state and revoke the
+	// matching agent; otherwise a successful local retry leaves an orphaned
+	// evt_* token behind.
+	if opts.KeepAgent {
+		return out, nil
+	}
+	agents, err := s.cli.ListAgents(ctx, client.AgentFilter{Platform: string(p)})
+	if err != nil {
+		out.DisconnectError = classifyDisconnectErr(err, "")
+		return out, nil
+	}
+	want := s.machineFn(p)
+	var candidate *client.Agent
+	for i := range agents {
+		a := &agents[i]
+		if a.Platform == string(p) && a.MachineFingerprint == want {
+			candidate = a
+			break
+		}
+	}
+	if candidate == nil {
+		// Only an exact fingerprint match may be disconnected. An older
+		// fallback picked a lone fingerprint-less same-platform agent,
+		// which could revoke ANOTHER machine's token. Not an error —
+		// local cleanup already succeeded; surface the fact so JSON and
+		// text consumers both see nothing was disconnected.
+		out.NoMatchingCloudAgent = true
+		out.NextSteps = append(out.NextSteps, fmt.Sprintf(
+			"no cloud agent matched this machine's fingerprint for %s, so none was disconnected — if an agent for this machine still appears in the EverMe web UI, disconnect it there",
+			p))
+		return out, nil
+	}
+	if err := s.cli.DisconnectAgent(ctx, candidate.ID); err != nil {
+		out.DisconnectError = classifyDisconnectErr(err, candidate.ID)
+		return out, nil
+	}
+	out.AgentDisconnected = true
+	return out, nil
+}
+
+func installOperationContext(parent context.Context, platforms []Platform) (context.Context, context.CancelFunc) {
+	for _, platform := range platforms {
+		if platform == PlatformDSH {
+			return dshOperationContext(parent)
+		}
+	}
+	return parent, func() {}
+}
+
+func dshOperationContext(parent context.Context) (context.Context, context.CancelFunc) {
+	base := runctx.BaseContext(parent)
+	deadline, ok := parent.Deadline()
+	if !ok {
+		return context.WithCancel(base)
+	}
+	timeout := time.Until(deadline)
+	if timeout < dshOperationTimeoutFloor {
+		timeout = dshOperationTimeoutFloor
+	}
+	return context.WithTimeout(base, timeout)
+}
+
+func classifyDisconnectErr(err error, agentID string) *DisconnectErrorDetail {
+	ce := output.ClassifyError(err)
+	hint := ce.Hint
+	if hint == "" {
+		hint = "Disconnect this agent in the EverMe Web UI, or rerun with --keep-agent"
+	}
+	return &DisconnectErrorDetail{Type: ce.Type, Code: ce.Code, Message: ce.Message, Hint: hint, AgentID: agentID}
+}
 
 // buildRegisterReq composes the RegisterAgent request body for Install.
 // The display label comes from the live Detector — `evercli plugin
@@ -462,13 +568,12 @@ func (s *Service) buildRegisterReq(p Platform, displayName string) client.Regist
 		Platform:           string(p),
 		Name:               displayName + " @ " + shortHost(hostname),
 		MachineFingerprint: s.machineFn(p),
-		ClientVersion:      "evercli/" + osTag(),
+		ClientVersion:      core.TruncateClientVersion("evercli/" + osTag()),
 	}
 }
 
 // (Service.Register / RegisterResult / displayFallback were retired in V1
-// alongside the `evercli plugin register` cobra command — see
-// docs/mcp-codex-hermes-iteration-plan-2026-05-26.md §D.3. The backend
+// alongside the `evercli plugin register` cobra command. The backend
 // /agents endpoint stays; Install drives it through the path above.)
 
 // osTag is a short string ("darwin"/"linux"/"windows") for the backend's

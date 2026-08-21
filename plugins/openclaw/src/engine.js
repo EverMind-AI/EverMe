@@ -23,6 +23,7 @@ import {
   assertConfigUsable,
   createClient,
   redactError,
+  describeError,
   flushAgentMemory,
   saveAgentMemory,
   searchMemory,
@@ -155,20 +156,20 @@ export function createContextEngine(pluginMeta, hostConfig, hostLogger) {
       // debug toggle.
       const shape = trajectoryShape(tail);
       try {
-        await saveAgentMemory(client, {
+        const saved = await saveAgentMemory(client, {
           conversationId: sessionKey,
           messages: tail,
           flush,
         }, log);
         s.turnCount = nextTurn;
         s.savedUpTo = allMessages.length;
-        log.info?.(`${L} afterTurn[${engineId}]: saved ${tail.length} messages via agent-memory, sessionKey=${sessionKey} turn=${s.turnCount} flushed=${flush} shape=${shape}`);
+        log.info?.(`${L} afterTurn[${engineId}]: saved ${tail.length} messages via agent-memory, sessionKey=${sessionKey} turn=${s.turnCount} flushed=${flush} shape=${shape} requestId=${saved?.requestId || ""}`);
       } catch (err) {
         // Leave turnCount/savedUpTo untouched so the same tail retries
         // on the next afterTurn — bumping them here would skip the
         // natural retry slot and could starve a flush turn if EverOS
         // keeps failing.
-        log.warn(`${L} afterTurn realtime save failed: ${redactError(err?.message)}`);
+        log.warn(`${L} afterTurn realtime save failed: ${describeError(err)}`);
       }
     },
 
@@ -222,7 +223,7 @@ export function createContextEngine(pluginMeta, hostConfig, hostLogger) {
           systemPromptAddition: block,
         };
       } catch (err) {
-        log.warn(`${L} assemble /mem/search failed: ${redactError(err?.message)}`);
+        log.warn(`${L} assemble /mem/search failed: ${describeError(err)}`);
         return { messages, estimatedTokens: 0 };
       }
     },
@@ -233,7 +234,7 @@ export function createContextEngine(pluginMeta, hostConfig, hostLogger) {
         try {
           await flushAgentMemory(client, { conversationId: sessionKey }, log);
         } catch (err) {
-          log.warn(`${L} compact flush failed: ${redactError(err?.message)}`);
+          log.warn(`${L} compact flush failed: ${describeError(err)}`);
         }
       }
       return { ok: true, compacted: false, reason: "everme: pending memory extraction flushed before compaction" };
@@ -254,7 +255,7 @@ export function createContextEngine(pluginMeta, hostConfig, hostLogger) {
             }),
           ]);
         } catch (err) {
-          log.warn(`${L} dispose flush failed: ${redactError(err?.message)}`);
+          log.warn(`${L} dispose flush failed: ${describeError(err)}`);
         } finally {
           clearTimeout(timer);
         }

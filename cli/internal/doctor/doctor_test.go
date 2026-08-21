@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -43,6 +44,11 @@ func TestRun_NetworkAndCredHappyPath(t *testing.T) {
 	// branch so the test result is independent of whether the dev
 	// machine running the suite happens to have `claude` on PATH.
 	t.Setenv("EVERCLI_CLAUDE_CMD", "/nonexistent/claude-for-doctor-test")
+	// Same reason for the version-drift check: point it at a payload
+	// directory that doesn't exist so it takes the "nothing to compare"
+	// branch instead of reading whatever @everme/claude-code the dev
+	// machine happens to have globally installed.
+	t.Setenv("EVERCLI_CLAUDE_PLUGIN_SOURCE", filepath.Join(tmp, "no-such-payload"))
 
 	paths := &core.Paths{ConfigDir: tmp, DataDir: tmp, CacheDir: tmp}
 	cfg := &core.Config{APIBaseURL: srv.URL, Paths: paths, Timeout: 5 * time.Second}
@@ -52,7 +58,7 @@ func TestRun_NetworkAndCredHappyPath(t *testing.T) {
 
 	rep := Run(context.Background(), Deps{Config: cfg, CredPrv: prv})
 	require.NotNil(t, rep)
-	require.Len(t, rep.Checks, 5, "doctor runs: network.healthz, network.readyz, credential.backend, credential.readable, plugin.claude-code.mcp-visible")
+	require.Len(t, rep.Checks, 6, "doctor runs: network.healthz, network.readyz, credential.backend, credential.readable, plugin.claude-code.mcp-visible, plugin.claude-code.version-current")
 
 	assert.Equal(t, "network.everme-api", rep.Checks[0].Name)
 	assert.True(t, rep.Checks[0].OK)
@@ -65,6 +71,9 @@ func TestRun_NetworkAndCredHappyPath(t *testing.T) {
 	assert.Equal(t, "plugin.claude-code.mcp-visible", rep.Checks[4].Name)
 	assert.True(t, rep.Checks[4].OK, "with no claude CLI present the check degrades to SevInfo OK")
 	assert.Equal(t, SevInfo, rep.Checks[4].Severity)
+	assert.Equal(t, "plugin.claude-code.version-current", rep.Checks[5].Name)
+	assert.True(t, rep.Checks[5].OK, "with no readable payload the check degrades to SevInfo OK")
+	assert.Equal(t, SevInfo, rep.Checks[5].Severity)
 
 	assert.Zero(t, rep.Summary.CriticalFailed)
 }

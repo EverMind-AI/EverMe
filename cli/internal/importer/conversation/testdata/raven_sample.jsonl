@@ -1,0 +1,11 @@
+{"_type":"metadata","key":"cli:20260703_101500_ab12cd","created_at":"2026-07-03T10:15:00.123456","updated_at":"2026-07-03T10:15:00.123456","metadata":{"source":null,"channel":"cli","chat_id":"20260703_101500_ab12cd","title":null,"parent_session_id":null},"last_consolidated":0,"pending_clarification":null}
+{"role":"system","content":"You are Raven, a helpful agent.","timestamp":"2026-07-03T10:15:00.200000"}
+{"role":"user","content":"list the files in /tmp/demo","timestamp":"2026-07-03T10:15:01.000000"}
+{"role":"assistant","content":"Let me check.","tool_calls":[{"id":"call_001","type":"function","function":{"name":"run_shell","arguments":"{\"cmd\":\"ls /tmp/demo\"}"}}],"timestamp":"2026-07-03T10:15:02.000000"}
+{"role":"tool","tool_call_id":"call_001","content":"a.txt\nb.txt","timestamp":"2026-07-03T10:15:03.000000"}
+{"role":"assistant","content":"There are two files: a.txt and b.txt.","timestamp":"2026-07-03T10:15:04.000000"}
+{"_type":"metadata","key":"cli:20260703_101500_ab12cd","created_at":"2026-07-03T10:15:00.123456","updated_at":"2026-07-03T10:16:00.654321","metadata":{"source":null,"channel":"cli","chat_id":"20260703_101500_ab12cd","title":"demo","parent_session_id":null},"last_consolidated":0,"pending_clarification":null}
+{"role":"user","content":[{"type":"text","text":"thanks,"},{"type":"text","text":"summarize them"},{"type":"image","path":"/tmp/x.png"}],"timestamp":"2026-07-03T10:16:01.000000"}
+{"role":"assistant","content":[{"type":"text","text":"Both files are empty placeholders."}],"timestamp":1751501762}
+{"role":"tool","content":"orphan result without id","timestamp":"2026-07-03T10:16:03.000000"}
+not json at all

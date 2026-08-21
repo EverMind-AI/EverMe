@@ -29,6 +29,8 @@ type Server struct {
 
 	// captured holds the most recent request per route so tests can
 	// assert on headers / body without bookkeeping at the call site.
+	// Guarded by mu: handlers write it from server goroutines while the
+	// test goroutine reads it through LastRequest.
 	mu       sync.Mutex
 	captured map[string]*RecordedRequest
 }

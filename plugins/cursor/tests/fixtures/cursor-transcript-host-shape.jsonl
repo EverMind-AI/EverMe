@@ -1,0 +1,4 @@
+{"role":"user","message":{"content":[{"type":"text","text":"old question"}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"old answer"}]}}
+{"role":"user","message":{"content":[{"type":"text","text":"latest question"}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"latest answer"}]}}

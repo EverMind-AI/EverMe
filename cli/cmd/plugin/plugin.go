@@ -1,18 +1,19 @@
-// Package plugin registers `evercli plugin list / install`.
+// Package plugin registers `evercli plugin list / install / uninstall`.
 //
-// `register` was retired in V1 (mcp-codex-hermes-iteration-plan-2026-05-26.md
-// §D.3) once the install matrix covered all five V1 hosts (Claude Code,
-// OpenClaw, Cursor, Claude Desktop, Codex). Issuing one-shot tokens for
-// users to paste by hand violated the "全 install, 零 register" hard
-// constraint — every supported host now lands its agent token via
-// `evercli plugin install <host>` with zero copy-paste. The backend
-// endpoint (`POST /agents`) and the internal RegisterAgent client method
-// remain — install drives them — but the CLI-facing `register` command
-// is gone.
+// `register` was retired in V1 once the install matrix covered all five
+// V1 hosts (Claude Code, OpenClaw, Cursor, Claude Desktop, Codex).
+// Issuing one-shot tokens for users to paste by hand violated the
+// all-install / zero-register hard constraint — every supported host now
+// lands its agent token via `evercli plugin install <host>` with zero
+// copy-paste. The backend endpoint (`POST /agents`) and the internal
+// RegisterAgent client method remain — install drives them — but the
+// CLI-facing `register` command is gone.
 //
-// `uninstall` was retired in the earlier slimming pass — users disconnect
-// agents from the EverMe web UI and remove local MCP entries manually
-// if needed. See H.4 for why DisconnectAgent isn't being restored in V1.
+// `uninstall` removes EverMe-owned local state and then disconnects the
+// cloud agent whose machine fingerprint matches this machine. There is
+// no standalone cloud-only disconnect command — disconnecting without
+// local cleanup is a Web UI action; the inverse (local cleanup without
+// disconnect) is `uninstall --keep-agent`.
 package plugin
 
 import "github.com/spf13/cobra"
@@ -25,5 +26,6 @@ func New() *cobra.Command {
 	}
 	c.AddCommand(newList())
 	c.AddCommand(newInstall())
+	c.AddCommand(newUninstall())
 	return c
 }

@@ -6,10 +6,10 @@
  * postinstall hook for @everme/cli — downloads, verifies, and extracts the
  * platform-native evercli binary into <pkg>/bin.
  *
- * Expected binary archive conventions:
+ * Conventions match this monorepo's existing goreleaser config
+ * (cli/.goreleaser.yml):
  *
- *   repo     EverMind-AI/EverMe
- *   tag      vX.Y.Z
+ *   tag      cli/vX.Y.Z
  *   archive  evercli_<os>_<arch>.tar.gz   (Unix)
  *            evercli_<os>_<arch>.zip      (Windows)
  *   checksum sha256sums.txt
@@ -24,6 +24,7 @@ const path = require("path");
 const os = require("os");
 const crypto = require("crypto");
 const { execFileSync } = require("child_process");
+const { refreshPlugins } = require("./upgrade-plugins.js");
 
 const VERSION = require("../package.json").version;
 const REPO = "EverMind-AI/EverMe";
@@ -57,7 +58,10 @@ const isWindows = process.platform === "win32";
 const ext = isWindows ? ".zip" : ".tar.gz";
 const archiveName = `${NAME}_${platform}_${arch}${ext}`;
 
-// Tag scheme is bare semver `vX.Y.Z`.
+// Tag scheme is bare semver `vX.Y.Z`. The original design used a monorepo
+// prefix `cli/vX.Y.Z`, but goreleaser OSS rejects prefixed tags as invalid
+// semver (the `monorepo.tag_prefix` setting is Pro-only). Since server is
+// deployed separately (not tagged), the cli/ prefix carried no real value.
 const TAG = `v${VERSION}`;
 const GITHUB_URL = `https://github.com/${REPO}/releases/download/${TAG}/${archiveName}`;
 
@@ -91,9 +95,8 @@ function isDefaultNpmjsRegistry(url) {
  *
  *   1. npm_config_registry — when the user has set a non-default registry
  *      (npmmirror clone, corp Verdaccio, Artifactory), we prepend the
- *      derived path. The `everme-cli` segment is a binary mirror namespace,
- *      not a GitHub repository name. Many proxies don't host /-/binary/<pkg>/...,
- *      so we always append the public npmmirror as a final fallback.
+ *      derived path. Many proxies don't host /-/binary/<pkg>/..., so we
+ *      always append the public npmmirror as a final fallback.
  *   2. registry.npmmirror.com — public China mirror, always tried last.
  *
  * The default public npmjs registry is skipped because it doesn't host
@@ -357,6 +360,14 @@ if (require.main === module) {
 
   try {
     install();
+    // One-shot plugin refresh: bring already-installed hosts to the latest
+    // plugin line. Never fatal — guards + per-host try/catch live in the
+    // module; we belt-and-suspenders wrap here so nothing fails `npm i -g`.
+    try {
+      refreshPlugins({ binPath: dest, env: process.env });
+    } catch (e) {
+      console.error(`[@everme/cli] plugin refresh skipped: ${e.message}`);
+    }
   } catch (err) {
     console.error(`Failed to install ${NAME}:`, err.message);
     console.error(

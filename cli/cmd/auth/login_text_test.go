@@ -2,6 +2,7 @@ package auth
 
 import (
 	"bytes"
+	"io"
 	"strings"
 	"testing"
 
@@ -9,7 +10,20 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"evercli/internal/auth"
+	"evercli/internal/output"
 )
+
+func TestCompleteLoginWritesEnvelope(t *testing.T) {
+	for _, status := range []string{"approved", "pending", "denied", "expired"} {
+		t.Run(status, func(t *testing.T) {
+			var stdout bytes.Buffer
+			out := output.NewWriterTo(&stdout, io.Discard, output.FormatJSON)
+			require.NoError(t, completeLogin(out, &auth.LoginResult{Status: status}))
+			assert.Contains(t, stdout.String(), `"ok": true`)
+			assert.Contains(t, stdout.String(), status)
+		})
+	}
+}
 
 // These tests cover the text renderers in isolation. The end-to-end
 // integration of the cobra commands (flag parsing, deps wiring, RunE

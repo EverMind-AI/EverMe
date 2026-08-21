@@ -13,7 +13,10 @@
 // registry.go — no other code change required.
 package plugin
 
-import "context"
+import (
+	"context"
+	"evercli/internal/output"
+)
 
 // Platform is a stable enum-like string identifying an Agent. Values
 // here are part of the AI-Agent ABI (used as `--platform` arg and in
@@ -27,8 +30,12 @@ const (
 	PlatformClaudeDesktop Platform = "claude-desktop"
 	PlatformCodex         Platform = "codex"
 	PlatformHermes        Platform = "hermes"
-	PlatformGemini        Platform = "gemini"
+	PlatformDevin         Platform = "devin"
+	PlatformWorkBuddy     Platform = "workbuddy"
 	PlatformOpenCode      Platform = "opencode"
+	PlatformKimiCode      Platform = "kimicode"
+	PlatformRaven         Platform = "raven"
+	PlatformDSH           Platform = "dsh"
 )
 
 // Detection is the result of inspecting the local filesystem for one
@@ -70,6 +77,8 @@ type WritePlan struct {
 	// rejects when it finds the file has appeared (concurrent-create).
 	SnapshotModTime int64 // unix nanoseconds
 	SnapshotSize    int64
+
+	auxiliaryFiles []fileSnapshot
 }
 
 // WriteParams carries the data Commit needs to materialize the entry —
@@ -87,16 +96,27 @@ type WriteResult struct {
 	ConfigPath    string   `json:"configPath"`
 	BackupPath    string   `json:"backupPath,omitempty"`
 	WroteNewEntry bool     `json:"wroteNewEntry"`
+
+	// NextSteps are required manual follow-ups the user must perform after
+	// a successful Commit (distinct from Warnings, which flag a tripped
+	// sanity check). Kimi Code uses this for the TUI `/plugins install`
+	// registration it cannot do headlessly. Empty for hosts that finish
+	// entirely within Commit.
+	NextSteps []string `json:"nextSteps,omitempty"`
+}
+
+// RemoveResult describes local cleanup. Removal is idempotent: a missing
+// config or missing EverMe-owned entry is a successful no-op.
+type RemoveResult struct {
+	Platform   Platform `json:"platform"`
+	ConfigPath string   `json:"configPath"`
+	BackupPath string   `json:"backupPath,omitempty"`
+	Removed    bool     `json:"removed"`
 }
 
 // Writer mutates the local MCP config. The Plan / Commit split lets
 // install run a local pre-flight before triggering the backend rotate
 // (which immediately invalidates the old evt) — see 04-plugin.md §4.6.1.
-//
-// Remove was retired in the slimming pass alongside `evercli plugin
-// uninstall`. The MVP plugin lifecycle is install-only; users
-// disconnect agents from the EverMe web UI and clear local MCP
-// entries by hand.
 type Writer interface {
 	Platform() Platform
 
@@ -110,6 +130,47 @@ type Writer interface {
 	// without first having ensured Plan succeeded — once the token is
 	// minted, only writing it (or surfacing an error) is safe.
 	Commit(ctx context.Context, plan *WritePlan, params WriteParams) (*WriteResult, error)
+}
+
+// Remover is implemented by writers that can remove only EverMe-owned
+// content while preserving the host's other configuration.
+type Remover interface {
+	Remove(ctx context.Context, configPath string) (*RemoveResult, error)
+}
+
+// UninstallAdvisor lets a writer report host-specific cleanup that cannot be
+// performed safely by evercli. Kimi Code's managed plugin registry is owned by
+// the host TUI, so local staging cleanup succeeds while the user still needs
+// to unregister the entry there.
+type UninstallAdvisor interface {
+	UninstallNextSteps() []string
+}
+
+type UninstallOptions struct{ KeepAgent bool }
+
+type DisconnectErrorDetail struct {
+	Type    output.ErrorType `json:"type"`
+	Code    int              `json:"code,omitempty"`
+	Message string           `json:"message"`
+	Hint    string           `json:"hint,omitempty"`
+	AgentID string           `json:"agentId,omitempty"`
+}
+
+type UninstallResult struct {
+	Platform          Platform `json:"platform"`
+	Removed           bool     `json:"removed"`
+	AgentDisconnected bool     `json:"agentDisconnected"`
+	// NoMatchingCloudAgent is true when no cloud agent carried this
+	// machine's fingerprint for the platform, so nothing was
+	// disconnected. Only an exact fingerprint match is ever revoked —
+	// disconnecting anything else risks killing another machine's
+	// agent. A matching NextSteps entry points at the web UI fallback.
+	NoMatchingCloudAgent bool                   `json:"noMatchingCloudAgent,omitempty"`
+	ConfigPath           string                 `json:"configPath,omitempty"`
+	BackupPath           string                 `json:"backupPath,omitempty"`
+	DisconnectError      *DisconnectErrorDetail `json:"disconnectError,omitempty"`
+	LocalDetectError     *DetectErrorItem       `json:"localDetectError,omitempty"`
+	NextSteps            []string               `json:"nextSteps,omitempty"`
 }
 
 // Preparer is an optional Writer extension for hosts that need a

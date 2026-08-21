@@ -1,0 +1,43 @@
+{
+  "name": "@everme/cursor",
+  "version": "0.6.1",
+  "type": "module",
+  "description": "Native EverMe lifecycle hooks for Cursor.",
+  "license": "Apache-2.0",
+  "bin": {
+    "everme-cursor": "./bin/hook.js"
+  },
+  "files": [
+    "bin/",
+    "src/"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "test": "node --test tests/transcript.test.js tests/adapter.test.js tests/hook.test.js"
+  },
+  "keywords": [
+    "evermind",
+    "everme",
+    "cursor",
+    "memory",
+    "hooks"
+  ],
+  "homepage": "https://everme.evermind.ai",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/EverMind-AI/EverMe.git",
+    "directory": "plugins/cursor"
+  },
+  "bugs": {
+    "url": "https://github.com/EverMind-AI/EverMe/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
+  "dependencies": {
+    "@everme/agent-sdk": "^0.6.1"
+  }
+}

@@ -1,0 +1,8 @@
+{"status":"done","type":"user_input","user_input":{"user_response":"old request"}}
+{"status":"done","type":"planner_response","planner_response":{"response":"old response"}}
+this is malformed json
+{"status":"done","type":"user_input","user_input":{"rules_applied":{"always_on":["my-rule.md"]},"user_response":"create a hello world file"}}
+{"status":"done","type":"planner_response","planner_response":{"response":"I'll create a hello world file for you."}}
+{"status":"done","type":"code_action","code_action":{"new_content":"print('hello world')\n","path":"/path/to/file.py"}}
+{"status":"done","type":"unknown_step","unknown_step":{"payload":"ignore me"}}
+{"status":"done","type":"planner_response","planner_response":{"response":"I created the file for you."}}

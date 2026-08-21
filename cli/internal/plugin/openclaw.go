@@ -105,6 +105,63 @@ func newOpenClawWriter() *openclawWriter { return &openclawWriter{} }
 
 func (*openclawWriter) Platform() Platform { return PlatformOpenClaw }
 
+func (*openclawWriter) Remove(_ context.Context, configPath string) (*RemoveResult, error) {
+	abs, err := filepath.Abs(configPath)
+	if err != nil {
+		return nil, output.IOErr(configPath, "abs-path", err)
+	}
+	cfg, exists, err := readConfig(abs)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return &RemoveResult{Platform: PlatformOpenClaw, ConfigPath: abs}, nil
+	}
+	plugins, _ := cfg["plugins"].(map[string]interface{})
+	if plugins == nil {
+		return &RemoveResult{Platform: PlatformOpenClaw, ConfigPath: abs}, nil
+	}
+	changed := false
+	if entries, ok := plugins["entries"].(map[string]interface{}); ok {
+		if _, ok := entries[OpenClawPluginID]; ok {
+			delete(entries, OpenClawPluginID)
+			changed = true
+		}
+	}
+	if slots, ok := plugins["slots"].(map[string]interface{}); ok {
+		if slots["contextEngine"] == OpenClawPluginID {
+			delete(slots, "contextEngine")
+			changed = true
+		}
+	}
+	if allow, ok := plugins["allow"].([]interface{}); ok {
+		out := allow[:0]
+		for _, v := range allow {
+			if v != OpenClawPluginID {
+				out = append(out, v)
+			} else {
+				changed = true
+			}
+		}
+		plugins["allow"] = out
+	}
+	if !changed {
+		return &RemoveResult{Platform: PlatformOpenClaw, ConfigPath: abs}, nil
+	}
+	// protected=true: openclaw.json carries the live agent_token, so
+	// the backup must be 0600. backupFile also propagates read errors
+	// instead of silently writing an empty .bak.
+	backup, err := backupFile(abs, true)
+	if err != nil {
+		return nil, err
+	}
+	// Our token is gone from cfg by now, so leave the host's mode alone.
+	if err := writeConfigAtomic(abs, cfg, configHasNoToken); err != nil {
+		return nil, err
+	}
+	return &RemoveResult{Platform: PlatformOpenClaw, ConfigPath: abs, BackupPath: backup, Removed: true}, nil
+}
+
 // Plan validates the target path (parent writable, file parses as JSON
 // if it exists) and records whether the entry already lives at
 // plugins.entries.<id>.
@@ -187,7 +244,8 @@ func (*openclawWriter) Commit(_ context.Context, plan *WritePlan, params WritePa
 		)
 	}
 
-	if err := writeConfigAtomic(plan.ConfigPath, cfg); err != nil {
+	// plugins.entries[everme].config carries the freshly minted agent_token.
+	if err := writeConfigAtomic(plan.ConfigPath, cfg, configCarriesToken); err != nil {
 		return nil, err
 	}
 

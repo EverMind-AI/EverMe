@@ -1,9 +1,16 @@
-export async function runSessionStart({ client }) {
-  const result = await client.request("POST", "/mem/context", {});
+import { requestMeta } from "../client.js";
+
+export async function runSessionStart({ client, log }) {
+  const { result, requestId } = await requestMeta(client, "POST", "/mem/context", {});
   const profile = result?.profile;
+  const count = profileItemCount(profile);
+  // One line per profile injection so a SessionStart can be located in ELK
+  // by its trace id — errors already carry it via the degraded diagnostic.
+  log?.info?.(`[everme] SessionStart profile: items=${count} requestId=${requestId}`);
   return {
     block: renderProfileBlock(profile),
-    count: profileItemCount(profile),
+    count,
+    requestId,
   };
 }
 

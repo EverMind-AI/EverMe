@@ -1,0 +1,8 @@
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"old question"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"old answer"}]}}
+this is malformed json
+{"type":"user","message":{"role":"user","content":"latest question"}}
+{"type":"reasoning","message":{"content":"private reasoning"}}
+{"kind":"unknown_step","payload":{"anything":true}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"latest answer"}]}}
+{"type":"tool_result","message":{"content":"tool details"}}
