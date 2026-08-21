@@ -1,6 +1,6 @@
 <div align="center" id="readme-top">
 
-# EverMe
+# EverMe CLI 与 Agent 插件
 
 <p align="center">
   <a href="https://x.com/evermind"><img src="https://img.shields.io/badge/EverMind-000000?labelColor=gray&style=for-the-badge&logo=x&logoColor=white" alt="X"></a>
@@ -9,7 +9,10 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue?style=for-the-badge" alt="License"></a>
 </p>
 
-**[EverMe](https://evermind.ai/everme) 的开源 CLI 与 Agent 插件套件 —— 跨设备、跨 Agent 的个人记忆层。**
+**用于将 AI Agent 接入 [EverMe](https://evermind.ai/everme) 的开源 CLI、MCP Server、SDK 与 Agent 插件。**
+
+> [!IMPORTANT]
+> 本仓库仅包含开源的 EverMe 客户端工具链与 Agent 接入代码。EverMe 产品、Web 应用和托管后端是独立服务，不包含在本仓库中。
 
 [产品主页](https://evermind.ai/everme) · [官网](https://evermind.ai) · [EverOS 记忆引擎](https://github.com/EverMind-AI/EverOS) · [文档](https://docs.evermind.ai/introduction) · [English](README.md)
 
@@ -22,7 +25,7 @@
 
 <br>
 
-- [项目概览](#项目概览)
+- [仓库概览](#仓库概览)
 - [快速开始](#快速开始)
 - [仓库结构](#仓库结构)
 - [接入你的 Agent](#接入你的-agent)
@@ -37,11 +40,9 @@
 
 </details>
 
-## 项目概览
+## 仓库概览
 
-**EverMe** 是真正懂你的数字分身，从一份真正属于你的记忆开始。每一次对话沉淀为经验、每一段经验固化为能力 —— Agent 的进化闭环。
-
-本仓库提供把任意 AI Agent —— Claude Code、Cursor、Codex、Hermes、OpenClaw 等 —— 接入 EverMe 记忆层所需的**客户端工具链**。托管服务与 EverOS 记忆引擎分别独立：
+本仓库提供把 Claude Code、Cursor、Codex、Hermes、OpenClaw 等 AI Agent 接入 [EverMe](https://evermind.ai/everme) 记忆层所需的**客户端工具链**。EverMe 托管产品与 EverOS 记忆引擎分别独立：
 
 | 层级 | 提供什么 | 在哪里 |
 | :--- | :--- | :--- |
@@ -49,13 +50,13 @@
 | **EverOS** 记忆引擎 | 长期记忆操作系统 | [EverMind-AI/EverOS](https://github.com/EverMind-AI/EverOS)（已开源）|
 | **EverMe 托管服务** | 后端、账号、计费 | [evermind.ai/everme](https://evermind.ai/everme) |
 
-可以选择直接对接托管服务，也可以自托管 EverOS 引擎 —— 通过 `EVERME_API_BASE` 把 CLI 指向你自己的部署即可。
+这套工具链既可以连接 EverMe 托管服务，也可以通过 `EVERME_API_BASE` 连接兼容的自托管 EverOS 端点。本仓库不包含 EverMe Web 应用、账号系统或计费服务。
 
 <br>
 
 ## 快速开始
 
-### 最快 —— 让你的 Agent 自己装
+### 最快 —— 用一句话接入你的 Agent
 
 把下面这句话粘贴给任意一个你本地已经在用的 AI Agent（Claude Code、Cursor、Codex、……）：
 
@@ -63,7 +64,7 @@
 Read https://everme.evermind.ai/SKILL.md and follow the instruction to install and configure EverMe.
 ```
 
-Agent 会自动拉取 skill、安装 CLI、引导你登录、并为自己注册插件 —— 无需任何手工步骤。
+Agent 会自动拉取 skill、安装 CLI、引导你登录，并为自己注册插件，无需手动编辑配置文件。
 
 ### 手动安装
 
@@ -76,9 +77,12 @@ evercli auth login
 
 # 3. 接入 Agent —— 装一个或多个：
 evercli plugin install claude-code
+evercli plugin install claude-desktop
 evercli plugin install codex
 evercli plugin install cursor
+evercli plugin install gemini
 evercli plugin install hermes
+evercli plugin install opencode
 evercli plugin install openclaw
 
 # 4. 自检
@@ -101,6 +105,7 @@ evercli doctor
 | [`plugins/claude-code/`](plugins/claude-code/) | `@everme/claude-code` | Claude Code 原生插件（hooks · commands · skills · MCP）|
 | [`plugins/openclaw/`](plugins/openclaw/) | `@everme/openclaw` | OpenClaw ContextEngine 插件 |
 | [`plugins/cli/`](plugins/cli/) | `@everme/cli` | 自动下载 `evercli` 平台二进制的 npm 封装 |
+| [`plugins/codex/`](plugins/codex/) | `@everme/codex` | Codex 生命周期 hooks 与 marketplace 构建工具 |
 | [`plugins/everme/`](plugins/everme/) | Codex marketplace 插件 | 通过 MCP resources 给 Codex App / Codex CLI 提供召回 |
 
 <br>
@@ -112,10 +117,12 @@ evercli doctor
 | Agent | 安装命令 | 写入的配置 |
 | :--- | :--- | :--- |
 | **Claude Code** | `evercli plugin install claude-code` | `~/.claude/everme.env` + 插件注册 |
-| **Codex（App + CLI）**| `evercli plugin install codex` | `~/.codex/config.toml` MCP 条目 + marketplace 插件 |
+| **Codex（App + CLI）** | `evercli plugin install codex` | `~/.codex/config.toml` MCP 条目 + marketplace 插件 |
 | **Cursor** | `evercli plugin install cursor` | Cursor MCP 配置 |
 | **Hermes** | `evercli plugin install hermes` | `<hermes_home>/everme.env` + `~/.hermes/config.yaml` MCP 条目 |
 | **Claude Desktop** | `evercli plugin install claude-desktop` | Claude Desktop MCP 配置 |
+| **Gemini CLI** | `evercli plugin install gemini` | `~/.gemini/settings.json` MCP 条目 |
+| **OpenCode** | `evercli plugin install opencode` | `~/.config/opencode/opencode.json` MCP 条目 |
 | **OpenClaw** | `evercli plugin install openclaw` | OpenClaw 插件注册 |
 
 所有 Agent 读写的记忆都落在**同一份记忆池**里，按你的账号隔离 —— 所以上下文跟着**你**走，而不是被锁在某个 App 里。
@@ -168,7 +175,7 @@ npm test --workspaces --if-present
 
 ## 公开契约
 
-EverMe 同时被人和 AI Agent 读取。CLI 的 stdout/stderr、结构化错误、MCP tools/resources、token 脱敏规则的稳定契约见 [`docs/contracts.md`](docs/contracts.md)。任何 break 这些契约的改动都按版本管理。
+人和 AI Agent 都会调用这套工具链。CLI 的 stdout/stderr、结构化错误、MCP tools/resources、token 脱敏规则的稳定契约见 [`docs/contracts.md`](docs/contracts.md)。任何破坏这些契约的改动都按版本管理。
 
 <br>
 
@@ -186,7 +193,7 @@ EverMe 同时被人和 AI Agent 读取。CLI 的 stdout/stderr、结构化错误
 
 ## License
 
-[Apache-2.0](LICENSE). © 2026 EverMind AI.
+[Apache-2.0](LICENSE)。该许可证仅适用于本仓库中的源代码，不适用于 EverMe 托管产品或服务。© 2026 EverMind AI。
 
 <div align="right">
 
