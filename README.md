@@ -1,6 +1,6 @@
 <div align="center" id="readme-top">
 
-# EverMe CLI & Agent Plugins
+# EverMe CLI
 
 <p align="center">
   <a href="https://x.com/evermind"><img src="https://img.shields.io/badge/EverMind-000000?labelColor=gray&style=for-the-badge&logo=x&logoColor=white" alt="X"></a>
