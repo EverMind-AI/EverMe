@@ -10,6 +10,7 @@ import (
 	"evercli/internal/credential"
 	"evercli/internal/logger"
 	"evercli/internal/output"
+	"evercli/internal/runctx"
 )
 
 // Deps is the bag of dependencies injected into every command's RunE.
@@ -93,7 +94,13 @@ func BuildDeps(cmd *cobra.Command) (*Deps, error) {
 	//      ctx (telemetry flush, log Sync hooked to ctx) saw
 	//      context.Canceled. We now run prev() first and cancel after.
 	if g.Timeout > 0 && cmd != nil {
-		ctx, cancel := context.WithTimeout(cmd.Context(), g.Timeout)
+		// Stash the un-deadlined source (signal context) BEFORE layering
+		// the deadline, so long-blocking flows (Device Flow) can detach
+		// the --timeout yet still observe a genuine post-deadline SIGINT.
+		// See internal/runctx and auth.detachInheritedDeadline (ECA-686).
+		base := cmd.Context()
+		ctx, cancel := context.WithTimeout(base, g.Timeout)
+		ctx = runctx.WithBaseContext(ctx, base)
 		cmd.SetContext(ctx)
 		registerTimeoutCancel(cmd, cancel)
 	}

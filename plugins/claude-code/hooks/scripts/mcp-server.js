@@ -25,6 +25,7 @@ import {
   savePersonalMemory,
   AGENT_MEMORY_ROLES,
   redactError,
+  describeError,
   EvermeError,
 } from "@everme/agent-sdk";
 import { getConfig, isConfigured } from "./lib/config.js";
@@ -48,8 +49,23 @@ const SUPPORTED_PROTOCOL_VERSIONS = new Set(["2024-11-05", "2025-03-26"]);
 const LATEST_PROTOCOL_VERSION = "2025-03-26";
 let client;
 
+// stdout carries the JSON-RPC stream; HTTP diagnostics (per-request
+// requestId lines) go to stderr like every other hook surface.
+const stderrLog = {
+  info(line) {
+    try {
+      process.stderr.write(`${line}\n`);
+    } catch {
+      // A closed stderr must never break the MCP stream.
+    }
+  },
+  warn(line) {
+    this.info(line);
+  },
+};
+
 function getClient() {
-  if (!client) client = createClient(getConfig());
+  if (!client) client = createClient(getConfig(), stderrLog);
   return client;
 }
 
@@ -305,14 +321,14 @@ const handlers = {
       switch (name) {
         case "mem_search": {
           const topK = Math.min(Number(args.topK) || 10, 50);
-          const res = await searchMemory(getClient(), { query: String(args.query || ""), topK });
+          const res = await searchMemory(getClient(), { query: String(args.query || ""), topK }, stderrLog);
           const body = buildMemoryPrompt(res, { wrapInCodeBlock: false });
           const header = `## EverMe search results for "${String(args.query || "")}"`;
           const trimmed = body.replace(/^## Relevant memory\n\n?/, "");
           const text = trimmed
             ? `${header}\n\n${trimmed}`
             : `${header}\n\n_(no matching memories)_`;
-          return ok(redactError(text));
+          return ok(appendRequestID(redactError(text), res?.requestId));
         }
         case "mem_context": {
           // Profile-only: `query` is accepted for compat but ignored.
@@ -320,9 +336,10 @@ const handlers = {
             getClient(),
             "",
             { forceRefresh: args.forceRefresh === true },
+            stderrLog,
           );
           const text = ctx?.context || "_(no profile available — your EverMe account has no extracted memories yet)_";
-          return ok(redactError(text));
+          return ok(appendRequestID(redactError(text), ctx?.requestId));
         }
         case "mem_save_turn": {
           let messages;
@@ -341,7 +358,7 @@ const handlers = {
             conversationId: args.sessionKey || "default",
             messages,
             flush: args.flush !== false,
-          });
+          }, stderrLog);
           return okJson({
             saved: !!res,
             accepted: !!res,
@@ -350,6 +367,7 @@ const handlers = {
             flushed: !!res?.flushed,
             profileStatus: res?.personalStatus || null,
             profileUpdated: !!res?.personalExtracted,
+            requestId: res?.requestId || null,
           });
         }
         case "mem_save_fact": {
@@ -378,7 +396,7 @@ const handlers = {
             conversationId: args.sessionKey || "default",
             messages,
             flush: args.flush !== false,
-          });
+          }, stderrLog);
           if (!res) {
             return errResp("mem_save_fact wrote nothing — every message had empty content after normalization");
           }
@@ -392,13 +410,14 @@ const handlers = {
             // profileUpdated aliases extracted — the only signal that the
             // fact really materialised into the profile.
             profileUpdated: !!res?.extracted,
+            requestId: res?.requestId || null,
           });
         }
         default:
           return errResp(`unknown tool: ${name}`);
       }
     } catch (err) {
-      const safe = redactError(err instanceof EvermeError ? err.message : err?.message || String(err));
+      const safe = describeError(err);
       return errResp(safe);
     }
   },
@@ -412,6 +431,13 @@ function okJson(data) {
 }
 function errResp(msg) {
   return { isError: true, content: [{ type: "text", text: `error: ${msg}` }] };
+}
+
+// appendRequestID mirrors @everme/memory-mcp: tack the trace id onto a
+// markdown payload so a user can quote it to support.
+function appendRequestID(text, requestId) {
+  if (!requestId) return text;
+  return `${text}\n\n_(requestId: ${requestId})_`;
 }
 
 // normaliseTurnMessage coerces an LLM-provided message into the SDK

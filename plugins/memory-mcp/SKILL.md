@@ -91,5 +91,5 @@ description on failure. Common shapes:
   includes the requestId for support correlation.
 
 Cold-start memory (everything the user already had) is loaded by
-`evercli import run`; you don't need to re-upload it from inside the
+`evercli import conversations run`; you don't need to re-upload it from inside the
 agent.

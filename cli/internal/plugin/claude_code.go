@@ -23,8 +23,21 @@
 //	  1. write ~/.claude/everme.env (KEY=value, 0600, atomic) so the
 //	     plugin's hooks/scripts/lib/config.js picks up evt without
 //	     the user having to mutate their shell profile.
-//	  2. `claude plugin marketplace add <source>`  (idempotent)
-//	  3. `claude plugin install everme@everme`     (idempotent)
+//	  2. `claude plugin marketplace add <source>` when the marketplace is
+//	     absent or its recorded directory moved, else `claude plugin
+//	     marketplace update everme` — `add` on an already-registered
+//	     source only prints "already on disk" and re-reads nothing.
+//	  3. `claude plugin install everme@everme` when nothing is cached,
+//	     else `claude plugin update everme@everme` — `install` on an
+//	     installed plugin prints "already installed" and leaves the old
+//	     cache directory in place.
+//
+//	writer.Verify
+//	  → env file carries a token, and the version Claude Code recorded in
+//	     ~/.claude/plugins/installed_plugins.json equals the version the
+//	     payload declares. Every shell-out above exits 0 in states that
+//	     keep a stale cache, so this comparison is the only proof the user
+//	     ends up running what we shipped.
 //
 //	writer.Remove
 //	  1. `claude plugin uninstall everme`          (best-effort)
@@ -32,15 +45,17 @@
 //	  3. delete ~/.claude/everme.env
 //
 // Atomicity: the env file is written via .tmp + rename so the plugin
-// never sees a half-written file. The two `claude` shell-outs are
-// each idempotent on the Claude Code side (re-add prints "already on
-// disk"), so a partial commit is safe to retry.
+// never sees a half-written file. Every `claude` shell-out is safe to
+// re-run, so a partial commit is safe to retry.
 package plugin
 
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -55,6 +70,12 @@ import (
 const (
 	everMarketplaceName = "everme"
 	evermePluginName    = "everme"
+
+	// evermePluginSpec is the `<plugin>@<marketplace>` form. It is
+	// unambiguous when another marketplace registers a plugin of the same
+	// name, and `claude plugin update` accepts nothing else — the bare
+	// name fails with `Plugin "everme" not found`.
+	evermePluginSpec = evermePluginName + "@" + everMarketplaceName
 )
 
 // claudeCommand resolves the `claude` CLI binary. EVERCLI_CLAUDE_CMD
@@ -75,6 +96,195 @@ func envFilePath() (string, error) {
 		return "", err
 	}
 	return filepath.Join(home, ".claude", "everme.env"), nil
+}
+
+// ---- Claude Code plugin state (read-only) --------------------------
+//
+// Claude Code tracks plugin state in two JSON files under
+// ~/.claude/plugins/. We only ever READ them — the claude CLI owns the
+// writes. They answer the two questions exit codes can't: which verb to
+// use (install vs update) and whether the cache actually moved.
+
+const (
+	claudeInstalledPluginsFile  = "installed_plugins.json"
+	claudeKnownMarketplacesFile = "known_marketplaces.json"
+
+	// Scope of the entries evercli installs. Claude Code also supports
+	// project scope; a project-scoped copy is the user's own doing and
+	// not ours to reason about.
+	claudePluginUserScope = "user"
+)
+
+// claudePluginsDir returns ~/.claude/plugins. Mirrors envFilePath's
+// convention of resolving ~/.claude from the home directory.
+func claudePluginsDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".claude", "plugins"), nil
+}
+
+// claudeInstalledPluginsPath is the best-effort display path used in
+// error messages. Falls back to the bare filename when the home
+// directory can't be resolved — a hint string is not worth an error.
+func claudeInstalledPluginsPath() string {
+	dir, err := claudePluginsDir()
+	if err != nil {
+		return claudeInstalledPluginsFile
+	}
+	return filepath.Join(dir, claudeInstalledPluginsFile)
+}
+
+// claudeCachedPluginVersion returns the plugin version Claude Code has
+// cached for everme@everme at user scope.
+//
+// ("", nil) means "nothing cached": the file is absent, carries no entry
+// for us, or the entry has no version. Each of those states means the
+// caller should install rather than update. A malformed file IS an error
+// — reporting it as "not installed" would silently pick the wrong verb
+// and hide a broken host.
+func claudeCachedPluginVersion() (string, error) {
+	dir, err := claudePluginsDir()
+	if err != nil {
+		return "", output.IOErr(claudeInstalledPluginsFile, "resolve-home", err)
+	}
+	path := filepath.Join(dir, claudeInstalledPluginsFile)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", nil
+		}
+		return "", output.IOErr(path, "read", err)
+	}
+	var parsed struct {
+		Plugins map[string][]struct {
+			Scope   string `json:"scope"`
+			Version string `json:"version"`
+		} `json:"plugins"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return "", output.IOErr(path, "parse-json", err)
+	}
+	for _, entry := range parsed.Plugins[evermePluginSpec] {
+		if entry.Scope == claudePluginUserScope {
+			return entry.Version, nil
+		}
+	}
+	return "", nil
+}
+
+// claudeMarketplaceRegistration reports whether our marketplace is
+// registered and, for a local-directory source, the path it points at.
+// The path is empty for github / URL sources: those record a checkout
+// location instead, which must never be compared against our source spec.
+//
+// Read failures degrade to (false, "") on purpose — the caller then falls
+// back to `marketplace add`, which is the correct move in any state we
+// can't read.
+func claudeMarketplaceRegistration() (registered bool, dirSource string) {
+	dir, err := claudePluginsDir()
+	if err != nil {
+		return false, ""
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, claudeKnownMarketplacesFile))
+	if err != nil {
+		return false, ""
+	}
+	var parsed map[string]struct {
+		Source struct {
+			Source string `json:"source"`
+			Path   string `json:"path"`
+		} `json:"source"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return false, ""
+	}
+	entry, ok := parsed[everMarketplaceName]
+	if !ok {
+		return false, ""
+	}
+	return true, entry.Source.Path
+}
+
+// claudeSourceManifestVersion reads the plugin version the payload at
+// source declares. The marketplace entry wins: it is the version Claude
+// Code names its cache directory after. .claude-plugin/plugin.json is the
+// fallback for a payload whose marketplace entry omits the field (bump.sh
+// keeps both in sync, but only one is load-bearing here).
+//
+// ("", nil) means "not comparable", not "version zero": https sources
+// can't be read without a network fetch, and a payload declaring no
+// version anywhere gives us nothing to assert against.
+func claudeSourceManifestVersion(source string) (string, error) {
+	if source == "" || !filepath.IsAbs(source) {
+		return "", nil
+	}
+
+	marketplacePath := filepath.Join(source, ".claude-plugin", "marketplace.json")
+	raw, err := os.ReadFile(marketplacePath)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", nil
+		}
+		return "", output.IOErr(marketplacePath, "read", err)
+	}
+	var marketplace struct {
+		Plugins []struct {
+			Name    string `json:"name"`
+			Version string `json:"version"`
+		} `json:"plugins"`
+	}
+	if err := json.Unmarshal(raw, &marketplace); err != nil {
+		return "", output.IOErr(marketplacePath, "parse-json", err)
+	}
+	for _, p := range marketplace.Plugins {
+		if p.Name == evermePluginName && p.Version != "" {
+			return p.Version, nil
+		}
+	}
+
+	manifestPath := filepath.Join(source, ".claude-plugin", "plugin.json")
+	raw, err = os.ReadFile(manifestPath)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", nil
+		}
+		return "", output.IOErr(manifestPath, "read", err)
+	}
+	var manifest struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		return "", output.IOErr(manifestPath, "parse-json", err)
+	}
+	return manifest.Version, nil
+}
+
+// ClaudePluginVersionDrift compares what Claude Code has cached against
+// what the resolved @everme/claude-code payload declares. Two empty
+// strings mean "nothing to compare" — no payload on disk, plugin not
+// installed, or an https source we can't read — so callers skip instead
+// of warning.
+//
+// Exported for `evercli doctor`: the installer's Verify covers the
+// install moment, this covers every host that drifted afterwards.
+func ClaudePluginVersionDrift(ctx context.Context) (cached, available string, err error) {
+	// installIfMissing=false: doctor is a read-only diagnostic and must
+	// never mutate global node_modules.
+	source, resolved, err := (&claudeCodeWriter{}).pluginSourceSpec(ctx, false)
+	if err != nil || !resolved {
+		return "", "", nil
+	}
+	available, err = claudeSourceManifestVersion(source)
+	if err != nil || available == "" {
+		return "", "", err
+	}
+	cached, err = claudeCachedPluginVersion()
+	if err != nil {
+		return "", "", err
+	}
+	return cached, available, nil
 }
 
 // ---- detector ------------------------------------------------------
@@ -197,9 +407,72 @@ type claudeCodeWriter struct {
 	// pluginSource lets tests inject a fake source. Empty in production
 	// → resolved at Plan time via pluginSourceSpec().
 	pluginSource string
+
+	// resolvedSource is the source Commit actually handed to the claude
+	// CLI. Verify reads the payload's manifest from it to assert the
+	// cache moved; Plan's value is deliberately not reused (Commit may
+	// npm-install and resolve a path Plan never saw).
+	resolvedSource string
 }
 
 func newClaudeCodeWriter() *claudeCodeWriter { return &claudeCodeWriter{} }
+
+// Remove undoes what Commit wired up: best-effort `claude plugin
+// uninstall` + `claude plugin marketplace remove`, then deletes the
+// evercli-owned env file.
+//
+// configPath is the detector's ConfigPath — ~/.claude/everme.env, a
+// KEY=value file. It must NEVER flow through the JSON mcpWriter.Remove
+// path: that writer json-parses the file and fails on the '#' comment
+// header, which used to make every `plugin uninstall claude-code` fail.
+func (w *claudeCodeWriter) Remove(ctx context.Context, configPath string) (*RemoveResult, error) {
+	// Guard: an empty configPath must not silently become
+	// filepath.Abs("") == cwd — resolve the canonical env path instead.
+	envPath := configPath
+	if envPath == "" {
+		p, err := envFilePath()
+		if err != nil {
+			return nil, output.IOErr("env-file", "resolve-home", err)
+		}
+		envPath = p
+	}
+	abs, err := filepath.Abs(envPath)
+	if err != nil {
+		return nil, output.IOErr(envPath, "abs-path", err)
+	}
+	result := &RemoveResult{Platform: PlatformClaudeCode, ConfigPath: abs}
+
+	// Best-effort host deregistration. Failures (plugin already
+	// uninstalled by hand, marketplace entry gone) surface as stderr
+	// warnings but never block the local cleanup — Remove stays
+	// idempotent. When the claude CLI isn't on PATH there is nothing
+	// to deregister from, so we skip silently.
+	if _, lookErr := exec.LookPath(claudeCommand()); lookErr == nil {
+		if runErr := runClaude(ctx, "plugin", "uninstall", evermePluginName); runErr != nil {
+			fmt.Fprintf(os.Stderr,
+				"warning: `claude plugin uninstall %s` failed: %v — if it still shows in `claude plugin list`, remove it manually\n",
+				evermePluginName, runErr)
+		}
+		if runErr := runClaude(ctx, "plugin", "marketplace", "remove", everMarketplaceName); runErr != nil {
+			fmt.Fprintf(os.Stderr,
+				"warning: `claude plugin marketplace remove %s` failed: %v\n",
+				everMarketplaceName, runErr)
+		}
+	}
+
+	// Delete the env file. Missing file is a successful no-op
+	// (Removed=false) per the Remover contract.
+	switch _, statErr := os.Stat(abs); {
+	case statErr == nil:
+		if rmErr := os.Remove(abs); rmErr != nil {
+			return nil, output.IOErr(abs, "remove-env", rmErr)
+		}
+		result.Removed = true
+	case !os.IsNotExist(statErr):
+		return nil, output.IOErr(abs, "stat-env", statErr)
+	}
+	return result, nil
+}
 
 func (claudeCodeWriter) Platform() Platform { return PlatformClaudeCode }
 
@@ -432,7 +705,7 @@ func (w *claudeCodeWriter) Commit(ctx context.Context, plan *WritePlan, params W
 		return nil, output.IOErr(envPath, "mkdir-claude-dir", err)
 	}
 
-	body, err := buildEnvFileBody(params)
+	body, err := buildEnvFileBody(PlatformClaudeCode, params)
 	if err != nil {
 		return nil, output.Internal(err)
 	}
@@ -457,22 +730,42 @@ func (w *claudeCodeWriter) Commit(ctx context.Context, plan *WritePlan, params W
 		return nil, ce
 	}
 
-	// 1. Add our marketplace (idempotent — Claude Code prints
-	//    "already on disk" if the entry exists).
-	if err := w.addMarketplace(ctx, source); err != nil {
+	w.resolvedSource = source
+
+	// 1. Register the marketplace, or refresh the registered one.
+	if err := w.syncMarketplace(ctx, source); err != nil {
 		ce := output.IOErr("claude plugin marketplace add", "exec", err)
 		ce.Hint = "marketplace add failed — this is NOT a GitHub auth issue. The plugin source is a local directory (" + source + "); inspect the stderr above. If the directory is missing, run `npm install -g @everme/claude-code` manually. Do not run `gh auth login`."
 		ce.Detail = map[string]any{"source": source}
 		return nil, ce
 	}
 
-	// 2. Install (or re-install) the plugin. We always run install so
-	//    the user picks up the freshest hooks even on a re-run.
+	// 2. Install the plugin, or update the cached one. Re-running install
+	//    is NOT a refresh: Claude Code prints "already installed", exits
+	//    0, and keeps serving the previous cache directory — which is how
+	//    an upgraded payload on disk never reaches the user.
 	registered, _ := w.isPluginRegistered(ctx)
-	if err := w.installPlugin(ctx); err != nil {
+	cachedVersion, cacheErr := claudeCachedPluginVersion()
+	if cacheErr != nil {
+		// Degrade rather than abort: the env file is already written and
+		// the token already minted, so failing Commit here would strand a
+		// live agent. installOrUpdatePlugin's fallback covers the wrong
+		// guess, and Verify still reports the drift.
+		fmt.Fprintf(os.Stderr, "warning: could not read Claude Code's installed-plugin state (%v); assuming a fresh install\n", cacheErr)
+	}
+	if err := w.installOrUpdatePlugin(ctx, cachedVersion != ""); err != nil {
 		ce := output.IOErr("claude plugin install", "exec", err)
-		ce.Hint = "Check `claude plugin list` and the stderr above; env file at " + envPath + " is in place."
+		ce.Hint = "Neither `claude plugin update " + evermePluginSpec + "` nor `claude plugin install " + evermePluginSpec + "` succeeded. Check `claude plugin list` and the stderr above; env file at " + envPath + " is in place."
 		return nil, ce
+	}
+
+	// A running Claude Code keeps the previous payload loaded until it
+	// restarts, so an actual version move is worth a next step.
+	var nextSteps []string
+	if newVersion, err := claudeCachedPluginVersion(); err == nil && cachedVersion != "" && newVersion != "" && newVersion != cachedVersion {
+		nextSteps = append(nextSteps, fmt.Sprintf(
+			"restart Claude Code so plugin %s replaces the %s payload still loaded in running sessions",
+			newVersion, cachedVersion))
 	}
 
 	// 3. Post-install MCP visibility probe. `claude plugin install`
@@ -486,7 +779,7 @@ func (w *claudeCodeWriter) Commit(ctx context.Context, plan *WritePlan, params W
 	if visible, err := ClaudeMcpListContainsEverme(ctx); err == nil && !visible {
 		fmt.Fprintln(os.Stderr, "WARNING: plugin installed but its MCP server isn't visible to Claude Code yet.")
 		fmt.Fprintln(os.Stderr, "         Open Claude Code, run `/mcp`, and approve the `everme` server")
-		fmt.Fprintln(os.Stderr, "         so tools like everme_search become callable. Hooks (auto-recall,")
+		fmt.Fprintln(os.Stderr, "         so tools like mem_search become callable. Hooks (auto-recall,")
 		fmt.Fprintln(os.Stderr, "         auto-save) work without this — only manual MCP tool calls need it.")
 	}
 
@@ -494,25 +787,118 @@ func (w *claudeCodeWriter) Commit(ctx context.Context, plan *WritePlan, params W
 		Platform:      PlatformClaudeCode,
 		ConfigPath:    envPath,
 		WroteNewEntry: !registered,
+		NextSteps:     nextSteps,
 	}, nil
 }
 
-// (claudeCodeWriter.Remove was retired with `evercli plugin uninstall`.
-// Manual cleanup steps for users:
-//   1. `claude plugin uninstall everme`
-//   2. `claude plugin marketplace remove everme`
-//   3. `rm ~/.claude/everme.env`
-// Plus disconnect the agent from the EverMe web UI.)
+// Verify asserts the two things the shell-outs' exit codes cannot prove:
+// the env file carries a token, and Claude Code's plugin cache sits on
+// the version the payload declares. `marketplace add` ("already on
+// disk") and `plugin install` ("already installed") both exit 0 while
+// leaving a stale cache, so without this comparison an install reports
+// success while the user keeps running an old plugin.
+//
+// Per the Verifier contract (types.go) a failure here surfaces as a
+// warning on the InstallEntry, not a failed install: at this point the
+// token is on disk at 0600 and registered server-side.
+func (w *claudeCodeWriter) Verify(_ context.Context, result *WriteResult) error {
+	if result == nil {
+		return output.Internal(fmt.Errorf("nil result"))
+	}
+	envBody, err := os.ReadFile(result.ConfigPath)
+	if err != nil {
+		return output.IOErr(result.ConfigPath, "verify", err)
+	}
+	if !strings.Contains(string(envBody), "EVERME_AGENT_TOKEN=evt_") {
+		return output.IOErr(result.ConfigPath, "verify",
+			fmt.Errorf("everme.env has no agent token"))
+	}
 
-func (w *claudeCodeWriter) addMarketplace(ctx context.Context, source string) error {
+	want, err := claudeSourceManifestVersion(w.resolvedSource)
+	if err != nil {
+		return err
+	}
+	if want == "" {
+		// An https source (unreadable without a fetch) or a payload that
+		// declares no version — nothing to compare. We skip rather than
+		// guess a version we don't know.
+		return nil
+	}
+	got, err := claudeCachedPluginVersion()
+	if err != nil {
+		return err
+	}
+	statePath := claudeInstalledPluginsPath()
+	if got == "" {
+		ce := output.IOErr(statePath, "verify-version",
+			fmt.Errorf("Claude Code reports no cached everme plugin after install"))
+		ce.Hint = "Run `claude plugin install " + evermePluginSpec + "`, then restart Claude Code"
+		return ce
+	}
+	if got != want {
+		ce := output.IOErr(statePath, "verify-version",
+			fmt.Errorf("Claude Code has plugin %s cached but the payload on disk is %s", got, want))
+		ce.Hint = "Run `claude plugin update " + evermePluginSpec + "`, then restart Claude Code"
+		ce.Detail = map[string]any{"cached": got, "available": want}
+		return ce
+	}
+	return nil
+}
+
+// syncMarketplace registers our marketplace or refreshes the registered
+// one.
+//
+// `claude plugin marketplace add` is not a refresh: on an
+// already-registered identical source it prints "already on disk" and
+// exits 0 without re-reading anything, which is precisely how a stale
+// marketplace survives a re-install. `marketplace update` is the refresh
+// verb. `add` remains correct when the recorded directory source moved
+// (npm's global prefix changed) — Claude Code then repoints the entry.
+func (w *claudeCodeWriter) syncMarketplace(ctx context.Context, source string) error {
+	registered, recorded := claudeMarketplaceRegistration()
+	moved := recorded != "" && filepath.Clean(recorded) != filepath.Clean(source)
+	if registered && !moved {
+		if err := runClaude(ctx, "plugin", "marketplace", "update", everMarketplaceName); err == nil {
+			return nil
+		}
+		// A broken entry (source deleted, manifest unreadable) fails the
+		// update; re-adding is the repair path, so fall through rather
+		// than abort the install.
+	}
 	return runClaude(ctx, "plugin", "marketplace", "add", source)
 }
 
 func (w *claudeCodeWriter) installPlugin(ctx context.Context) error {
-	// `<plugin>@<marketplace>` form is unambiguous even when other
-	// marketplaces register a plugin of the same name.
-	spec := evermePluginName + "@" + everMarketplaceName
-	return runClaude(ctx, "plugin", "install", spec)
+	return runClaude(ctx, "plugin", "install", evermePluginSpec)
+}
+
+// updatePlugin refreshes an already-cached plugin. The qualified
+// `<plugin>@<marketplace>` spec is load-bearing here, not cosmetic:
+// `claude plugin update everme` fails with `Plugin "everme" not found`.
+func (w *claudeCodeWriter) updatePlugin(ctx context.Context) error {
+	return runClaude(ctx, "plugin", "update", evermePluginSpec)
+}
+
+// installOrUpdatePlugin picks the verb from what Claude Code has cached:
+// update when a version is already there, install otherwise. When the
+// chosen verb fails we try the other one once — installed_plugins.json
+// and Claude Code's own view can disagree (a hand-deleted cache
+// directory, an interrupted uninstall), and the fallback turns that into
+// a working install instead of a hard failure. The first error is the one
+// reported when both fail: it describes the state we expected to be in.
+func (w *claudeCodeWriter) installOrUpdatePlugin(ctx context.Context, cached bool) error {
+	first, second := w.installPlugin, w.updatePlugin
+	if cached {
+		first, second = w.updatePlugin, w.installPlugin
+	}
+	err := first(ctx)
+	if err == nil {
+		return nil
+	}
+	if secondErr := second(ctx); secondErr == nil {
+		return nil
+	}
+	return err
 }
 
 // isPluginRegistered greps `claude plugin list` for our plugin name
@@ -552,7 +938,7 @@ func runClaude(ctx context.Context, args ...string) error {
 // failure mode is what we want for a file derived from server-supplied
 // material. The expectation is that the backend never produces such
 // values, so a hit here is a hard error rather than silent escape.
-func buildEnvFileBody(params WriteParams) (string, error) {
+func buildEnvFileBody(platform Platform, params WriteParams) (string, error) {
 	for k, v := range map[string]string{
 		"EVERME_API_BASE":    params.APIBaseURL,
 		"EVERME_AGENT_ID":    params.AgentID,
@@ -563,12 +949,12 @@ func buildEnvFileBody(params WriteParams) (string, error) {
 		}
 	}
 
+	p := string(platform)
 	var b strings.Builder
-	b.WriteString("# Managed by evercli plugin install claude-code — do not edit by hand.\n")
-	b.WriteString("# Re-run `evercli plugin install claude-code` to refresh the token.\n")
-	b.WriteString("# To remove: disconnect the agent from the EverMe web UI, then\n")
-	b.WriteString("# `claude plugin uninstall everme` and delete this file manually.\n")
-	b.WriteString("# (`evercli plugin uninstall` was retired in V1 — see SKILL §3.)\n")
+	b.WriteString("# Managed by evercli plugin install " + p + " — do not edit by hand.\n")
+	b.WriteString("# Re-run `evercli plugin install " + p + "` to refresh the token.\n")
+	b.WriteString("# To remove: run `evercli plugin uninstall " + p + " --yes`.\n")
+	b.WriteString("# Host-managed registries may still require: " + hostUninstallHint(platform) + ".\n")
 	b.WriteString("EVERME_API_BASE=")
 	b.WriteString(params.APIBaseURL)
 	b.WriteString("\n")
@@ -579,6 +965,24 @@ func buildEnvFileBody(params WriteParams) (string, error) {
 	b.WriteString(params.AgentToken)
 	b.WriteString("\n")
 	return b.String(), nil
+}
+
+// hostUninstallHint returns the host-specific guidance for removing the
+// everme plugin, used in the everme.env header. Falls back to a generic
+// note for platforms without a known host uninstall command.
+func hostUninstallHint(platform Platform) string {
+	switch platform {
+	case PlatformClaudeCode:
+		return "run `claude plugin uninstall everme`"
+	case PlatformCodex:
+		return "run `codex plugin uninstall everme@everme` and remove the EverMe MCP entry"
+	case PlatformKimiCode:
+		return "remove the everme plugin from Kimi Code (`/plugins remove everme`)"
+	case PlatformDSH:
+		return "restart DeepSeek Harness after removing the managed patch"
+	default:
+		return "remove the everme plugin from the host"
+	}
 }
 
 // writeFileAtomic moved to mcp.go so both writers use the same .tmp +

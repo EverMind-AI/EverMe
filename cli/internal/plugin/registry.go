@@ -8,8 +8,8 @@ import (
 // registry is the central catalogue of supported platforms. Tests inject
 // their own via NewServiceWithRegistry, but production code goes through
 // DefaultRegistry which carries the V1 install matrix (Claude Code +
-// OpenClaw + Cursor + Claude Desktop + Codex + Hermes + Gemini CLI +
-// opencode). Windsurf / VS Code Copilot / Cline are V1.1 candidates.
+// OpenClaw + Cursor + Claude Desktop + Codex + Hermes +
+// Devin + WorkBuddy + opencode). VS Code Copilot / Cline remain future candidates.
 type registry struct {
 	detectors map[Platform]Detector
 	writers   map[Platform]Writer
@@ -35,11 +35,12 @@ type registry struct {
 //     The plugin source is installed separately via
 //     `openclaw plugins install @everme/openclaw`.
 //
-//   - PlatformCursor / PlatformClaudeDesktop / PlatformGemini → mcpWriter
-//     All three hosts read MCP servers from a top-level `mcpServers.<name>`
-//     JSON map, so the writer is the shared mcpWriter parameterised by
-//     platform. Only the config file location is host-specific (see
-//     cursor.go / claude_desktop.go / gemini.go).
+//   - PlatformCursor / PlatformDevin → nativeHookWriter
+//     Each host receives the shared MCP entry plus native lifecycle hooks and
+//     a protected everme.env file; Cursor and Devin use separate hook configs.
+//
+//   - PlatformClaudeDesktop / PlatformWorkBuddy → mcpWriter
+//     These MCP-only hosts use the shared JSON writer.
 //
 //   - PlatformOpenCode → opencodeWriter
 //     opencode reads MCP servers from a top-level `mcp.<name>` map in
@@ -63,6 +64,25 @@ type registry struct {
 //     entry. Memory capture is hook-driven (sync_turn / on_session_end),
 //     not dependent on model-initiated tool calls. Implements Verifier
 //     (provider files + memory.provider) but not Preparer. See hermes.go.
+//
+//   - PlatformRaven → ravenWriter
+//     Raven (Python) discovers external plugins from
+//     ~/.raven/plugins/<id>/raven-plugin.toml and binds one memory
+//     backend via config.json memory.backend (single slot). ravenWriter
+//     drops the embedded EverMe MemoryBackend there and patches
+//     config.json (memory.backend=everme + plugins.config credentials —
+//     Raven's config.json is its canonical credential store, so no env
+//     file). Memory capture is host-driven (recall before turn / store
+//     after turn), not dependent on model-initiated tool calls.
+//     Implements Verifier (plugin manifest + memory.backend) but not
+//     Preparer. See raven.go.
+//
+//   - PlatformDSH → dshWriter
+//     DeepSeek Harness loads @deepseek-ai/dsh-mcp-client from
+//     ~/.dsh/cordis.patch.yml. dshWriter owns a reversible patch block and
+//     a protected ~/.dsh/.env credential block because DSH scrubs inherited
+//     credential-shaped variables before spawning stdio MCP servers.
+//     Implements Preparer, Verifier and Remover. See dsh.go.
 func DefaultRegistry() *registry {
 	return &registry{
 		detectors: map[Platform]Detector{
@@ -72,8 +92,12 @@ func DefaultRegistry() *registry {
 			PlatformClaudeDesktop: claudeDesktopDetector{},
 			PlatformCodex:         codexDetector{},
 			PlatformHermes:        hermesDetector{},
-			PlatformGemini:        geminiDetector{},
+			PlatformDevin:         devinDetector{},
+			PlatformWorkBuddy:     workBuddyDetector{},
 			PlatformOpenCode:      opencodeDetector{},
+			PlatformKimiCode:      kimiCodeDetector{},
+			PlatformRaven:         ravenDetector{},
+			PlatformDSH:           dshDetector{},
 		},
 		writers: map[Platform]Writer{
 			PlatformClaudeCode:    newClaudeCodeWriter(),
@@ -82,8 +106,12 @@ func DefaultRegistry() *registry {
 			PlatformClaudeDesktop: newClaudeDesktopWriter(),
 			PlatformCodex:         newCodexWriter(),
 			PlatformHermes:        newHermesWriter(),
-			PlatformGemini:        newGeminiWriter(),
+			PlatformDevin:         newDevinWriter(),
+			PlatformWorkBuddy:     newWorkBuddyWriter(),
 			PlatformOpenCode:      newOpenCodeWriter(),
+			PlatformKimiCode:      newKimiCodeWriter(),
+			PlatformRaven:         newRavenWriter(),
+			PlatformDSH:           newDSHWriter(),
 		},
 	}
 }

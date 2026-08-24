@@ -201,7 +201,7 @@ func (c *httpClient) do(
 		evt, err := c.cred.Get(ctx, credential.AgentToken())
 		if err != nil {
 			if errors.Is(err, credential.ErrNotFound) {
-				return output.NotLoggedIn()
+				return output.UploadTokenMissing()
 			}
 			return output.Internal(fmt.Errorf("read agent credential: %w", err))
 		}
@@ -496,20 +496,9 @@ func (c *httpClient) RegisterAgent(ctx context.Context, req RegisterAgentReq) (*
 	return &resp, nil
 }
 
-// (DisconnectAgent retired with `evercli plugin uninstall`.)
-
-func (c *httpClient) Presign(ctx context.Context, req PresignReq) (*PresignResp, error) {
-	var resp PresignResp
-	if err := c.do(ctx, http.MethodPost, "/mem/uploads/presign", nil, req, &resp, authAgent); err != nil {
-		return nil, err
-	}
-	return &resp, nil
-}
-
-func (c *httpClient) CreateRecord(ctx context.Context, req CreateRecordReq) (*CreateRecordResp, error) {
-	var resp CreateRecordResp
-	if err := c.do(ctx, http.MethodPost, "/mem/sources", nil, req, &resp, authAgent); err != nil {
-		return nil, err
-	}
-	return &resp, nil
+func (c *httpClient) DisconnectAgent(ctx context.Context, agentID string) error {
+	body := struct {
+		AgentID string `json:"agentId"`
+	}{AgentID: agentID}
+	return c.do(ctx, http.MethodPost, "/agents/disconnect", nil, body, nil, authBearer)
 }

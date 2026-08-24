@@ -2,7 +2,7 @@ import { mkdir, readFile, readdir, rename, stat, unlink, writeFile, chmod } from
 import os from "node:os";
 import path from "node:path";
 
-const DEFAULT_STATE_DIR = path.join(os.homedir(), ".everme", "state");
+export const DEFAULT_STATE_DIR = path.join(os.homedir(), ".everme", "state");
 
 // Session state files are keyed by session id and become garbage once the
 // host session is gone; prune anything untouched for this long on the next
@@ -99,7 +99,9 @@ async function pruneStaleStateFiles(stateDir, keepFile) {
   try {
     const cutoff = Date.now() - STATE_MAX_AGE_MS;
     for (const name of await readdir(stateDir)) {
-      if (!name.endsWith(".json")) continue;
+      // .json = session counters, .toolbuf.jsonl = tool event buffers
+      // whose turn never reached a Stop drain (aborted sessions).
+      if (!name.endsWith(".json") && !name.endsWith(".toolbuf.jsonl")) continue;
       const file = path.join(stateDir, name);
       if (file === keepFile) continue;
       try {
@@ -114,7 +116,7 @@ async function pruneStaleStateFiles(stateDir, keepFile) {
   }
 }
 
-function sanitizeSessionId(sessionId) {
+export function sanitizeSessionId(sessionId) {
   const sanitized = String(sessionId || "default")
     .replace(/[^a-zA-Z0-9._-]+/g, "_")
     .replace(/^\.+/, "")

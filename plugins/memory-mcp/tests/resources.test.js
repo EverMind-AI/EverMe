@@ -578,10 +578,10 @@ describe("mem_context / mem_search tools return raw markdown (no JSON envelope)"
     try {
       const result = await client.callTool({ name: "mem_context", arguments: { query: "morning routine" } });
       const text = result.content[0].text;
-      assert.equal(text, profileMarkdown,
-        "mem_context must return the markdown verbatim — wrapping it as " +
-        "JSON.stringify({context, memoryCount}) forces the LLM to peel an " +
-        "envelope and wastes tokens on every recall.");
+      assert.equal(text, `${profileMarkdown}\n\n_(requestId: req-mock)_`,
+        "mem_context must return the markdown verbatim (plus the trailing " +
+        "requestId trace line) — wrapping it as JSON.stringify({context, " +
+        "memoryCount}) forces the LLM to peel an envelope on every recall.");
       // Guard against accidental JSON wrapping: a JSON envelope would
       // start with `{` and contain the escaped newline `\\n`.
       assert.ok(!text.startsWith("{"),

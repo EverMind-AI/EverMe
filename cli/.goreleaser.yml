@@ -1,0 +1,70 @@
+version: 2
+
+project_name: evercli
+
+# monorepo: this config is intentionally scoped to cli/. Run goreleaser
+# with `cd cli && goreleaser release --clean` (CI sets workdir: cli).
+# Tag scheme: bare semver `vX.Y.Z`.
+
+builds:
+  - id: evercli
+    main: ./
+    binary: evercli
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+      - -buildvcs=false
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+
+archives:
+  - format: tar.gz
+    name_template: >-
+      {{ .ProjectName }}_{{ .Os }}_{{ .Arch }}
+    format_overrides:
+      - goos: windows
+        format: zip
+    # Force binary-only archives: goreleaser v2 auto-includes README*/
+    # LICENSE*/CHANGELOG* when `files` is missing OR empty list, so we
+    # use a glob that matches nothing to suppress the defaults. Docs are
+    # read from the repository, not shipped inside the archive.
+    files:
+      - src: nothing-here-do-not-match-do-not-remove*
+
+checksum:
+  name_template: sha256sums.txt
+  algorithm: sha256
+
+release:
+  github:
+    owner: EverMind-AI
+    name: EverMe
+  prerelease: false
+  header: |
+    ## EverMe CLI
+
+    Prebuilt `evercli` binaries for AI Agents (Claude Code, OpenClaw, Codex, …).
+    Source lives in [`cli/`](https://github.com/EverMind-AI/EverMe/tree/main/cli)
+    under Apache-2.0.
+
+    ### Install (recommended)
+
+    ```bash
+    npm install -g @everme/cli
+    ```
+
+    Or download an archive below and unpack manually.
+
+changelog:
+  disable: true

@@ -89,6 +89,7 @@ func Run(ctx context.Context, d Deps) *Report {
 		credBackendCheck{prv: d.CredPrv},
 		credReadableCheck{prv: d.CredPrv},
 		claudeCodeMcpVisibleCheck{},
+		claudeCodePluginVersionCheck{},
 	}
 
 	results := make([]Result, len(checks))
@@ -205,7 +206,7 @@ func (c credBackendCheck) Run(_ context.Context) Result {
 // `claude plugin install` exits 0 (plugin registered, hooks work), but
 // the plugin's MCP server is gated by a separate user-consent step
 // (`/mcp` inside Claude Code → enabledMcpjsonServers). Without this
-// check, the symptom — manual tool calls like everme_search not
+// check, the symptom — manual tool calls like mem_search not
 // appearing — looks like a backend issue and takes far longer to
 // localize than it should.
 //
@@ -240,6 +241,47 @@ func (claudeCodeMcpVisibleCheck) Run(ctx context.Context) Result {
 	}
 	r.Message = "plugin installed but its MCP server isn't approved yet"
 	r.HintCmd = "open Claude Code → /mcp → approve `everme`"
+	return r
+}
+
+// claudeCodePluginVersionCheck compares the plugin version Claude Code
+// has cached against the version of the payload on disk. This is the
+// second silent-failure mode of the same shape as the MCP one above:
+// `claude plugin install` exits 0 with "already installed" and keeps the
+// previous cache directory, so a freshly upgraded npm package can sit
+// unused for weeks while Claude Code loads the old plugin — with no error
+// anywhere. evercli now runs the update verb at install time; this check
+// catches a host that drifted for any other reason (manual install,
+// interrupted update, restart that never happened).
+//
+// SevWarning, not Critical: a stale plugin is degraded, not broken.
+type claudeCodePluginVersionCheck struct{}
+
+func (claudeCodePluginVersionCheck) Run(ctx context.Context) Result {
+	r := Result{Name: "plugin.claude-code.version-current", Severity: SevWarning}
+	cached, available, err := plugin.ClaudePluginVersionDrift(ctx)
+	if err != nil {
+		r.Message = "could not compare claude-code plugin versions: " + err.Error()
+		r.HintCmd = "claude plugin list"
+		return r
+	}
+	// Nothing to compare: no host, no payload on disk, plugin not
+	// installed, or a source we can't read without a network fetch.
+	// evercli is host-agnostic — absence is not a failure.
+	if cached == "" || available == "" {
+		r.Severity = SevInfo
+		r.OK = true
+		r.Message = "no comparable claude-code plugin payload; skipped"
+		return r
+	}
+	r.Detail = map[string]interface{}{"cached": cached, "available": available}
+	if cached != available {
+		r.Message = "Claude Code has plugin " + cached + " cached but " + available + " is on disk"
+		r.HintCmd = "claude plugin update everme@everme"
+		return r
+	}
+	r.OK = true
+	r.Message = "claude-code plugin up to date (" + cached + ")"
 	return r
 }
 

@@ -5,10 +5,13 @@ import { searchMemory, QUERY_MAX_CHARS } from "../src/search.js";
 describe("searchMemory", () => {
   test("posts query + topK to /mem/search and renames items → memories", async () => {
     const calls = [];
+    // requestWithMeta mirrors the real client contract: the trace id lives on
+    // the envelope, NOT inside result — a result-level requestId used to mask
+    // the fact that searchMemory read a field the backend never sent there.
     const client = {
-      async request(method, path, body) {
+      async requestWithMeta(method, path, body) {
         calls.push({ method, path, body });
-        return { items: [{ summary: "hit" }], profiles: [], requestId: "req-1" };
+        return { result: { items: [{ summary: "hit" }], profiles: [] }, requestId: "req-1" };
       },
     };
 

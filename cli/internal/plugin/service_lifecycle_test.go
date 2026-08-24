@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -15,6 +16,7 @@ import (
 	"evercli/internal/client"
 	"evercli/internal/credential"
 	"evercli/internal/httpmock"
+	"evercli/internal/runctx"
 )
 
 // Service-level integration tests for the lifecycle hooks (Preparer /
@@ -34,11 +36,12 @@ import (
 // whether each hook fired so we can assert call ordering against the
 // httpmock request log.
 type lifecycleStubWriter struct {
-	inner        *mcpWriter
-	prepareErr   error
-	verifyErr    error
-	prepareCount *int
-	verifyCount  *int
+	inner         *mcpWriter
+	prepareErr    error
+	prepareCtxErr *error
+	verifyErr     error
+	prepareCount  *int
+	verifyCount   *int
 }
 
 func (w *lifecycleStubWriter) Platform() Platform { return w.inner.Platform() }
@@ -51,9 +54,12 @@ func (w *lifecycleStubWriter) Commit(ctx context.Context, plan *WritePlan, param
 	return w.inner.Commit(ctx, plan, params)
 }
 
-func (w *lifecycleStubWriter) Prepare(_ context.Context, _ *Detection) error {
+func (w *lifecycleStubWriter) Prepare(ctx context.Context, _ *Detection) error {
 	if w.prepareCount != nil {
 		*w.prepareCount++
+	}
+	if w.prepareCtxErr != nil {
+		*w.prepareCtxErr = ctx.Err()
 	}
 	return w.prepareErr
 }
@@ -134,6 +140,45 @@ func TestInstall_RunsPrepareBeforeRegisterAgent(t *testing.T) {
 	assert.Equal(t, 1, verifyCount, "Verify must fire exactly once after Commit")
 	assert.Equal(t, 1, prepareSeenAtRegister,
 		"Prepare must complete before /agents fires — Prepare-failure-no-token-mint invariant depends on this ordering")
+}
+
+func TestInstall_DSHDetachesExpiredGlobalTimeout(t *testing.T) {
+	var prepareCtxErr error
+	lwriter := &lifecycleStubWriter{
+		inner:         newMCPWriter(PlatformDSH),
+		prepareCtxErr: &prepareCtxErr,
+	}
+	srv, svc, _ := newLifecycleFixture(t, lwriter)
+	srv.HandleEnvelope("POST /agents", client.RegisterAgentResp{
+		AgentID: "agt_dsh", SourceID: "src_dsh",
+		AgentToken: "evt_freshly_minted", TokenPrefix: "evt_dsh1",
+	})
+
+	base, cancelBase := context.WithCancel(context.Background())
+	defer cancelBase()
+	expired, cancelExpired := context.WithTimeout(base, 0)
+	defer cancelExpired()
+	<-expired.Done()
+	ctx := runctx.WithBaseContext(expired, base)
+
+	rep, err := svc.Install(ctx, []Platform{PlatformDSH}, InstallOptions{}, nil)
+	require.NoError(t, err)
+	require.Empty(t, rep.Failed)
+	require.Len(t, rep.Installed, 1)
+	assert.NoError(t, prepareCtxErr)
+}
+
+func TestDSHOperationContextFloorsShortDeadline(t *testing.T) {
+	base := context.Background()
+	parent, cancelParent := context.WithTimeout(base, time.Second)
+	defer cancelParent()
+	parent = runctx.WithBaseContext(parent, base)
+
+	ctx, cancel := dshOperationContext(parent)
+	defer cancel()
+	deadline, ok := ctx.Deadline()
+	require.True(t, ok)
+	assert.Greater(t, time.Until(deadline), 4*time.Minute+50*time.Second)
 }
 
 // TestInstall_PrepareFailure_DoesNotCallRegisterAgent pins the harder

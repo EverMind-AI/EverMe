@@ -1,0 +1,59 @@
+{
+  "name": "@everme/dsh",
+  "version": "0.6.1",
+  "type": "module",
+  "description": "Native EverMe lifecycle hooks for DeepSeek Harness.",
+  "license": "Apache-2.0",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./cordis.patch.yml": "./cordis.patch.yml"
+  },
+  "files": [
+    "index.js",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "test": "node --test tests/plugin.test.js"
+  },
+  "keywords": [
+    "evermind",
+    "everme",
+    "deepseek",
+    "dsh",
+    "memory",
+    "cordis",
+    "hooks"
+  ],
+  "homepage": "https://everme.evermind.ai",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/EverMind-AI/EverMe.git",
+    "directory": "plugins/dsh"
+  },
+  "bugs": {
+    "url": "https://github.com/EverMind-AI/EverMe/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
+  "dependencies": {
+    "@everme/agent-sdk": "^0.6.1"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-llm": ">=0.1.0-rc.6 <0.2.0"
+  },
+  "devDependencies": {
+    "@deepseek-ai/dsh-llm": "0.1.0-rc.6"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

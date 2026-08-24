@@ -9,6 +9,26 @@ the open-source home for EverMe CLI and agent plugins.
 
 ### CLI
 
+- Sync the `cli/` Go tree to the `evercli` v0.32.0 release. Earlier public
+  snapshots trailed the published binaries; the tree now matches what
+  `npm install -g @everme/cli` and the release archives ship.
+- Add `evercli skill` — browse / install / manage EverMe skills.
+- Restore `evercli plugin uninstall <platform>`: it removes only EverMe-owned
+  local state (host config entry, hooks, `everme.env`) and then disconnects the
+  cloud agent registered for this machine. `--keep-agent` skips the disconnect.
+- Replace the flat-file import pipeline with `evercli import conversations`
+  (`scan` / `run`): markdown import, an idempotency ledger scoped to one
+  account and environment, and an `--async` two-phase bulk mode for cold-start
+  uploads.
+- Extend `evercli plugin install` past Claude Code and OpenClaw to Codex,
+  Cursor, Claude Desktop, DeepSeek Harness, Devin, Hermes, Kimi Code,
+  opencode, Raven, and WorkBuddy.
+- Force `0600` on host config files that store an EverMe agent token.
+- Stop dropping Codex tool families and non-main OpenClaw agents during import.
+- Bump the `@everme/cli` npm wrapper to 0.32.0 so wrapper and binary versions
+  match, and print a per-host install hint from its postinstall refresh.
+- Format the tree with `gofmt` and tidy `go.mod` / `go.sum`.
+
 - Rework `evercli plugin install hermes` to install a native Hermes
   `MemoryProvider` plugin instead of an MCP server entry. The Python provider
   is embedded in the `evercli` binary (`cli/internal/plugin/hermesassets/`)
@@ -31,6 +51,23 @@ the open-source home for EverMe CLI and agent plugins.
   reliable public quality gate.
 
 ### Plugins
+
+- Release the protocol packages at 0.6.1 (from 0.4.2).
+- Open-source four more host plugins: `@everme/kimicode`, `@everme/cursor`,
+  `@everme/devin`, and `@everme/dsh` (DeepSeek Harness), each with its own test
+  suite in the npm workspace.
+- Refresh the Codex marketplace plugin (`plugins/everme`) to 0.6.1 so
+  `codex plugin marketplace upgrade EverMind-AI/EverMe` picks up the current
+  lifecycle Hook runner — the marketplace reads this repository directly, so
+  the npm releases alone never reached Codex users. The bundled
+  `bin/hook.mjs` is rebuilt from `plugins/codex/scripts/build-marketplace.mjs`
+  and is byte-identical to the runner published on npm.
+- `@everme/agent-sdk`: give lifecycle hooks a time budget that fits inside the
+  host's kill deadline, and fire the watchdog after the request deadline rather
+  than before it.
+- Surface one trace id across plugin logs and tool results.
+- Close the v2 first-flush gap so the opening turn of a session is extracted
+  instead of silently dropped.
 
 - Release the protocol packages at 0.4.2. `@everme/agent-sdk` now builds the
   recall query from the user's intent instead of the host's raw prompt
@@ -80,6 +117,10 @@ the open-source home for EverMe CLI and agent plugins.
 
 ### Docs
 
+- Ship `cli/.goreleaser.yml` so the published binaries are reproducible from
+  this tree, and correct its release-notes header, which still described the
+  distribution as closed-source.
+
 - Add root `README.md` and `README.zh.md`.
 - Add `CONTRIBUTING.md`.
 - Add `AGENTS.md` with contribution goals, pre-PR checks, source layout, and
@@ -91,6 +132,13 @@ the open-source home for EverMe CLI and agent plugins.
 
 ### CI
 
+- Validate all ten workspace manifests in `fast-gate`, not just the original
+  six.
+- Exempt the import redactor and its fixtures from the private-key scan. The
+  redactor exists to strip PEM blocks, so it necessarily contains the header
+  pattern the scan looks for, and its fixture bodies are fabricated
+  placeholders the tests assert get replaced.
+
 - Add layered GitHub Actions CI inspired by `larksuite/cli`:
   `fast-gate`, `cli-test`, `plugin-test`, `coverage`, `package-smoke`,
   `security`, and a final `results` gate.
@@ -99,6 +147,11 @@ the open-source home for EverMe CLI and agent plugins.
   smoke checks.
 
 ### Security
+
+- Pin `hono`, `fast-uri`, and `ip-address` to patched floors through workspace
+  `overrides`, clearing advisories that reach the tree via
+  `@modelcontextprotocol/sdk`. The published package manifests are untouched —
+  each pin stays inside its consumer's declared range.
 
 - Add `SECURITY.md` with private vulnerability reporting guidance.
 - Expand `.gitignore` for local env files, logs, build artifacts, Node

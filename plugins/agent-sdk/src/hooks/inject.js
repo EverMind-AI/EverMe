@@ -12,7 +12,7 @@ export async function runInject({ input, client, config, search = searchMemory, 
   writeQueryStats(log, stats);
   if (countTokens(query) < MIN_PROMPT_TOKENS) return { block: "", count: 0 };
 
-  const result = await search(client, { query, topK: config.injectTopK });
+  const result = await search(client, { query, topK: config.injectTopK }, log);
   const memories = (result?.memories || []).filter((memory) => {
     const score = memory?.score ?? memory?.relevanceScore;
     return score == null || score === 0 || score >= config.injectMinScore;

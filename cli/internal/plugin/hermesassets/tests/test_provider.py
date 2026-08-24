@@ -153,6 +153,34 @@ class TestPrefetch(unittest.TestCase):
         self.assertIn("uses Python", out)
         self.assertIn("prefers dark mode", out)
 
+    def test_prefetch_renders_agent_cases_and_skills(self):
+        # /mem/search returns agentMemory.{cases,skills} next to the episodic
+        # items; they are the products of this provider's /mem/agent-memory
+        # writes, so recall has to surface them — rendering episodes only
+        # (the original bug) meant an agent could never read back the
+        # cases/skills its own trajectories produced.
+        p, fc = make_provider()
+        fc.results["/mem/search"] = {
+            "items": [{"episode": "ran the build", "atomicFacts": []}],
+            "agentMemory": {
+                "cases": [{"taskIntent": "fix a failing test",
+                           "approach": "read the trace, patched the assertion"}],
+                "skills": [{"name": "debug-pytest-failure",
+                            "description": "triage a failing pytest",
+                            "content": "1. read trace  2. locate assert  3. fix"}],
+            },
+        }
+        p.queue_prefetch("work")
+        if p._prefetch_thread:
+            p._prefetch_thread.join(timeout=3.0)
+        out = p.prefetch("work")
+        self.assertIn("ran the build", out)
+        self.assertIn("fix a failing test", out)
+        self.assertIn("read the trace", out)
+        self.assertIn("debug-pytest-failure", out)
+        self.assertIn("triage a failing pytest", out)
+        self.assertIn("locate assert", out)
+
 
 class TestSyncTurn(unittest.TestCase):
     def _drain(self, p):

@@ -108,3 +108,66 @@ func TestCursorWriter_UsesSharedMcpWriter(t *testing.T) {
 	env, _ := entry["env"].(map[string]interface{})
 	assert.Equal(t, "agt_cursor", env["EVERME_AGENT_ID"])
 }
+
+func TestCursorWriter_WritesNativeHooksAndPreservesSiblings(t *testing.T) {
+	dir := t.TempDir()
+	mcpPath := filepath.Join(dir, "mcp.json")
+	hooksPath := filepath.Join(dir, "hooks.json")
+	envPath := filepath.Join(dir, "everme.env")
+	require.NoError(t, os.WriteFile(mcpPath, []byte(`{"mcpServers":{"other":{"command":"other-mcp"}}}`), 0o600))
+	require.NoError(t, os.WriteFile(hooksPath, []byte(`{
+      "version": 1,
+      "hooks": {
+        "sessionStart": [
+          {"command":"other-session"},
+          {"command":"npx -y @everme/cursor@old hook sessionStart"}
+        ],
+        "stop": [{"command":"other-stop"}],
+        "custom": [{"command":"custom-hook"}]
+      }
+    }`), 0o644))
+	require.NoError(t, os.WriteFile(envPath, []byte("old-token\n"), 0o600))
+
+	w := newCursorWriter()
+	plan, err := w.Plan(context.Background(), mcpPath)
+	require.NoError(t, err)
+	_, err = w.Commit(context.Background(), plan, WriteParams{
+		APIBaseURL: "https://api.everme.evermind.ai",
+		AgentID:    "agt_cursor",
+		AgentToken: "test-agent-token",
+	})
+	require.NoError(t, err)
+
+	mcp := readJSON(t, mcpPath)
+	assert.Equal(t, "other-mcp", mcp["mcpServers"].(map[string]interface{})["other"].(map[string]interface{})["command"])
+	hooks := readJSON(t, hooksPath)
+	assert.Contains(t, hookCommands(t, hooks, "sessionStart"), "other-session")
+	assert.Contains(t, hookCommands(t, hooks, "custom"), "custom-hook")
+	for _, event := range []string{"sessionStart", "stop", "preCompact", "postToolUse"} {
+		assert.Equal(t, 1, countOwnedHookCommands(t, hooks, event, "@everme/cursor@latest"), event)
+	}
+	info, err := os.Stat(envPath)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+	for _, path := range []string{mcpPath, hooksPath, envPath} {
+		_, err := os.Stat(path + backupSuffix)
+		require.NoError(t, err, "backup missing for %s", path)
+	}
+}
+
+func TestCursorWriter_FreshHookConfigIncludesSchemaVersion(t *testing.T) {
+	dir := t.TempDir()
+	mcpPath := filepath.Join(dir, "mcp.json")
+	w := newCursorWriter()
+	plan, err := w.Plan(context.Background(), mcpPath)
+	require.NoError(t, err)
+	_, err = w.Commit(context.Background(), plan, WriteParams{
+		APIBaseURL: "https://api.everme.evermind.ai",
+		AgentID:    "agt_cursor",
+		AgentToken: "test-agent-token",
+	})
+	require.NoError(t, err)
+
+	hooks := readJSON(t, filepath.Join(dir, "hooks.json"))
+	assert.Equal(t, float64(1), hooks["version"])
+}

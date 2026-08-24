@@ -7,7 +7,7 @@ import (
 )
 
 // ErrorType is the AI-Agent-facing error taxonomy. Values are part of the
-// stable ABI (docs/contracts.md) — adding a new type is
+// stable ABI (AGENTS.md "Output contract is sacred") — adding a new type is
 // a minor change, renaming or removing one is a breaking change.
 type ErrorType string
 
@@ -109,6 +109,20 @@ func NotLoggedIn() *CLIError {
 		Type:    TypeNotLoggedIn,
 		Message: "Not logged in",
 		Hint:    "Run `evercli auth login` first",
+	}
+}
+
+// UploadTokenMissing is the NotLoggedIn variant for the upload path
+// (presign / create-source, authenticated with the evt). The emk may
+// still be present — what's missing is the agent token, typically after
+// an EverMe account switch where it was never refreshed (ECA-689). Same
+// type / exit code as NotLoggedIn, but the message and hint name the
+// upload credential so the remediation is unambiguous.
+func UploadTokenMissing() *CLIError {
+	return &CLIError{
+		Type:    TypeNotLoggedIn,
+		Message: "Upload credential (agent token) not found",
+		Hint:    "Run `evercli auth login` to register this CLI for uploads",
 	}
 }
 

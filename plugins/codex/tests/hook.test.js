@@ -47,7 +47,8 @@ describe("everme-codex hook CLI", () => {
     }, runtime.env);
 
     assert.equal(result.code, 0);
-    assert.equal(result.stderr, "");
+    assert.match(result.stderr, /requestId=[0-9a-f-]{36}/,
+      "stderr must carry the save line with its trace id");
   });
 
   // Codex runs a hook command through a shell with the SESSION cwd as the
@@ -108,7 +109,8 @@ describe("everme-codex hook CLI", () => {
 
     assert.equal(first.code, 0);
     assert.equal(first.stdout, "");
-    assert.equal(first.stderr, "");
+    assert.match(first.stderr, /saveAgentMemory ok: .*requestId=[0-9a-f-]{36}/,
+      "stderr must carry the save line with its trace id");
     assert.equal(duplicate.code, 0);
     assert.equal(requests.length, 1);
     assert.equal(requests[0].path, "/api/v1/mem/agent-memory");

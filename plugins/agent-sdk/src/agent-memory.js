@@ -5,6 +5,7 @@
  * shape while preserving assistant tool calls and tool results.
  */
 
+import { requestMeta } from "./client.js";
 import { toText, stripChannelMetadata } from "./messages.js";
 import { capRunes } from "./truncate.js";
 
@@ -41,17 +42,25 @@ export async function saveAgentMemory(client, { conversationId, messages = [], f
   // caller instead of pretending the upload succeeded.
   const batches = Math.max(1, Math.ceil(converted.length / MAX_MESSAGES_PER_REQUEST));
   let res = null;
+  const requestIds = [];
   for (let batch = 0; batch < batches; batch += 1) {
     const slice = converted.slice(batch * MAX_MESSAGES_PER_REQUEST, (batch + 1) * MAX_MESSAGES_PER_REQUEST);
     const isLast = batch === batches - 1;
-    res = await client.request("POST", "/mem/agent-memory", {
+    const { result, requestId } = await requestMeta(client, "POST", "/mem/agent-memory", {
       conversationId,
       messages: slice,
       flush: isLast ? flush : false,
+      // Leading batches of a flushing upload must keep the server's
+      // synchronous-add guarantee: an async leading batch can still be
+      // invisible to the final request's flush (first-flush data loss,
+      // one request boundary later). Servers without the field ignore it.
+      ...(!isLast && flush === true ? { sync: true } : {}),
     });
+    res = result;
+    requestIds.push(requestId);
   }
-  log.info?.(`[everme] saveAgentMemory ok: messages=${converted.length} batches=${batches} flushed=${Boolean(res?.flushed)}`);
-  return res;
+  log.info?.(`[everme] saveAgentMemory ok: messages=${converted.length} batches=${batches} flushed=${Boolean(res?.flushed)} status=${res?.status ?? ""} requestId=${requestIds.join(",")}`);
+  return res == null ? res : { ...res, requestId: requestIds[requestIds.length - 1], requestIds };
 }
 
 export async function flushAgentMemory(client, { conversationId } = {}, log) {

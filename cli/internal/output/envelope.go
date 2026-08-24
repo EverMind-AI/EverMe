@@ -1,7 +1,7 @@
 package output
 
 // Envelope is the canonical success-shape returned by every command in
-// --format json | yaml mode (see docs/contracts.md).
+// --format json | yaml mode (see AGENTS.md "Output contract is sacred").
 //
 // Field-level rules:
 //   - Ok is always true on success; AI Agents treat it as the primary success key.
@@ -32,7 +32,7 @@ type ErrorEnvelope struct {
 // from EverMe; Hint is the next-step suggestion to feed an Agent;
 // Detail carries type-specific structured data (e.g. apiKeyPrefix, agent).
 //
-// See docs/contracts.md for the public type taxonomy.
+// See AGENTS.md "Output contract is sacred" for the public type taxonomy.
 type ErrorBody struct {
 	Type    ErrorType              `json:"type" yaml:"type"`
 	Code    int                    `json:"code,omitempty" yaml:"code,omitempty"`

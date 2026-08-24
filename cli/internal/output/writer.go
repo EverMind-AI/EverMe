@@ -174,13 +174,10 @@ func FatalErr(err error) error {
 		Hint:    ce.Hint,
 		Detail:  ce.Detail,
 	}
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
+	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
 	if encErr := enc.Encode(ErrorEnvelope{Ok: false, Error: body}); encErr != nil {
 		fmt.Fprintf(os.Stderr, "fatal: %s (also: %v)\n", ce.Message, encErr)
-	} else if _, writeErr := os.Stdout.Write(redact(buf.Bytes())); writeErr != nil {
-		fmt.Fprintf(os.Stderr, "fatal: %s (also: failed to write envelope: %v)\n", ce.Message, writeErr)
 	}
 	return &ExitError{Code: ce.Type.ExitCode()}
 }

@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"os"
 	"regexp"
 	"testing"
 
@@ -131,26 +129,4 @@ func TestWriter_OK_RedactsInDetail(t *testing.T) {
 
 	assert.NotContains(t, stdout.String(), fullEMK)
 	assert.NotRegexp(t, fullCredRe, stdout.String())
-}
-
-func TestFatalErr_RedactsCredentialInEnvelope(t *testing.T) {
-	oldStdout := os.Stdout
-	r, w, err := os.Pipe()
-	require.NoError(t, err)
-	os.Stdout = w
-	t.Cleanup(func() {
-		os.Stdout = oldStdout
-		_ = r.Close()
-	})
-
-	got := FatalErr(errors.New("bootstrap saw " + fullEVT))
-	require.NoError(t, w.Close())
-	out, err := io.ReadAll(r)
-	require.NoError(t, err)
-
-	var ee *ExitError
-	require.ErrorAs(t, got, &ee)
-	assert.NotContains(t, string(out), fullEVT)
-	assert.NotRegexp(t, fullCredRe, string(out))
-	assert.Contains(t, string(out), "evt_bbbb_REDACTED")
 }

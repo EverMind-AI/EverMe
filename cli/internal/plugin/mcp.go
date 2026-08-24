@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -26,10 +27,10 @@ const mcpEntryName = "everme-memory"
 const backupSuffix = "-bak"
 
 // mcpWriter is the Writer implementation for hosts whose plugin slot is
-// a top-level `mcpServers.<name>` JSON map. Cursor, Claude Desktop, and
-// Gemini CLI all share this exact shape, so they reuse this writer with
-// only a host-specific config path (see cursor.go / claude_desktop.go /
-// gemini.go). OpenClaw moved to an in-process context-engine plugin and
+// a top-level `mcpServers.<name>` JSON map. Cursor and Claude Desktop
+// share this exact shape, so they reuse this writer with only a
+// host-specific config path (see cursor.go / claude_desktop.go).
+// OpenClaw moved to an in-process context-engine plugin and
 // owns its own writer in openclaw.go. The path is parameterised so a
 // future MCP-style host can drop in with just a new path constant.
 type mcpWriter struct {
@@ -143,7 +144,8 @@ func (m *mcpWriter) Commit(_ context.Context, plan *WritePlan, params WriteParam
 		)
 	}
 
-	if err := writeConfigAtomic(plan.ConfigPath, cfg); err != nil {
+	// The entry just upserted carries the freshly minted evt token.
+	if err := writeConfigAtomic(plan.ConfigPath, cfg, configCarriesToken); err != nil {
 		return nil, err
 	}
 
@@ -153,6 +155,57 @@ func (m *mcpWriter) Commit(_ context.Context, plan *WritePlan, params WriteParam
 		BackupPath:    wroteBackup,
 		WroteNewEntry: !plan.WillReplace,
 	}, nil
+}
+
+// Remove deletes only EverMe's MCP entry and preserves every sibling entry.
+// Missing files and missing entries are intentionally idempotent.
+func (m *mcpWriter) Remove(_ context.Context, configPath string) (*RemoveResult, error) {
+	abs, err := filepath.Abs(configPath)
+	if err != nil {
+		return nil, output.IOErr(configPath, "abs-path", err)
+	}
+	cfg, exists, err := readConfig(abs)
+	if err != nil {
+		return nil, err
+	}
+	result := &RemoveResult{Platform: m.platform, ConfigPath: abs}
+	if !exists || !nestedMcpServersHasEntry(cfg, m.serversPath, mcpEntryName) {
+		return result, nil
+	}
+	// protected=true: the entry being removed carries the live agent
+	// token, so the backup must be 0600 regardless of the config's mode.
+	backup, err := backupFile(abs, true)
+	if err != nil {
+		return nil, err
+	}
+	nestedMcpDeleteEntry(cfg, m.serversPath, mcpEntryName)
+	// Our token is gone from cfg by now, so leave the host's mode alone.
+	if err := writeConfigAtomic(abs, cfg, configHasNoToken); err != nil {
+		return nil, err
+	}
+	result.BackupPath, result.Removed = backup, true
+	return result, nil
+}
+
+func nestedMcpDeleteEntry(cfg map[string]interface{}, path []string, name string) {
+	cur := cfg
+	parents := make([]map[string]interface{}, 0, len(path))
+	for _, k := range path {
+		parents = append(parents, cur)
+		n, ok := cur[k].(map[string]interface{})
+		if !ok {
+			return
+		}
+		cur = n
+	}
+	delete(cur, name)
+	for i := len(path) - 1; i >= 0; i-- {
+		if len(cur) > 0 {
+			return
+		}
+		delete(parents[i], path[i])
+		cur = parents[i]
+	}
 }
 
 // ---- helpers ---------------------------------------------------------
@@ -180,23 +233,72 @@ func readConfig(path string) (map[string]interface{}, bool, error) {
 	return cfg, true, nil
 }
 
-// writeConfigAtomic writes cfg to path via .tmp + rename, forcing 0600
-// because the file carries a freshly-minted evt token. We deliberately
-// tighten a pre-existing 0644 ~/.claude.json — a world-readable token
-// is the worse surprise.
+// configNoticeWriter is where writeConfigFileAtomic explains a
+// permission change. stderr in production (stdout is the AI-Agent
+// envelope); the indirection point lets tests read the notice without
+// swapping the process-wide os.Stderr out from under other goroutines.
+var configNoticeWriter io.Writer = os.Stderr
+
+// configSecrecy states whether the file a writer is about to rewrite
+// stores an EverMe agent token. It is a named type rather than a bare
+// bool so every call site has to answer the question explicitly: an
+// implicit "inherit whatever mode the host used" default is what let a
+// live evt token sit in a world-readable ~/.raven/config.json.
+type configSecrecy bool
+
+const (
+	configCarriesToken configSecrecy = true
+	configHasNoToken   configSecrecy = false
+)
+
+// configWriteMode returns the mode a config rewrite must use.
 //
-// On rename failure we delete the orphaned .tmp — it would otherwise
-// linger on disk containing the freshly minted evt token.
-func writeConfigAtomic(path string, cfg map[string]interface{}) error {
+// A file that stores a token is always 0600, even when the host created
+// it wider — Raven creates config.json at 0644 and that file is its only
+// credential store, so inheriting made the token world-readable. Files
+// that carry no credential keep the host's mode: tightening a user's
+// unrelated config is a surprise we have no reason to spring. Fresh
+// files default to 0600 either way.
+func configWriteMode(path string, secrecy configSecrecy) os.FileMode {
+	if secrecy == configCarriesToken {
+		return 0o600
+	}
+	if info, err := os.Stat(path); err == nil {
+		return info.Mode().Perm()
+	}
+	return 0o600
+}
+
+// writeConfigFileAtomic writes an already-serialised config to path at
+// the mode configWriteMode picks. Every host config writer (JSON, TOML,
+// YAML) goes through here so the credential-mode rule has one home.
+//
+// Narrowing a file the host created is a permission change the user did
+// not ask for, so it gets exactly one line of explanation on stderr —
+// never the token itself.
+//
+// On rename failure writeFileAtomic deletes the orphaned .tmp; it would
+// otherwise linger on disk containing the freshly minted evt token.
+func writeConfigFileAtomic(path string, raw []byte, secrecy configSecrecy) error {
+	mode := configWriteMode(path, secrecy)
+	if info, statErr := os.Stat(path); statErr == nil && info.Mode().Perm()&0o077 != 0 && mode == 0o600 {
+		fmt.Fprintf(configNoticeWriter,
+			"note: tightened %s to 0600 — it stores an EverMe agent token\n", path)
+	}
+	if err := writeFileAtomic(path, raw, mode); err != nil {
+		return output.IOErr(path, "write-config", err)
+	}
+	return nil
+}
+
+// writeConfigAtomic serialises cfg as indented JSON and writes it via
+// writeConfigFileAtomic.
+func writeConfigAtomic(path string, cfg map[string]interface{}, secrecy configSecrecy) error {
 	raw, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return output.Internal(fmt.Errorf("marshal config: %w", err))
 	}
-
-	if err := writeFileAtomic(path, raw, 0o600); err != nil {
-		return output.IOErr(path, "write-config", err)
-	}
-	return nil
+	return writeConfigFileAtomic(path, raw, secrecy)
 }
 
 // writeFileAtomic writes `body` to `path` via .tmp + fsync + rename,
@@ -379,7 +481,7 @@ func ensureServersMap(cfg map[string]interface{}, path []string) (map[string]int
 func buildEntry(apiBaseURL, agentID, agentToken string) map[string]interface{} {
 	return map[string]interface{}{
 		"command": npxCommand(),
-		"args":    []interface{}{"-y", "@everme/memory-mcp"},
+		"args":    []interface{}{"-y", "@everme/memory-mcp@latest"},
 		"env": map[string]interface{}{
 			"EVERME_API_BASE":    apiBaseURL,
 			"EVERME_AGENT_ID":    agentID,

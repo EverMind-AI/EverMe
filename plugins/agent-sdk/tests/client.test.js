@@ -117,3 +117,56 @@ describe("client", () => {
     assert.equal(s.getLastRequest().url, "/agents?platform=claude-code");
   });
 });
+
+describe("request id propagation", () => {
+  test("sends a requestId header and returns it via requestWithMeta", async () => {
+    const srv = await startServer();
+    try {
+      srv.setReply({ status: 200, body: { error: "ok", status: 0, result: { ok: 1 }, requestId: "" } });
+      const client = createClient({ baseUrl: srv.baseUrl, agentToken: "evt_x", agentId: "agt_1" });
+      const { result, requestId } = await client.requestWithMeta("POST", "/mem/search", { query: "q" });
+      assert.deepEqual(result, { ok: 1 });
+      const sent = srv.getLastRequest().headers.requestid;
+      assert.ok(sent, "requestId header must be sent");
+      assert.equal(requestId, sent, "with no envelope id, the client-generated id is returned");
+    } finally {
+      await srv.close();
+    }
+  });
+
+  test("prefers the envelope requestId and echoes it on errors and describe()", async () => {
+    const srv = await startServer();
+    try {
+      srv.setReply({ status: 503, body: { error: "Memory profile temporarily unavailable", status: 50301, requestId: "srv-9" } });
+      const client = createClient({ baseUrl: srv.baseUrl, agentToken: "evt_x", agentId: "agt_1" });
+      await assert.rejects(
+        () => client.requestWithMeta("POST", "/mem/agent-memory", {}),
+        (err) => {
+          assert.ok(err instanceof EvermeError);
+          assert.equal(err.code, 50301);
+          assert.equal(err.requestId, "srv-9");
+          assert.match(err.describe(), /errno=50301/);
+          assert.match(err.describe(), /requestId=srv-9/);
+          return true;
+        },
+      );
+    } finally {
+      await srv.close();
+    }
+  });
+
+  test("transport-level failures still carry the client-generated id", async () => {
+    // Point at a port that is not listening: fetch rejects before any
+    // response exists, so only the locally generated id can identify the
+    // attempt in logs.
+    const client = createClient({ baseUrl: "http://127.0.0.1:1", agentToken: "evt_x", agentId: "agt_1" });
+    await assert.rejects(
+      () => client.requestWithMeta("POST", "/mem/search", {}),
+      (err) => {
+        assert.ok(err instanceof EvermeError);
+        assert.ok(err.requestId, "requestId must be set even without a response");
+        return true;
+      },
+    );
+  });
+});

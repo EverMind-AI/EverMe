@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 // ../agent-sdk/src/client.js
+import { randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 
 // ../agent-sdk/src/hooks/knobs.js
@@ -74,6 +75,46 @@ function trimSlash(s) {
   return String(s || "").replace(/\/+$/, "");
 }
 
+// ../agent-sdk/src/hooks/deadline.js
+var HOST_HOOK_TIMEOUT_S = Object.freeze({
+  SessionStart: 30,
+  UserPromptSubmit: 10,
+  Stop: 30,
+  SessionEnd: 30,
+  PreCompact: 30
+});
+var HOOK_SAFETY_MARGIN_MS = 3e3;
+var MIN_REQUEST_BUDGET_MS = 1e3;
+function hookBudgetMs(event) {
+  const seconds = HOST_HOOK_TIMEOUT_S[event];
+  if (!seconds) return null;
+  return seconds * 1e3 - HOOK_SAFETY_MARGIN_MS;
+}
+function boundedTimeoutMs(configuredMs, deadlineAt, now = Date.now()) {
+  if (!deadlineAt) return configuredMs;
+  const remaining = deadlineAt - now;
+  if (remaining < MIN_REQUEST_BUDGET_MS) return MIN_REQUEST_BUDGET_MS;
+  return Math.min(configuredMs, remaining);
+}
+function startHookWatchdog({
+  event = "",
+  budgetMs,
+  onExpire,
+  setTimer = setTimeout,
+  clearTimer = clearTimeout
+} = {}) {
+  if (!budgetMs || budgetMs <= 0) return () => {
+  };
+  const fireAt = budgetMs + HOOK_SAFETY_MARGIN_MS / 2;
+  const handle = setTimer(() => {
+    onExpire?.(
+      `EverMe ${event || "hook"} hook gave up after ${fireAt}ms to stay inside the host timeout`
+    );
+  }, fireAt);
+  handle?.unref?.();
+  return () => clearTimer(handle);
+}
+
 // ../agent-sdk/src/client.js
 var noop = { info() {
 }, warn() {
@@ -96,24 +137,56 @@ var EvermeError = class extends Error {
     this.requestId = requestId;
     this.type = type;
   }
+  /**
+   * Support-friendly one-liner: message plus the errno and requestId a user
+   * can quote to correlate with server-side logs. Every user-facing error
+   * sink (MCP errResp, hook diagnostics, engine warns) should prefer this
+   * over .message.
+   */
+  describe() {
+    const parts = [];
+    if (this.code) parts.push(`errno=${this.code}`);
+    if (this.requestId) parts.push(`requestId=${this.requestId}`);
+    return parts.length ? `${this.message} (${parts.join(", ")})` : this.message;
+  }
 };
+function describeError(err) {
+  if (err instanceof EvermeError) return err.describe();
+  return redactError(err?.message || String(err));
+}
+async function requestMeta(client, method, path3, body, opts) {
+  if (typeof client?.requestWithMeta === "function") {
+    return client.requestWithMeta(method, path3, body, opts);
+  }
+  return { result: await client.request(method, path3, body, opts), requestId: "" };
+}
 function createClient(cfg, log = noop) {
-  const headers = () => ({
+  const headers = (requestId) => ({
     "Content-Type": "application/json",
     Accept: "application/json",
     Authorization: `Bearer ${cfg.agentToken}`,
-    "User-Agent": `everme-memory-mcp/0.1 (agentId=${cfg.agentId})`
+    "User-Agent": `everme-memory-mcp/0.1 (agentId=${cfg.agentId})`,
+    // Client-generated trace id. The gateway reuses a valid inbound value,
+    // so plugin logs, EverMe ELK, and the cloud platform all join on it —
+    // even when the request times out before any response arrives.
+    requestId
   });
-  async function request(method, path3, body, { timeoutMs = TIMEOUT_MS, query } = {}) {
+  async function requestWithMeta(method, path3, body, { timeoutMs = TIMEOUT_MS, query } = {}) {
+    const requestId = randomUUID();
     const url = buildUrl(cfg.baseUrl, path3, query);
     const init = {
       method,
-      headers: headers(),
+      headers: headers(requestId),
       body: body == null ? void 0 : JSON.stringify(body)
     };
-    return execWithRetry(url, init, timeoutMs, log);
+    return execWithRetry(url, init, boundedTimeoutMs(timeoutMs, cfg.deadlineAt), log, requestId);
+  }
+  async function request(method, path3, body, opts) {
+    const { result } = await requestWithMeta(method, path3, body, opts);
+    return result;
   }
   async function rawPost(uploadUrl, body, contentType, { timeoutMs = TIMEOUT_MS } = {}) {
+    timeoutMs = boundedTimeoutMs(timeoutMs, cfg.deadlineAt);
     const ac = new AbortController();
     const t = setTimeout(() => ac.abort(), timeoutMs);
     try {
@@ -164,7 +237,7 @@ function createClient(cfg, log = noop) {
       clearTimeout(t);
     }
   }
-  return { request, rawPost };
+  return { request, requestWithMeta, rawPost };
 }
 function buildUrl(base, path3, query) {
   const qs = query ? new URLSearchParams() : null;
@@ -178,9 +251,9 @@ function buildUrl(base, path3, query) {
   const q = qs?.toString();
   return q ? `${base}${path3}?${q}` : `${base}${path3}`;
 }
-async function execWithRetry(url, init, timeoutMs, log) {
+async function execWithRetry(url, init, timeoutMs, log, requestId) {
   try {
-    return await execOnce(url, init, timeoutMs);
+    return await execOnce(url, init, timeoutMs, requestId);
   } catch (err) {
     if (err instanceof EvermeError) {
       throw err;
@@ -189,12 +262,12 @@ async function execWithRetry(url, init, timeoutMs, log) {
     if (method !== "GET" && method !== "HEAD") {
       throw err;
     }
-    log.warn?.(`[everme] ${method} failed, retrying once: ${redactError(err?.message)}`);
+    log.warn?.(`[everme] ${method} failed, retrying once (requestId=${requestId}): ${redactError(err?.message)}`);
     await sleep(150);
-    return execOnce(url, init, timeoutMs);
+    return execOnce(url, init, timeoutMs, requestId);
   }
 }
-async function execOnce(url, init, timeoutMs) {
+async function execOnce(url, init, timeoutMs, requestId = "") {
   const ac = new AbortController();
   const t = setTimeout(() => ac.abort(), timeoutMs);
   let res;
@@ -206,6 +279,7 @@ async function execOnce(url, init, timeoutMs) {
       const aborted = ac.signal.aborted;
       throw new EvermeError({
         message: aborted ? `timed out after ${timeoutMs}ms` : redactError(err?.message || String(err)),
+        requestId,
         type: aborted ? "timeout" : "upstream"
       });
     }
@@ -215,6 +289,7 @@ async function execOnce(url, init, timeoutMs) {
       const aborted = ac.signal.aborted;
       throw new EvermeError({
         message: aborted ? `timed out reading body after ${timeoutMs}ms` : redactError(`body read failed: ${err?.message || String(err)}`),
+        requestId,
         type: aborted ? "timeout" : "upstream"
       });
     }
@@ -228,11 +303,12 @@ async function execOnce(url, init, timeoutMs) {
     throw new EvermeError({
       message: `HTTP ${res.status}${text ? " — " + text.slice(0, 200) : ""}`,
       status: res.status,
+      requestId: res.headers?.get?.("requestId") || requestId,
       type: res.status === 401 || res.status === 403 ? "auth" : "upstream"
     });
   }
   if (env && env.status === 0) {
-    return env.result ?? null;
+    return { result: env.result ?? null, requestId: env.requestId || requestId };
   }
   const code = Number(env?.status) || 0;
   const errType = code >= 3e4 && code < 30300 && code !== 30104 ? "auth" : "upstream";
@@ -240,7 +316,7 @@ async function execOnce(url, init, timeoutMs) {
     message: env?.error || `HTTP ${res.status}`,
     status: res.status,
     code,
-    requestId: env?.requestId,
+    requestId: env?.requestId || requestId,
     type: errType
   });
 }
@@ -322,17 +398,25 @@ async function saveAgentMemory(client, { conversationId, messages = [], flush = 
   if (!converted.length && !flushOnly) return null;
   const batches = Math.max(1, Math.ceil(converted.length / MAX_MESSAGES_PER_REQUEST));
   let res = null;
+  const requestIds = [];
   for (let batch = 0; batch < batches; batch += 1) {
     const slice = converted.slice(batch * MAX_MESSAGES_PER_REQUEST, (batch + 1) * MAX_MESSAGES_PER_REQUEST);
     const isLast = batch === batches - 1;
-    res = await client.request("POST", "/mem/agent-memory", {
+    const { result, requestId } = await requestMeta(client, "POST", "/mem/agent-memory", {
       conversationId,
       messages: slice,
-      flush: isLast ? flush : false
+      flush: isLast ? flush : false,
+      // Leading batches of a flushing upload must keep the server's
+      // synchronous-add guarantee: an async leading batch can still be
+      // invisible to the final request's flush (first-flush data loss,
+      // one request boundary later). Servers without the field ignore it.
+      ...!isLast && flush === true ? { sync: true } : {}
     });
+    res = result;
+    requestIds.push(requestId);
   }
-  log.info?.(`[everme] saveAgentMemory ok: messages=${converted.length} batches=${batches} flushed=${Boolean(res?.flushed)}`);
-  return res;
+  log.info?.(`[everme] saveAgentMemory ok: messages=${converted.length} batches=${batches} flushed=${Boolean(res?.flushed)} status=${res?.status ?? ""} requestId=${requestIds.join(",")}`);
+  return res == null ? res : { ...res, requestId: requestIds[requestIds.length - 1], requestIds };
 }
 async function flushAgentMemory(client, { conversationId } = {}, log) {
   return saveAgentMemory(client, { conversationId, messages: [], flush: true }, log);
@@ -425,14 +509,14 @@ async function searchMemory(client, params, log = noop2) {
     ...params.filter ? { filter: params.filter } : {},
     ...Array.isArray(params.memoryTypes) && params.memoryTypes.length ? { memoryTypes: params.memoryTypes } : {}
   };
-  log.info?.(`[everme] POST /mem/search topK=${body.topK} q="${truncate(body.query, 60)}"`);
-  const res = await client.request("POST", "/mem/search", body);
+  const { result: res, requestId } = await requestMeta(client, "POST", "/mem/search", body);
+  log.info?.(`[everme] POST /mem/search topK=${body.topK} q="${truncate(body.query, 60)}" requestId=${requestId}`);
   return {
     memories: res?.items ?? [],
     profiles: res?.profiles ?? [],
     rawMessages: res?.rawMessages ?? [],
     agentMemory: res?.agentMemory ?? { cases: [], skills: [] },
-    requestId: res?.requestId
+    requestId
   };
 }
 function truncate(s, n) {
@@ -678,7 +762,7 @@ async function pruneStaleStateFiles(stateDir, keepFile) {
   try {
     const cutoff = Date.now() - STATE_MAX_AGE_MS;
     for (const name of await readdir(stateDir)) {
-      if (!name.endsWith(".json")) continue;
+      if (!name.endsWith(".json") && !name.endsWith(".toolbuf.jsonl")) continue;
       const file = path.join(stateDir, name);
       if (file === keepFile) continue;
       try {
@@ -704,7 +788,7 @@ async function runInject({ input, client, config, search = searchMemory, log }) 
   const { query, stats } = extractUserIntent(input?.prompt);
   writeQueryStats(log, stats);
   if (countTokens(query) < MIN_PROMPT_TOKENS) return { block: "", count: 0 };
-  const result = await search(client, { query, topK: config.injectTopK });
+  const result = await search(client, { query, topK: config.injectTopK }, log);
   const memories = (result?.memories || []).filter((memory) => {
     const score = memory?.score ?? memory?.relevanceScore;
     return score == null || score === 0 || score >= config.injectMinScore;
@@ -755,12 +839,15 @@ function countBundle(bundle, sections) {
 }
 
 // ../agent-sdk/src/hooks/session-start.js
-async function runSessionStart({ client }) {
-  const result = await client.request("POST", "/mem/context", {});
+async function runSessionStart({ client, log }) {
+  const { result, requestId } = await requestMeta(client, "POST", "/mem/context", {});
   const profile = result?.profile;
+  const count = profileItemCount(profile);
+  log?.info?.(`[everme] SessionStart profile: items=${count} requestId=${requestId}`);
   return {
     block: renderProfileBlock(profile),
-    count: profileItemCount(profile)
+    count,
+    requestId
   };
 }
 function renderProfileBlock(profile) {
@@ -807,7 +894,7 @@ function createHookRuntime({ enqueue, flush, diagnostic = () => {
       return await operation();
     } catch (error) {
       try {
-        diagnostic(`EverMe ${label} degraded: ${redactError(error)}`);
+        diagnostic(`EverMe ${label} degraded: ${describeError(error)}`);
       } catch {
       }
       if (rethrowOnError) throw error;
@@ -834,41 +921,45 @@ function createHookRuntime({ enqueue, flush, diagnostic = () => {
 }
 
 // ../agent-sdk/src/hooks/store.js
-async function runStore({ input, adapter, client, config, counter, diagnostic }) {
+async function runStore({ input, adapter, client, config, counter, stateDir, log, diagnostic }) {
   const sessionId = input?.sessionId;
   if (!sessionId) return { block: "", count: 0 };
-  const messages = await adapter.readLastTurn(input);
+  const messages = await adapter.readLastTurn(input, { stateDir });
   if (!Array.isArray(messages) || !messages.length) return { block: "", count: 0 };
   const turnId = await resolveTurnId(adapter, input);
   const state = await counter.peek(sessionId, turnId);
   if (state.duplicate) return { block: "", count: 0, duplicate: true };
   const runtime = createHookRuntime({
-    enqueue: (turn) => saveAgentMemory(client, turn),
-    flush: (conversationId) => flushAgentMemory(client, { conversationId }),
+    enqueue: (turn) => saveAgentMemory(client, turn, log),
+    flush: (conversationId) => flushAgentMemory(client, { conversationId }, log),
     diagnostic,
     rethrowOnError: true
   });
   if (config.flushMode === "legacy") {
-    await runtime.flushSession({ conversationId: sessionId, messages });
+    const saved2 = await runtime.flushSession({ conversationId: sessionId, messages });
     await counter.commit(sessionId, turnId);
-    return { block: "", count: messages.length, flushed: true };
+    return { block: "", count: messages.length, flushed: true, status: saved2?.status, requestId: saved2?.requestId };
   }
-  await runtime.enqueueTurn({ conversationId: sessionId, messages });
+  const saved = await runtime.enqueueTurn({ conversationId: sessionId, messages });
   const committed = await counter.commit(sessionId, turnId);
   const flushed = config.flushEveryTurns > 0 && committed.count % config.flushEveryTurns === 0;
-  if (flushed) await runtime.flush(sessionId);
-  return { block: "", count: messages.length, flushed };
+  let requestId = saved?.requestId;
+  if (flushed) {
+    const flushRes = await runtime.flush(sessionId);
+    requestId = flushRes?.requestId || requestId;
+  }
+  return { block: "", count: messages.length, flushed, requestId };
 }
 async function resolveTurnId(adapter, input) {
   if (input?.turnId) return input.turnId;
   if (typeof adapter?.resolveTurnId !== "function") return "";
   return await adapter.resolveTurnId(input) || "";
 }
-async function runBoundaryFlush({ input, adapter, client, sessionState, diagnostic }) {
+async function runBoundaryFlush({ input, adapter, client, sessionState, log, diagnostic }) {
   if (!input?.sessionId) return { block: "", count: 0 };
   const runtime = createHookRuntime({
-    enqueue: (turn) => saveAgentMemory(client, turn),
-    flush: (conversationId) => flushAgentMemory(client, { conversationId }),
+    enqueue: (turn) => saveAgentMemory(client, turn, log),
+    flush: (conversationId) => flushAgentMemory(client, { conversationId }, log),
     diagnostic,
     rethrowOnError: true
   });
@@ -878,31 +969,59 @@ async function runBoundaryFlush({ input, adapter, client, sessionState, diagnost
     const uploadedCount = sessionState ? (await sessionState.read(input.sessionId)).uploadedCount : 0;
     const delta = uploadedCount > 0 ? messages.slice(uploadedCount) : messages;
     if (!delta.length) return { block: "", count: 0, skipped: true };
-    await runtime.flushSession({ conversationId: input.sessionId, messages: delta });
+    const saved = await runtime.flushSession({ conversationId: input.sessionId, messages: delta });
     if (sessionState) await sessionState.patch(input.sessionId, { uploadedCount: messages.length });
-    return { block: "", count: delta.length, flushed: true };
+    return { block: "", count: delta.length, flushed: true, status: saved?.status, requestId: saved?.requestId };
   }
-  await runtime.onSessionEnd(input.sessionId);
-  return { block: "", count: 0, flushed: true };
+  const flushRes = await runtime.onSessionEnd(input.sessionId);
+  return { block: "", count: 0, flushed: true, requestId: flushRes?.requestId };
 }
 
 // ../agent-sdk/src/hooks/runtime.js
-var WRITE_EVENTS = /* @__PURE__ */ new Set(["Stop", "SessionEnd", "PreCompact"]);
+var WRITE_EVENTS = /* @__PURE__ */ new Set(["Stop", "SessionEnd", "PreCompact", "PostToolUse"]);
 var ROTATED_KEYS = /* @__PURE__ */ new Set(["EVERME_AGENT_TOKEN", "EVERME_AGENT_ID"]);
 async function runHook(event, rawInput, adapter, deps = {}) {
-  return runHostHook(event, rawInput, adapter, {
-    ...deps,
-    resolveConfig: resolveRuntimeConfig,
-    createClient,
-    createTurnCounter,
-    createSessionState,
-    runSessionStart,
-    runInject,
-    runStore,
-    runBoundaryFlush,
-    redactError
+  const stopWatchdog = startHookWatchdog({
+    event: adapter?.mapEvent?.(event) || event,
+    budgetMs: hookBudgetMs(adapter?.mapEvent?.(event) || event),
+    onExpire: (line) => {
+      try {
+        process.stderr.write(`${line}
+`);
+      } catch {
+      }
+      process.exit(0);
+    }
   });
+  try {
+    return await runHostHook(event, rawInput, adapter, {
+      ...deps,
+      resolveConfig: resolveRuntimeConfig,
+      createClient,
+      createTurnCounter,
+      createSessionState,
+      runSessionStart,
+      runInject,
+      runStore,
+      runBoundaryFlush,
+      redactError
+    });
+  } finally {
+    stopWatchdog();
+  }
 }
+var stderrLog = {
+  info(line) {
+    try {
+      process.stderr.write(`${line}
+`);
+    } catch {
+    }
+  },
+  warn(line) {
+    this.info(line);
+  }
+};
 async function runHostHook(event, rawInput, adapter, deps = {}) {
   const hostEvent = event;
   let result = { block: "", count: 0 };
@@ -910,16 +1029,19 @@ async function runHostHook(event, rawInput, adapter, deps = {}) {
     const canonicalEvent = adapter.mapEvent?.(hostEvent) || hostEvent;
     const input = await adapter.normalizeInput(rawInput || {}, hostEvent);
     const env = deps.env || await loadRuntimeEnv(adapter, deps.baseEnv || process.env);
-    const config = deps.config || requireOperation(deps.resolveConfig, "resolveConfig")(env);
-    if (!config.isConfigured) return formatOutput(adapter, hostEvent, result);
-    if (WRITE_EVENTS.has(canonicalEvent) && (config.authMode !== "evt" || !config.agentId)) {
+    const baseConfig = deps.config || requireOperation(deps.resolveConfig, "resolveConfig")(env);
+    if (!baseConfig.isConfigured) return formatOutput(adapter, hostEvent, result);
+    if (WRITE_EVENTS.has(canonicalEvent) && (baseConfig.authMode !== "evt" || !baseConfig.agentId)) {
       return formatOutput(adapter, hostEvent, result);
     }
-    const client = deps.client || requireOperation(deps.createClient, "createClient")(config);
+    const budgetMs = deps.budgetMs === void 0 ? hookBudgetMs(canonicalEvent) : deps.budgetMs;
+    const config = budgetMs ? { ...baseConfig, deadlineAt: Date.now() + budgetMs } : baseConfig;
+    const log = deps.log || stderrLog;
+    const client = deps.client || requireOperation(deps.createClient, "createClient")(config, log);
     if (canonicalEvent === "SessionStart") {
-      result = await requireOperation(deps.runSessionStart, "runSessionStart")({ input, client, config });
+      result = await requireOperation(deps.runSessionStart, "runSessionStart")({ input, client, config, log });
     } else if (canonicalEvent === "UserPromptSubmit") {
-      result = await requireOperation(deps.runInject, "runInject")({ input, client, config, search: deps.searchMemory, log: deps.log });
+      result = await requireOperation(deps.runInject, "runInject")({ input, client, config, search: deps.searchMemory, log });
     } else if (canonicalEvent === "Stop") {
       const counter = deps.counter || requireOperation(deps.createTurnCounter, "createTurnCounter")({ stateDir: env.EVERME_STATE_DIR });
       result = await requireOperation(deps.runStore, "runStore")({
@@ -928,10 +1050,16 @@ async function runHostHook(event, rawInput, adapter, deps = {}) {
         client,
         config,
         counter,
+        stateDir: env.EVERME_STATE_DIR,
+        log,
         diagnostic: (line) => {
           throw new Error(line);
         }
       });
+    } else if (canonicalEvent === "PostToolUse") {
+      if (typeof adapter.bufferToolUse === "function") {
+        result = await adapter.bufferToolUse(input, { stateDir: env.EVERME_STATE_DIR });
+      }
     } else if (canonicalEvent === "SessionEnd" || canonicalEvent === "PreCompact") {
       const sessionState = deps.sessionState || (typeof deps.createSessionState === "function" ? deps.createSessionState({ stateDir: env.EVERME_STATE_DIR }) : void 0);
       result = await requireOperation(deps.runBoundaryFlush, "runBoundaryFlush")({
@@ -939,6 +1067,7 @@ async function runHostHook(event, rawInput, adapter, deps = {}) {
         adapter,
         client,
         sessionState,
+        log,
         diagnostic: (line) => {
           throw new Error(line);
         }
@@ -996,7 +1125,7 @@ function requireOperation(fn, name) {
   return fn;
 }
 function writeDiagnostic(event, error, redact = redactError, writer = (line) => process.stderr.write(line)) {
-  const redacted = redact(error);
+  const redacted = error?.name === "EvermeError" ? describeError(error) : redact(error);
   const reason = String(redacted).replace(/\s+/g, " ").trim();
   const label = {
     SessionStart: "start",

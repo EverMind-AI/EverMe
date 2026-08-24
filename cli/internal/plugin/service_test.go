@@ -312,9 +312,25 @@ func TestInstall_EmptyPlatforms_ReturnsInvalidArgs(t *testing.T) {
 
 // ---- Uninstall -----------------------------------------------------
 
+func TestUninstall_DisconnectsCloudAgentWhenLocalStateAlreadyMissing(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := filepath.Join(tmp, "claude.json")
+	srv, svc, _ := newServiceFixture(t, PlatformClaudeCode, configPath, true)
+	handleAgentsListFiltered(t, srv, []map[string]any{{
+		"id": "agt_orphan", "platform": "claude-code", "machineFingerprint": "test-fingerprint",
+	}})
+	srv.HandleEnvelope("POST /agents/disconnect", map[string]bool{"ok": true})
+
+	res, err := svc.Uninstall(context.Background(), PlatformClaudeCode, UninstallOptions{})
+	require.NoError(t, err)
+	assert.False(t, res.Removed)
+	assert.True(t, res.AgentDisconnected)
+	assert.NotNil(t, srv.LastRequest("POST /agents/disconnect"),
+		"idempotent local cleanup must still revoke the matching cloud agent")
+}
+
 // withMcpEntry pre-seeds a config file with our everme-memory entry, so
-// uninstall has something to remove. Used by every test below that
-// exercises the cloud-disconnect path.
+// uninstall has something to remove.
 func withMcpEntry(t *testing.T, dir string) string {
 	t.Helper()
 	configPath := filepath.Join(dir, "claude.json")
@@ -330,15 +346,110 @@ func withMcpEntry(t *testing.T, dir string) string {
 }
 
 // Backend serves /agents/disconnect via MemAuth + plugin:manage, so
-// emk-driven uninstall is the happy path. A 401 on disconnect means a
-// genuine auth failure (revoked emk or scope mismatch) — we
-// surface it as TypeAuth and let local removal complete regardless.
+// emk-driven uninstall is the happy path. An auth errno on disconnect
+// means a genuine auth failure (revoked emk or scope mismatch) — we
+// surface it as DisconnectError and let local removal complete
+// regardless: the user must not be locked out of local cleanup.
+func TestUninstall_DisconnectAuthFailure_SurfacesDisconnectError(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := withMcpEntry(t, tmp)
+	srv, svc, _ := newServiceFixture(t, PlatformClaudeCode, configPath, true)
+	handleAgentsListFiltered(t, srv, []map[string]any{{
+		"id": "agt_mine", "platform": "claude-code", "machineFingerprint": "test-fingerprint",
+	}})
+	srv.HandleEnvelopeError("POST /agents/disconnect", 30001, "ErrUnauthorized")
 
-// TestUninstall_DetectorError_SurfacesLocalDetectError verifies the
+	res, err := svc.Uninstall(context.Background(), PlatformClaudeCode, UninstallOptions{})
+	require.NoError(t, err, "disconnect failure must not fail the whole uninstall")
+	assert.True(t, res.Removed, "local cleanup must complete despite the disconnect failure")
+	assert.False(t, res.AgentDisconnected)
+	require.NotNil(t, res.DisconnectError)
+	assert.Equal(t, 30001, res.DisconnectError.Code, "upstream errno must survive into the result")
+	assert.Equal(t, output.TypeAuth, res.DisconnectError.Type)
+	assert.Equal(t, "agt_mine", res.DisconnectError.AgentID)
+	assert.NotEmpty(t, res.DisconnectError.Hint, "user needs the web-UI fallback hint")
+}
+
+// TestUninstall_DetectorError_SurfacesLocalDetectError verifies a
 // detector failure (e.g. permissions denied / malformed JSON) is
 // captured on the result instead of being silently swallowed. The
 // uninstall still proceeds — we don't want a busted local config to
 // leave the user without a way to clean up.
+func TestUninstall_DetectorError_SurfacesLocalDetectError(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := withMcpEntry(t, tmp)
+
+	srv := httpmock.NewServer(t)
+	mem := credential.NewMem()
+	require.NoError(t, mem.Set(context.Background(), credential.APIKey(),
+		"emk_0123456789abcdef0123456789abcdef"))
+	cli := client.NewWithHTTP(srv.URL(), mem, srv.HTTPClient())
+	detErr := &output.CLIError{Type: output.TypeIO, Code: 4001, Message: "config unreadable"}
+	reg := &registry{
+		detectors: map[Platform]Detector{PlatformClaudeCode: stubDetector{
+			platform: PlatformClaudeCode, display: "Claude Code",
+			configPath: configPath, detectErr: detErr,
+		}},
+		writers: map[Platform]Writer{PlatformClaudeCode: newMCPWriter(PlatformClaudeCode)},
+	}
+	svc := NewServiceWithRegistry(cli, reg, "https://api.test")
+	svc.SetMachineFingerprintFn(func(_ Platform) string { return "test-fingerprint" })
+	handleAgentsListFiltered(t, srv, []map[string]any{{
+		"id": "agt_mine", "platform": "claude-code", "machineFingerprint": "test-fingerprint",
+	}})
+	srv.HandleEnvelope("POST /agents/disconnect", map[string]bool{"ok": true})
+
+	res, err := svc.Uninstall(context.Background(), PlatformClaudeCode, UninstallOptions{})
+	require.NoError(t, err, "detector failure must not abort uninstall")
+	assert.True(t, res.Removed, "local cleanup must still run")
+	assert.True(t, res.AgentDisconnected, "cloud disconnect must still run")
+	require.NotNil(t, res.LocalDetectError)
+	assert.Equal(t, string(output.TypeIO), res.LocalDetectError.Type)
+	assert.Equal(t, 4001, res.LocalDetectError.Code, "detector error code must propagate")
+}
+
+// TestUninstall_NoFingerprintMatch_DoesNotDisconnect pins the removal of
+// the fingerprint-less fallback: when no cloud agent carries THIS
+// machine's fingerprint, nothing may be disconnected — the lone
+// unpinned agent could belong to another machine. The result surfaces
+// the fact instead of failing.
+func TestUninstall_NoFingerprintMatch_DoesNotDisconnect(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := withMcpEntry(t, tmp)
+	srv, svc, _ := newServiceFixture(t, PlatformClaudeCode, configPath, true)
+	handleAgentsListFiltered(t, srv, []map[string]any{
+		{"id": "agt_other", "platform": "claude-code", "machineFingerprint": "fp-other-machine"},
+		{"id": "agt_unpinned", "platform": "claude-code", "machineFingerprint": ""},
+	})
+	srv.HandleEnvelope("POST /agents/disconnect", map[string]bool{"ok": true})
+
+	res, err := svc.Uninstall(context.Background(), PlatformClaudeCode, UninstallOptions{})
+	require.NoError(t, err)
+	assert.True(t, res.Removed)
+	assert.False(t, res.AgentDisconnected)
+	assert.True(t, res.NoMatchingCloudAgent,
+		"result must say no cloud agent matched this machine")
+	assert.NotEmpty(t, res.NextSteps,
+		"user needs the manual web-UI disconnect pointer")
+	assert.Nil(t, srv.LastRequest("POST /agents/disconnect"),
+		"a lone fingerprint-less agent must NOT be revoked — it may be another machine's")
+}
+
+// TestUninstall_KeepAgent_SkipsCloudCalls pins --keep-agent: local
+// cleanup only, zero backend traffic.
+func TestUninstall_KeepAgent_SkipsCloudCalls(t *testing.T) {
+	tmp := t.TempDir()
+	configPath := withMcpEntry(t, tmp)
+	srv, svc, _ := newServiceFixture(t, PlatformClaudeCode, configPath, true)
+
+	res, err := svc.Uninstall(context.Background(), PlatformClaudeCode, UninstallOptions{KeepAgent: true})
+	require.NoError(t, err)
+	assert.True(t, res.Removed)
+	assert.False(t, res.AgentDisconnected)
+	assert.False(t, res.NoMatchingCloudAgent)
+	assert.Nil(t, srv.LastRequest("POST /agents/list"), "--keep-agent must not list agents")
+	assert.Nil(t, srv.LastRequest("POST /agents/disconnect"), "--keep-agent must not disconnect")
+}
 
 // ---- List ----------------------------------------------------------
 
@@ -508,6 +619,5 @@ func TestList_RejectsMismatchedAgent(t *testing.T) {
 }
 
 // (Register / displayFallback tests retired in V1 alongside the
-// `evercli plugin register` cobra command — see
-// docs/mcp-codex-hermes-iteration-plan-2026-05-26.md §D.3. Install-path
+// `evercli plugin register` cobra command. Install-path
 // /agents calls are covered by TestInstall_* below.)

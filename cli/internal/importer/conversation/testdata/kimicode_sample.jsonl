@@ -1,0 +1,17 @@
+{"type":"metadata","protocol_version":"1.4","created_at":1782718958000,"time":1782718958000}
+{"type":"turn.prompt","input":[{"type":"text","text":"list the files"}],"origin":{"kind":"user"},"time":1782718958820}
+{"type":"context.append_message","message":{"role":"user","content":[{"type":"text","text":"list the files"}],"toolCalls":[],"origin":{"kind":"user"}},"time":1782718958820}
+{"type":"context.append_message","message":{"role":"user","content":[{"type":"text","text":"<system-reminder>auto mode</system-reminder>"}],"toolCalls":[],"origin":{"kind":"injection","variant":"permission_mode"}},"time":1782718958821}
+{"type":"context.append_loop_event","event":{"type":"step.begin","uuid":"u1","turnId":"0","step":1},"time":1782718959000}
+{"type":"context.append_loop_event","event":{"type":"content.part","uuid":"p1","turnId":"0","step":1,"part":{"type":"think","think":"deciding to list"}},"time":1782718959100}
+{"type":"context.append_loop_event","event":{"type":"content.part","uuid":"p2","turnId":"0","step":1,"part":{"type":"text","text":"Here are the files:"}},"time":1782718959200}
+{"type":"context.append_loop_event","event":{"type":"step.end","uuid":"u1","turnId":"0","step":1,"finishReason":"end_turn"},"time":1782718959300}
+{"type":"context.append_message","message":{"role":"user","content":[{"type":"text","text":"thanks"}],"toolCalls":[],"origin":{"kind":"user"}},"time":1782718960000}
+{"type":"turn.prompt","input":[{"type":"text","text":"fetch the homepage"}],"origin":{"kind":"user"},"time":1782718961000}
+{"type":"context.append_message","message":{"role":"user","content":[{"type":"text","text":"fetch the homepage"}],"toolCalls":[],"origin":{"kind":"user"}},"time":1782718961000}
+{"type":"context.append_loop_event","event":{"type":"step.begin","uuid":"u2","turnId":"1","step":1},"time":1782718961100}
+{"type":"context.append_loop_event","event":{"type":"content.part","uuid":"p3","turnId":"1","step":1,"part":{"type":"text","text":"Let me fetch it."}},"time":1782718961200}
+{"type":"context.append_loop_event","event":{"type":"tool.call","uuid":"call_abc","turnId":"1","step":1,"stepUuid":"s2","toolCallId":"call_abc","name":"FetchURL","args":{"url":"https://example.com/"},"description":"Fetching"},"time":1782718961300}
+{"type":"context.append_message","message":{"role":"user","content":[{"type":"text","text":"Skill loaded inline."}],"toolCalls":[],"origin":{"kind":"skill_activation"}},"time":1782718961350}
+{"type":"context.append_loop_event","event":{"type":"tool.result","parentUuid":"call_abc","toolCallId":"call_abc","result":{"output":"the page body"}},"time":1782718961400}
+{"type":"context.append_loop_event","event":{"type":"step.end","uuid":"u2","turnId":"1","step":1,"finishReason":"end_turn"},"time":1782718961500}

@@ -1,0 +1,66 @@
+{
+  "session_id": "hermes-sess-001",
+  "model": "claude-opus-4-8",
+  "session_start": "2026-06-01T10:00:00Z",
+  "last_updated": "2026-06-01T10:05:00Z",
+  "system_prompt": "You are a helpful assistant.",
+  "messages": [
+    {
+      "role": "user",
+      "content": "hello, can you run ls for me?",
+      "timestamp": 1748775600000
+    },
+    {
+      "role": "assistant",
+      "content": "Sure, let me run ls.",
+      "tool_calls": [
+        {
+          "id": "toolu_h001",
+          "type": "function",
+          "function": {
+            "name": "bash",
+            "arguments": "{\"cmd\":\"ls\"}"
+          }
+        }
+      ],
+      "timestamp": 1748775601000
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "toolu_h001",
+      "content": "file1.txt\nfile2.go",
+      "timestamp": 1748775602000
+    },
+    {
+      "role": "user",
+      "content": "great, now read file1.txt",
+      "timestamp": 1748775603000
+    },
+    {
+      "role": "assistant",
+      "content": "Reading the file now.",
+      "tool_calls": [
+        {
+          "id": "toolu_h002",
+          "type": "function",
+          "function": {
+            "name": "read_file",
+            "arguments": "{\"path\":\"file1.txt\"}"
+          }
+        }
+      ],
+      "timestamp": 1748775604000
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "toolu_h002",
+      "content": "hello world",
+      "timestamp": 1748775605000
+    },
+    {
+      "role": "assistant",
+      "content": "The file contains: hello world",
+      "timestamp": 1748775606000
+    }
+  ]
+}

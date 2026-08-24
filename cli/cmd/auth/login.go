@@ -8,6 +8,7 @@ import (
 
 	"evercli/internal/auth"
 	"evercli/internal/cmdctx"
+	"evercli/internal/output"
 )
 
 func newLogin() *cobra.Command {
@@ -60,7 +61,7 @@ is already known).`,
 			if err != nil {
 				return deps.Out.Err(err)
 			}
-			return deps.Out.OK(res, nil)
+			return completeLogin(deps.Out, res)
 		},
 	}
 	c.Flags().StringVar(&apiKey, "api-key", "", "log in directly with an existing emk (skips Device Flow)")
@@ -72,6 +73,10 @@ is already known).`,
 	c.MarkFlagsMutuallyExclusive("api-key", "device-code")
 	c.MarkFlagsMutuallyExclusive("api-key", "no-wait")
 	return c
+}
+
+func completeLogin(out *output.Writer, result *auth.LoginResult) error {
+	return out.OK(result, nil)
 }
 
 // renderLogin renders the human-readable form of LoginResult on stdout.

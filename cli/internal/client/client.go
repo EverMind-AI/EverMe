@@ -30,11 +30,9 @@ type Client interface {
 
 	ListAgents(ctx context.Context, filter AgentFilter) ([]Agent, error)
 	RegisterAgent(ctx context.Context, req RegisterAgentReq) (*RegisterAgentResp, error)
+	DisconnectAgent(ctx context.Context, agentID string) error
 
 	// --- Memory / Records --------------------------------------------
-
-	Presign(ctx context.Context, req PresignReq) (*PresignResp, error)
-	CreateRecord(ctx context.Context, req CreateRecordReq) (*CreateRecordResp, error)
 
 	// --- Transport tuning -------------------------------------------
 
@@ -138,64 +136,3 @@ type RegisterAgentResp struct {
 	TokenPrefix string `json:"tokenPrefix"`
 	SourceID    string `json:"sourceId,omitempty"`
 }
-
-// PresignReq is POST /mem/uploads/presign. fileName + contentType +
-// sizeBytes + contentHash all required by backend; missing any → 400.
-type PresignReq struct {
-	FileName    string `json:"fileName"`
-	ContentType string `json:"contentType"`
-	SizeBytes   int64  `json:"sizeBytes"`
-	ContentHash string `json:"contentHash"`
-}
-
-// PresignResp matches PresignUploadResponse: formFields (not "fields"),
-// expiresAt is RFC3339 string (not time.Time so we can pass it back into
-// a checkpoint without time-zone reformatting drift).
-type PresignResp struct {
-	ObjectKey  string            `json:"objectKey"`
-	UploadURL  string            `json:"uploadUrl"`
-	FormFields map[string]string `json:"formFields"`
-	MaxSize    int64             `json:"maxSize"`
-	ExpiresAt  string            `json:"expiresAt"`
-}
-
-// CreateRecordReq is POST /mem/sources. Backend requires title /
-// objectKey / sizeBytes / contentHash; everything else optional.
-// agent affiliation comes from the evt-bound auth context — the
-// sourceId field is gone after the source/record merge.
-type CreateRecordReq struct {
-	ObjectKey      string                 `json:"objectKey"`
-	Title          string                 `json:"title"`
-	SizeBytes      int64                  `json:"sizeBytes"`
-	ContentHash    string                 `json:"contentHash"`
-	ContentType    string                 `json:"contentType,omitempty"`
-	RawFormat      string                 `json:"rawFormat,omitempty"`
-	ObjectETag     string                 `json:"objectETag,omitempty"`
-	Tags           []string               `json:"tags,omitempty"`
-	Metadata       map[string]interface{} `json:"metadata,omitempty"`
-	Summary        string                 `json:"summary,omitempty"`
-	DocumentKey    string                 `json:"documentKey,omitempty"`
-	IdempotencyKey string                 `json:"idempotencyKey,omitempty"`
-	// OriginPlatform attributes the row to a specific platform
-	// regardless of which evt did the write. `evercli import run
-	// claude-code` sets this to "claude-code" so cold-start imports
-	// surface under Claude Code in the UI instead of EverCli.
-	OriginPlatform string `json:"originPlatform,omitempty"`
-}
-
-// CreateRecordResp is the unified Source DTO. agentId replaces the
-// old sourceId field after the merge.
-type CreateRecordResp struct {
-	ID          string `json:"id"`
-	AgentID     string `json:"agentId"`
-	Title       string `json:"title"`
-	ObjectKey   string `json:"objectKey"`
-	SizeBytes   int64  `json:"sizeBytes"`
-	ContentHash string `json:"contentHash"`
-	DocumentKey string `json:"documentKey"`
-	CreatedAt   string `json:"createdAt"`
-}
-
-// RecordID is a convenience alias for the canonical id field — earlier
-// code referenced "RecordID" before we aligned with the backend's "id".
-func (r *CreateRecordResp) RecordID() string { return r.ID }

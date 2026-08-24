@@ -15,7 +15,7 @@ import (
 )
 
 // GlobalFlags is the persistent flag set shared by every subcommand
-// (docs/contracts.md). The shape is part of the
+// (AGENTS.md "Output contract is sacred"). The shape is part of the
 // AI-Agent ABI and cannot be reshaped without a deprecation cycle.
 type GlobalFlags struct {
 	Format     string

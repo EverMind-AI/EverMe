@@ -17,6 +17,8 @@
  * Both endpoints accept evt_ via Bearer (MemAuth + mem:search/mem:read).
  */
 
+import { requestMeta } from "./client.js";
+
 const noop = { info() {}, warn() {} };
 
 // Mirror the backend's MaxSearchQueryRunes (server/internal/biz/memory/
@@ -61,14 +63,14 @@ export async function searchMemory(client, params, log = noop) {
       ? { memoryTypes: params.memoryTypes }
       : {}),
   };
-  log.info?.(`[everme] POST /mem/search topK=${body.topK} q="${truncate(body.query, 60)}"`);
-  const res = await client.request("POST", "/mem/search", body);
+  const { result: res, requestId } = await requestMeta(client, "POST", "/mem/search", body);
+  log.info?.(`[everme] POST /mem/search topK=${body.topK} q="${truncate(body.query, 60)}" requestId=${requestId}`);
   return {
     memories: res?.items ?? [],
     profiles: res?.profiles ?? [],
     rawMessages: res?.rawMessages ?? [],
     agentMemory: res?.agentMemory ?? { cases: [], skills: [] },
-    requestId: res?.requestId,
+    requestId,
   };
 }
 
@@ -82,10 +84,10 @@ export async function searchMemory(client, params, log = noop) {
  */
 export async function getContext(client, _query, opts = {}, log = noop) {
   const body = opts.forceRefresh ? { forceRefresh: true } : {};
-  log.info?.(`[everme] POST /mem/context forceRefresh=${!!opts.forceRefresh}`);
-  const res = await client.request("POST", "/mem/context", body);
+  const { result: res, requestId } = await requestMeta(client, "POST", "/mem/context", body);
+  log.info?.(`[everme] POST /mem/context forceRefresh=${!!opts.forceRefresh} requestId=${requestId}`);
   if (typeof res?.context === "string" && res.context) {
-    return { context: res.context, memoryCount: res.memoryCount ?? estimateCount(res) };
+    return { context: res.context, memoryCount: res.memoryCount ?? estimateCount(res), requestId };
   }
   // EverMe /mem/context returns a structured `profile` (explicit_info +
   // implicit_traits) rather than a pre-rendered block; render it here so
@@ -94,10 +96,10 @@ export async function getContext(client, _query, opts = {}, log = noop) {
   if (res?.profile) {
     const rendered = renderProfile(res.profile);
     if (rendered) {
-      return { context: rendered, memoryCount: estimateProfileCount(res.profile) };
+      return { context: rendered, memoryCount: estimateProfileCount(res.profile), requestId };
     }
   }
-  return { context: "", memoryCount: estimateCount(res) };
+  return { context: "", memoryCount: estimateCount(res), requestId };
 }
 
 function renderProfile(profile) {

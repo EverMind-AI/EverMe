@@ -1,0 +1,10 @@
+{"timestamp":1749001000000,"type":"session_meta","payload":{}}
+{"timestamp":1749001001000,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"run ls and show me the output"}]}}
+{"timestamp":1749001002000,"type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"call_abc001","arguments":"{\"cmd\":\"ls\"}"}}
+{"timestamp":1749001003000,"type":"response_item","payload":{"type":"function_call_output","call_id":"call_abc001","output":"file1.txt\nfile2.go\n"}}
+{"timestamp":1749001004000,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"The directory contains: file1.txt and file2.go"}]}}
+{"timestamp":1749001005000,"type":"event_msg","payload":{"type":"agent_reasoning","text":"thinking..."}}
+{"timestamp":1749001006000,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"now read file1.txt"}]}}
+{"timestamp":1749001007000,"type":"response_item","payload":{"type":"function_call","name":"read_file","call_id":"call_abc002","arguments":"{\"path\":\"file1.txt\"}"}}
+{"timestamp":1749001008000,"type":"response_item","payload":{"type":"function_call_output","call_id":"call_abc002","output":"hello world"}}
+{"timestamp":1749001009000,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"The file contains: hello world"}]}}

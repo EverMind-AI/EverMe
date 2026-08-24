@@ -1,4 +1,4 @@
-import { redactError } from "../client.js";
+import { describeError } from "../client.js";
 
 /**
  * Transport-independent enqueue/flush primitive shared by host stores.
@@ -14,7 +14,7 @@ export function createHookRuntime({ enqueue, flush, diagnostic = () => {}, rethr
       return await operation();
     } catch (error) {
       try {
-        diagnostic(`EverMe ${label} degraded: ${redactError(error)}`);
+        diagnostic(`EverMe ${label} degraded: ${describeError(error)}`);
       } catch {
         // Diagnostics are best effort; never let a host hook fail closed.
       }

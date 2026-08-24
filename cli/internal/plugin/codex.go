@@ -3,25 +3,34 @@
 // Codex (both the App and the CLI) reads MCP servers, plugins, and
 // marketplaces from a single TOML file at ~/.codex/config.toml. So
 // `evercli plugin install codex` lands a unified `platform=codex`
-// configuration that both consume — see B.0 / H.2 in
-// docs/mcp-codex-hermes-iteration-plan-2026-05-26.md for why we
-// deliberately don't split into codex-cli / codex-desktop.
+// configuration that both consume — we deliberately don't split into
+// codex-cli / codex-desktop.
 //
 // Wire model:
 //
 //	detector
-//	  → Installed iff `codex` CLI is on PATH or ~/.codex/ exists.
+//	  → Installed iff `codex` is on PATH or a supported desktop app bundle
+//	    contains the Codex management binary.
 //	  → HasEverMeEntry := config.toml has [mcp_servers.everme] with a non-empty token.
 //
 //	writer.Prepare        (runs BEFORE token mint — see Preparer interface)
-//	  → `codex plugin marketplace add EverMind-AI/EverMe`
-//	    so the marketplace is registered before we ask the backend for an evt.
+//	  → assert a Node >= codexHookNodeMinMajor runtime is on PATH. The Hook
+//	    manifest spawns the bundled runner with a bare `node`, so without it
+//	    the install would look healthy and every Hook would fail at spawn.
+//	  → register or upgrade the EverMe marketplace, then run
+//	    `codex plugin add everme@everme --json` and validate installedPath.
 //	    EverMind-AI/EverMe is a dedicated repo whose root IS the marketplace
 //	    (manifest at .agents/plugins/marketplace.json), so we full-clone it —
 //	    no --sparse (Codex treats the repo root as the marketplace root, and a
 //	    sparse cone would exclude the root-level .agents/ manifest).
-//	    If this fails (network, missing CLI), /agents is
+//	    If this fails (network, missing Codex binary), /agents is
 //	    never called, no stranded token.
+//	  → best-effort: speak the app-server RPC protocol (codex_apprpc.go,
+//	    codex_hook_trust.go) to trust the four EverMe lifecycle hooks Codex
+//	    otherwise leaves in "pending trust" until a human runs `/hooks`
+//	    inside a session. Never fatal — deferred to Verify as a warning, same
+//	    as the marketplace-upgrade and plugin-install failures below, since
+//	    older Codex CLI releases may not implement these RPCs at all.
 //
 //	writer.Plan
 //	  → snapshot ~/.codex/config.toml (mtime/size) for TOCTOU; parse TOML; verify
@@ -39,7 +48,9 @@
 //	    by Prepare), [plugins."everme@everme"] (Commit), and
 //	    [mcp_servers.everme.env.EVERME_AGENT_TOKEN] non-empty (Commit) are
 //	    all present. Does NOT compare the token value against what
-//	    RegisterAgent returned — that defense is `evercli doctor`.
+//	    RegisterAgent returned — that defense is `evercli doctor`. Also
+//	    surfaces any deferred Prepare-time warning (plugin-cache refresh,
+//	    marketplace upgrade, hook trust) once the on-disk checks pass.
 //
 // Atomicity: TOML serialisation + .tmp + rename (writeFileAtomic, shared with
 // the JSON writer). A crash between marshal and rename leaves the original file
@@ -49,12 +60,15 @@ package plugin
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -74,14 +88,114 @@ const (
 	codexMarketplaceRepo = "EverMind-AI/EverMe"
 )
 
-// codexCommand resolves the `codex` CLI. EVERCLI_CODEX_CMD lets tests
-// point at a stub so we don't shell out to the real CLI in unit tests.
-// Same pattern as EVERCLI_CLAUDE_CMD.
-func codexCommand() string {
-	if v := os.Getenv("EVERCLI_CODEX_CMD"); v != "" {
-		return v
+// codexHookNodeMinMajor is the oldest Node major the bundled Hook runner is
+// built for (esbuild target node18, mirrored by @everme/codex's engines field).
+const codexHookNodeMinMajor = 18
+
+// resolveNodeExecutable finds the Node runtime the marketplace Hook manifest
+// depends on. The manifest spawns the bundled runner with a bare `node`, so a
+// runtime that exists on disk but not on PATH does not satisfy the requirement.
+func resolveNodeExecutable() (string, error) {
+	if override := os.Getenv("EVERCLI_NODE_CMD"); override != "" {
+		return exec.LookPath(override)
 	}
-	return "codex"
+	return exec.LookPath("node")
+}
+
+// assertCodexHookRuntime refuses to install onto a machine whose lifecycle
+// Hooks could not run. Without it the install still "succeeds" — token minted,
+// config written, cache populated — and then every Hook dies at spawn time,
+// which reads to the user as an EverMe outage rather than a missing
+// dependency. Prepare calls it before any marketplace or backend side effect,
+// so a rejected machine is left exactly as it was.
+func assertCodexHookRuntime(ctx context.Context) error {
+	node, err := resolveNodeExecutable()
+	if err != nil {
+		ce := output.IOErr("node", "lookup-hook-runtime", err)
+		ce.Hint = fmt.Sprintf(
+			"Codex lifecycle Hooks run the bundled runner with `node`, so Node %d or newer must be resolvable on PATH. Install it from nodejs.org or your package manager, then re-run `evercli plugin install codex`. The MCP server has the same requirement (it starts through `npx`)",
+			codexHookNodeMinMajor)
+		return ce
+	}
+	major, err := nodeMajorVersion(ctx, node)
+	if err != nil {
+		ce := output.IOErr(node, "probe-hook-runtime", err)
+		ce.Hint = "`node -v` did not report a usable version. Repair the Node installation, or point evercli at a different one with EVERCLI_NODE_CMD, then retry"
+		return ce
+	}
+	if major < codexHookNodeMinMajor {
+		return output.Invalid(
+			fmt.Sprintf("node at %s reports major version %d, but the Codex Hook runner requires Node %d or newer", node, major, codexHookNodeMinMajor),
+			fmt.Sprintf("Upgrade Node to %d or newer, then re-run `evercli plugin install codex`", codexHookNodeMinMajor),
+		)
+	}
+	return nil
+}
+
+// nodeMajorVersion parses the major version out of `node -v` (e.g. "v22.11.0").
+func nodeMajorVersion(ctx context.Context, node string) (int, error) {
+	cmd := exec.CommandContext(ctx, node, "-v")
+	cmd.WaitDelay = 10 * time.Second
+	out, err := cmd.Output()
+	if err != nil {
+		return 0, err
+	}
+	raw := strings.TrimSpace(string(out))
+	major, _, _ := strings.Cut(strings.TrimPrefix(raw, "v"), ".")
+	parsed, convErr := strconv.Atoi(major)
+	if convErr != nil {
+		return 0, fmt.Errorf("unexpected `node -v` output %q", raw)
+	}
+	return parsed, nil
+}
+
+// resolveCodexExecutable finds the Codex binary used to manage marketplaces
+// and plugins. A standalone CLI on PATH remains preferred, while macOS users
+// with only the desktop app installed can fall back to its bundled binary.
+func resolveCodexExecutable() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = ""
+	}
+	return resolveCodexExecutableFromCandidates(runtime.GOOS, codexAppBundleCandidates(home))
+}
+
+func resolveCodexExecutableFromCandidates(goos string, appCandidates []string) (string, error) {
+	if override := os.Getenv("EVERCLI_CODEX_CMD"); override != "" {
+		return exec.LookPath(override)
+	}
+
+	path, lookupErr := exec.LookPath("codex")
+	if lookupErr == nil {
+		return path, nil
+	}
+	if goos != "darwin" {
+		return "", lookupErr
+	}
+
+	for _, candidate := range appCandidates {
+		info, statErr := os.Stat(candidate)
+		if statErr != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+			continue
+		}
+		return candidate, nil
+	}
+	return "", lookupErr
+}
+
+func codexAppBundleCandidates(home string) []string {
+	const bundledBinary = "Contents/Resources/codex"
+	candidates := []string{
+		filepath.Join("/Applications", "ChatGPT.app", bundledBinary),
+		filepath.Join("/Applications", "Codex.app", bundledBinary),
+	}
+	if home != "" {
+		candidates = append(candidates,
+			filepath.Join(home, "Applications", "ChatGPT.app", bundledBinary),
+			filepath.Join(home, "Applications", "Codex.app", bundledBinary),
+		)
+	}
+	return candidates
 }
 
 // codexConfigPath returns ~/.codex/config.toml. EVERCLI_CODEX_CONFIG_DIR
@@ -116,15 +230,10 @@ func (codexDetector) Detect(_ context.Context) (*Detection, error) {
 		ConfigPath:  path,
 	}
 
-	// Installed requires the `codex` CLI on PATH — Prepare shells out
-	// to `codex plugin marketplace add` before the backend mints a
-	// token, so a Desktop-App-only install (config dir present, CLI
-	// missing) is guaranteed to fail at Prepare. Reporting Installed=
-	// true there would route the user into a doomed install. Detector
-	// and Prepare therefore agree on a single CLI-on-PATH precondition;
-	// a config-dir-only signal is treated as not-installed so the user
-	// gets the actionable "install the codex CLI" hint instead.
-	if _, err := exec.LookPath(codexCommand()); err == nil {
+	// Prepare shells out to Codex before the backend mints a token. Accept a
+	// standalone CLI or the binary bundled with the macOS desktop app, but do
+	// not treat a config-directory-only signal as installed.
+	if _, err := resolveCodexExecutable(); err == nil {
 		d.Installed = true
 	}
 
@@ -145,50 +254,232 @@ func (codexDetector) Detect(_ context.Context) (*Detection, error) {
 // Commit's effects survived the round-trip (some Codex versions cache
 // config and need a restart, but the on-disk shape is the load-bearing
 // guarantee — Verify only checks the file, not the running app).
-type codexWriter struct{}
+type codexWriter struct {
+	// upgradeErr defers a failed best-effort `marketplace upgrade` from
+	// Prepare to Verify, where it surfaces as an install warning rather
+	// than a FailedEntry — the token is rotated and on disk either way.
+	upgradeErr error
+	// pluginInstallErr records a failed plugin refresh when an already-valid
+	// cache lets token rotation continue offline. Verify surfaces it as a
+	// warning after confirming the on-disk installation is usable.
+	pluginInstallErr error
+	// trustErr defers a failed best-effort app-server hook-trust attempt
+	// from Prepare to Verify, same precedent as upgradeErr/pluginInstallErr
+	// above: an older Codex CLI lacking the hooks/list/config/batchWrite
+	// app-server RPCs must not block token rotation — the existing manual
+	// "/hooks, review and trust" NextSteps instruction remains the fallback
+	// (see Commit).
+	trustErr error
+	// installedPath comes from `codex plugin add --json` and is the source of
+	// truth for post-install verification. Direct Verify unit tests leave it
+	// empty and exercise the legacy cache-discovery fallback.
+	installedPath string
+}
 
 func newCodexWriter() *codexWriter { return &codexWriter{} }
 
+// Remove deletes only EverMe-owned Codex state. Codex keeps plugins and MCP
+// servers in one TOML file, so sibling entries and marketplace metadata must
+// survive. The env sidecar is owned by evercli and is removed as well.
+func (*codexWriter) Remove(_ context.Context, configPath string) (*RemoveResult, error) {
+	abs, err := filepath.Abs(configPath)
+	if err != nil {
+		return nil, output.IOErr(configPath, "abs-path", err)
+	}
+	cfg, exists, err := readCodexConfig(abs)
+	if err != nil {
+		return nil, err
+	}
+	result := &RemoveResult{Platform: PlatformCodex, ConfigPath: abs}
+	removed := false
+	if exists {
+		if plugins, ok := cfg["plugins"].(map[string]interface{}); ok {
+			if _, ok := plugins[codexPluginSpec]; ok {
+				delete(plugins, codexPluginSpec)
+				removed = true
+			}
+		}
+		if servers, ok := cfg["mcp_servers"].(map[string]interface{}); ok {
+			if _, ok := servers[codexMcpEntryName]; ok {
+				delete(servers, codexMcpEntryName)
+				removed = true
+			}
+		}
+		if marketplaces, ok := cfg["marketplaces"].(map[string]interface{}); ok {
+			if _, ok := marketplaces["everme"]; ok {
+				delete(marketplaces, "everme")
+				removed = true
+			}
+		}
+	}
+	envPath := filepath.Join(filepath.Dir(abs), "everme.env")
+	if _, statErr := os.Stat(envPath); statErr == nil {
+		removed = true
+	}
+	if !removed {
+		return result, nil
+	}
+	if exists {
+		// protected=true: config.toml carries the live agent token.
+		backup, berr := backupFile(abs, true)
+		if berr != nil {
+			return nil, berr
+		}
+		// Our token is gone from cfg by now, so leave the host's mode alone.
+		if err := writeCodexConfig(abs, cfg, configHasNoToken); err != nil {
+			return nil, err
+		}
+		result.BackupPath = backup
+	}
+	if err := os.Remove(envPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, output.IOErr(envPath, "remove-env", err)
+	}
+	result.Removed = true
+	return result, nil
+}
+
 func (*codexWriter) Platform() Platform { return PlatformCodex }
 
-// Prepare runs `codex plugin marketplace add EverMind-AI/EverMe`
-// BEFORE the backend mints a token, but only when the marketplace
-// section is NOT yet in ~/.codex/config.toml. This lets a token
-// rotation work fully offline once the marketplace has been registered
-// once on the box — the shellout is the only step in this writer that
-// needs network.
+// Prepare registers or refreshes the marketplace BEFORE the backend
+// mints a token — the shellout is the only step in this writer that
+// needs network:
 //
-// Codex's marketplace add is documented as idempotent, but each call
-// re-fetches the repo from GitHub; skipping when already registered
-// also avoids re-downloading the repo on every rotate.
+//   - marketplace not yet in ~/.codex/config.toml → `codex plugin
+//     marketplace add EverMind-AI/EverMe`. A failure here is fatal:
+//     without the marketplace nothing else can work.
+//   - already registered → best-effort `codex plugin marketplace
+//     upgrade everme`, so a box that registered once still picks up
+//     newer plugin content (Codex only refreshes its cache when the
+//     manifest version changes AND an upgrade runs). A failure here is
+//     deferred to Verify as a warning: token rotation must keep
+//     working fully offline.
 //
 // On failure we capture the CLI's stdout+stderr internally and surface
 // only the trimmed tail in the hint, so structured-JSON callers don't
 // get interleaved progress lines, and so a one-time device-auth URL
 // printed by Codex doesn't land in a tee'd install.log.
 func (w *codexWriter) Prepare(ctx context.Context, detection *Detection) error {
-	if marketplaceAlreadyAdded(detection) {
-		return nil
-	}
-	if _, err := exec.LookPath(codexCommand()); err != nil {
+	codexExecutable, err := resolveCodexExecutable()
+	if err != nil {
 		ce := output.IOErr("codex", "lookup-cli", err)
-		ce.Hint = "Install Codex (https://codex.openai.com/) and ensure the `codex` CLI is on PATH, then retry"
+		ce.Hint = "Install the Codex desktop app or CLI, then retry. On macOS, evercli automatically uses the binary bundled with ChatGPT.app or Codex.app"
+		return ce
+	}
+
+	if err := assertCodexHookRuntime(ctx); err != nil {
+		return err
+	}
+
+	if marketplaceAlreadyAdded(detection) {
+		w.upgradeErr = upgradeCodexMarketplace(ctx)
+	} else {
+		cmd := exec.CommandContext(ctx,
+			codexExecutable,
+			"plugin", "marketplace", "add",
+			codexMarketplaceRepo,
+		)
+		cmd.WaitDelay = 30 * time.Second
+		var captured bytes.Buffer
+		cmd.Stderr = &captured
+		cmd.Stdout = &captured
+		if err := cmd.Run(); err != nil {
+			ce := output.IOErr("codex plugin marketplace add", "exec", err)
+			ce.Hint = fmt.Sprintf(
+				"Marketplace add failed. Check network reachability for github.com/%s and that the repo is reachable. To override, run the command manually and re-attempt `evercli plugin install codex`. Codex CLI output: %s",
+				codexMarketplaceRepo, trimForHint(captured.String()))
+			return ce
+		}
+	}
+
+	installedPath, installErr := installCodexPlugin(ctx, codexExecutable)
+	if installErr == nil {
+		w.installedPath = installedPath
+	} else if detection != nil && detection.ConfigPath != "" {
+		// A healthy existing cache keeps token rotation available when the
+		// marketplace cannot be refreshed offline. Fresh installs still fail before
+		// the backend mints a token because there is no usable plugin to fall back to.
+		if existingPath, findErr := findCodexInstalledPath(detection.ConfigPath); findErr == nil {
+			w.installedPath = existingPath
+			w.pluginInstallErr = installErr
+		}
+	}
+	if w.installedPath == "" {
+		return installErr
+	}
+
+	// Best-effort: establish app-server "hook trust" for the four lifecycle
+	// hooks the plugin ships, so they actually run instead of sitting in
+	// Codex's pending-trust state until a human opens `/hooks`. Runs on the
+	// same codexExecutable already resolved above; depends only on
+	// hooks.json already being on disk, which a non-empty w.installedPath
+	// guarantees. Never fatal — see trustErr's field comment.
+	w.trustErr = codexEstablishHookTrust(ctx, codexExecutable)
+	return nil
+}
+
+type codexPluginInstallResult struct {
+	InstalledPath string `json:"installedPath"`
+}
+
+func installCodexPlugin(ctx context.Context, codexExecutable string) (string, error) {
+	cmd := exec.CommandContext(ctx,
+		codexExecutable,
+		"plugin", "add", codexPluginSpec, "--json",
+	)
+	cmd.WaitDelay = 30 * time.Second
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		ce := output.IOErr("codex plugin add", "exec", err)
+		ce.Hint = "The EverMe marketplace is configured but the plugin cache could not be installed. Codex CLI output: " + trimForHint(stderr.String())
+		return "", ce
+	}
+
+	var result codexPluginInstallResult
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		ce := output.IOErr("codex plugin add", "parse-json", err)
+		ce.Hint = "Codex returned an unexpected plugin installation response: " + trimForHint(stdout.String())
+		return "", ce
+	}
+	if strings.TrimSpace(result.InstalledPath) == "" {
+		return "", output.IOErr("codex plugin add", "verify", fmt.Errorf("installedPath missing from Codex response"))
+	}
+	abs, err := filepath.Abs(result.InstalledPath)
+	if err != nil {
+		return "", output.IOErr(result.InstalledPath, "abs-path", err)
+	}
+	if err := validateCodexInstalledPath(abs); err != nil {
+		return "", output.IOErr(abs, "verify-plugin", err)
+	}
+	return abs, nil
+}
+
+// upgradeCodexMarketplace runs `codex plugin marketplace upgrade
+// everme` and returns a classified error on failure. Callers treat the
+// result as advisory (see Prepare) — never abort an install on it.
+func upgradeCodexMarketplace(ctx context.Context) error {
+	codexExecutable, err := resolveCodexExecutable()
+	if err != nil {
+		ce := output.IOErr("codex", "lookup-cli", err)
+		ce.Hint = "Codex desktop app or CLI not found, so the everme marketplace cache was not refreshed; install Codex and retry"
 		return ce
 	}
 	cmd := exec.CommandContext(ctx,
-		codexCommand(),
-		"plugin", "marketplace", "add",
-		codexMarketplaceRepo,
+		codexExecutable,
+		"plugin", "marketplace", "upgrade",
+		codexMarketplaceName,
 	)
 	cmd.WaitDelay = 30 * time.Second
 	var captured bytes.Buffer
 	cmd.Stderr = &captured
 	cmd.Stdout = &captured
 	if err := cmd.Run(); err != nil {
-		ce := output.IOErr("codex plugin marketplace add", "exec", err)
+		ce := output.IOErr("codex plugin marketplace upgrade", "exec", err)
 		ce.Hint = fmt.Sprintf(
-			"Marketplace add failed. Check network reachability for github.com/%s and that the repo is reachable. To override, run the command manually and re-attempt `evercli plugin install codex`. Codex CLI output: %s",
-			codexMarketplaceRepo, trimForHint(captured.String()))
+			"Marketplace upgrade failed, so the everme plugin cache may be stale. Run `codex plugin marketplace upgrade %s` manually when network is available. Codex CLI output: %s",
+			codexMarketplaceName, trimForHint(captured.String()))
 		return ce
 	}
 	return nil
@@ -298,7 +589,7 @@ func (*codexWriter) Plan(_ context.Context, configPath string) (*WritePlan, erro
 // rather than a strongly-typed struct precisely so unknown keys (other
 // marketplaces, other MCP servers, Codex-internal [desktop] settings)
 // round-trip unchanged.
-func (*codexWriter) Commit(_ context.Context, plan *WritePlan, params WriteParams) (*WriteResult, error) {
+func (w *codexWriter) Commit(_ context.Context, plan *WritePlan, params WriteParams) (*WriteResult, error) {
 	if plan == nil {
 		return nil, output.Internal(fmt.Errorf("nil plan"))
 	}
@@ -332,9 +623,33 @@ func (*codexWriter) Commit(_ context.Context, plan *WritePlan, params WriteParam
 			"Fix the config file's shape manually (one of marketplaces.*, plugins.*, mcp_servers.* exists with an unexpected non-table value), then retry install",
 		)
 	}
+	body, err := buildEnvFileBody(PlatformCodex, params)
+	if err != nil {
+		return nil, output.Internal(err)
+	}
 
-	if err := writeCodexConfig(plan.ConfigPath, cfg); err != nil {
+	// [mcp_servers.everme.env] carries the freshly minted evt token, so
+	// config.toml is credential-bearing even though everme.env exists too.
+	if err := writeCodexConfig(plan.ConfigPath, cfg, configCarriesToken); err != nil {
 		return nil, err
+	}
+	envPath := filepath.Join(filepath.Dir(plan.ConfigPath), "everme.env")
+	if err := writeFileAtomic(envPath, []byte(body), 0o600); err != nil {
+		return nil, output.IOErr(envPath, "write-env-file", err)
+	}
+
+	// The Dock/PATH caveat applies regardless of trust outcome — it's about
+	// the hook's `node ...` command failing to spawn at runtime, a separate
+	// concern from whether Codex has trusted the hook content. The manual
+	// `/hooks` step is only needed when Prepare's automatic trust attempt
+	// (w.trustErr) failed; on success there's nothing left for the user to do.
+	nextSteps := []string{
+		"if you start Codex from the macOS Dock rather than a terminal, confirm Codex resolves a Node on PATH: a Dock-launched app inherits the launchd PATH, which usually excludes a Node installed by a version manager, and the EverMe lifecycle hooks will fail to spawn even though they're trusted",
+	}
+	if w.trustErr != nil {
+		nextSteps = append([]string{
+			"start a new Codex session, open `/hooks`, then review and trust the EverMe lifecycle hooks — evercli could not establish trust automatically for this install (see the reported warning for why)",
+		}, nextSteps...)
 	}
 
 	return &WriteResult{
@@ -342,6 +657,7 @@ func (*codexWriter) Commit(_ context.Context, plan *WritePlan, params WriteParam
 		ConfigPath:    plan.ConfigPath,
 		BackupPath:    wroteBackup,
 		WroteNewEntry: !plan.WillReplace,
+		NextSteps:     nextSteps,
 	}, nil
 }
 
@@ -365,7 +681,7 @@ func (*codexWriter) Commit(_ context.Context, plan *WritePlan, params WriteParam
 // It also does NOT probe the running Codex app — Codex caches config
 // in memory and may need a restart to pick up changes. We only validate
 // the file shape, which is the contract we own.
-func (*codexWriter) Verify(_ context.Context, result *WriteResult) error {
+func (w *codexWriter) Verify(_ context.Context, result *WriteResult) error {
 	if result == nil {
 		return output.Internal(fmt.Errorf("nil result"))
 	}
@@ -384,6 +700,36 @@ func (*codexWriter) Verify(_ context.Context, result *WriteResult) error {
 	}
 	if !codexHasEverMeEntry(cfg) {
 		return output.IOErr(result.ConfigPath, "verify", fmt.Errorf("mcp_servers.%s missing or empty", codexMcpEntryName))
+	}
+	envPath := filepath.Join(filepath.Dir(result.ConfigPath), "everme.env")
+	if !codexEnvHasToken(envPath) {
+		return output.IOErr(envPath, "verify", fmt.Errorf("EVERME_AGENT_TOKEN missing or empty"))
+	}
+	installedPath := w.installedPath
+	if installedPath == "" {
+		installedPath, err = findCodexInstalledPath(result.ConfigPath)
+	}
+	if err != nil {
+		return output.IOErr(result.ConfigPath, "verify-hooks", err)
+	}
+	if err := validateCodexInstalledPath(installedPath); err != nil {
+		return output.IOErr(installedPath, "verify-hooks", err)
+	}
+	// All on-disk checks passed; surface deferred Prepare-time warnings last,
+	// in the order plugin-cache refresh, marketplace upgrade, hook trust —
+	// each reaches the user as a warning without masking a genuinely broken
+	// install. trustErr goes last because a broken plugin/marketplace
+	// refresh is a more actionable root cause than a trust failure, and
+	// trust can't be attempted meaningfully without a valid hooks.json
+	// anyway (Prepare only calls it once installedPath is non-empty).
+	if w.pluginInstallErr != nil {
+		return w.pluginInstallErr
+	}
+	if w.upgradeErr != nil {
+		return w.upgradeErr
+	}
+	if w.trustErr != nil {
+		return w.trustErr
 	}
 	return nil
 }
@@ -414,18 +760,13 @@ func readCodexConfig(path string) (map[string]interface{}, bool, error) {
 }
 
 // writeCodexConfig serialises cfg as TOML and atomically replaces path.
-// Mode is forced to 0600 — matches the JSON writer; the file holds a
-// freshly minted token, so a pre-existing 0644 must be tightened rather
-// than inherited.
-func writeCodexConfig(path string, cfg map[string]interface{}) error {
+// Mode selection matches the JSON writer: see configWriteMode.
+func writeCodexConfig(path string, cfg map[string]interface{}, secrecy configSecrecy) error {
 	raw, err := toml.Marshal(cfg)
 	if err != nil {
 		return output.Internal(fmt.Errorf("marshal config: %w", err))
 	}
-	if err := writeFileAtomic(path, raw, 0o600); err != nil {
-		return output.IOErr(path, "write-config", err)
-	}
-	return nil
+	return writeConfigFileAtomic(path, raw, secrecy)
 }
 
 // upsertCodexEntries replaces the EverMe-owned plugin + mcp_server
@@ -456,7 +797,7 @@ func upsertCodexEntries(cfg map[string]interface{}, params WriteParams) error {
 	// PATHEXT. Same constraint as the JSON writer's buildEntry().
 	mcpServers[codexMcpEntryName] = map[string]interface{}{
 		"command": npxCommand(),
-		"args":    []interface{}{"-y", "@everme/memory-mcp"},
+		"args":    []interface{}{"-y", "@everme/memory-mcp@latest"},
 		"env": map[string]interface{}{
 			"EVERME_API_BASE":    params.APIBaseURL,
 			"EVERME_AGENT_ID":    params.AgentID,
@@ -507,4 +848,72 @@ func codexHasPluginEnabled(cfg map[string]interface{}) bool {
 	}
 	enabled, _ := entry["enabled"].(bool)
 	return enabled
+}
+
+func codexEnvHasToken(path string) bool {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		key, value, ok := strings.Cut(strings.TrimSpace(line), "=")
+		if ok && strings.TrimSpace(key) == "EVERME_AGENT_TOKEN" && strings.TrimSpace(value) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func findCodexInstalledPath(configPath string) (string, error) {
+	root := filepath.Join(
+		filepath.Dir(configPath),
+		"plugins", "cache", codexMarketplaceName, codexMcpEntryName,
+	)
+	versions, err := os.ReadDir(root)
+	if err != nil {
+		return "", fmt.Errorf("installed plugin cache missing under %s: %w", root, err)
+	}
+	var lastValidationErr error
+	for i := len(versions) - 1; i >= 0; i-- {
+		if !versions[i].IsDir() {
+			continue
+		}
+		path := filepath.Join(root, versions[i].Name())
+		if validationErr := validateCodexInstalledPath(path); validationErr == nil {
+			return path, nil
+		} else {
+			lastValidationErr = validationErr
+		}
+	}
+	if lastValidationErr != nil {
+		return "", fmt.Errorf("installed EverMe plugin cache under %s is invalid: %w", root, lastValidationErr)
+	}
+	return "", fmt.Errorf("hooks/hooks.json missing from installed EverMe plugin cache under %s", root)
+}
+
+func validateCodexInstalledPath(installedPath string) error {
+	info, err := os.Stat(installedPath)
+	if err != nil {
+		return fmt.Errorf("installed plugin path is missing: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("installed plugin path is not a directory")
+	}
+	hooksPath := filepath.Join(installedPath, "hooks", "hooks.json")
+	hooksInfo, err := os.Stat(hooksPath)
+	if err != nil {
+		return fmt.Errorf("hooks/hooks.json missing: %w", err)
+	}
+	if hooksInfo.IsDir() {
+		return fmt.Errorf("hooks/hooks.json is a directory")
+	}
+	runnerPath := filepath.Join(installedPath, "bin", "hook.mjs")
+	runnerInfo, err := os.Stat(runnerPath)
+	if err != nil {
+		return fmt.Errorf("bin/hook.mjs missing: %w", err)
+	}
+	if runnerInfo.IsDir() {
+		return fmt.Errorf("bin/hook.mjs is a directory")
+	}
+	return nil
 }
