@@ -42,7 +42,7 @@
 
 ## 仓库概览
 
-本仓库提供把 Claude Code、Cursor、Codex、Hermes、OpenClaw 等 AI Agent 接入 [EverMe](https://evermind.ai/everme) 记忆层所需的**客户端工具链**。EverMe 托管产品与 EverOS 记忆引擎分别独立：
+本仓库提供把 Claude Code、Cursor、Codex、Kimi Code、Hermes、Raven、OpenClaw 等 AI Agent 接入 [EverMe](https://evermind.ai/everme) 记忆层所需的**客户端工具链**。EverMe 托管产品与 EverOS 记忆引擎分别独立：
 
 | 层级 | 提供什么 | 在哪里 |
 | :--- | :--- | :--- |
@@ -80,14 +80,20 @@ evercli plugin install claude-code
 evercli plugin install claude-desktop
 evercli plugin install codex
 evercli plugin install cursor
-evercli plugin install gemini
+evercli plugin install devin
+evercli plugin install dsh
 evercli plugin install hermes
+evercli plugin install kimicode
 evercli plugin install opencode
 evercli plugin install openclaw
+evercli plugin install raven
+evercli plugin install workbuddy
 
 # 4. 自检
 evercli doctor
 ```
+
+Kimi Code 完成预配置后，还需要在 TUI 内运行 `/plugins install ~/.kimi-code/everme`；WorkBuddy 则需要在 MCP 管理界面信任新增的服务。
 
 装好后打开你的 Agent，问它 "what do you remember about me?" —— 它会通过 MCP `mem://profile` 资源去召回你的记忆。
 
@@ -106,24 +112,32 @@ evercli doctor
 | [`plugins/openclaw/`](plugins/openclaw/) | `@everme/openclaw` | OpenClaw ContextEngine 插件 |
 | [`plugins/cli/`](plugins/cli/) | `@everme/cli` | 自动下载 `evercli` 平台二进制的 npm 封装 |
 | [`plugins/codex/`](plugins/codex/) | `@everme/codex` | Codex 生命周期 hooks 与 marketplace 构建工具 |
+| [`plugins/cursor/`](plugins/cursor/) | `@everme/cursor` | Cursor 原生生命周期 hooks |
+| [`plugins/devin/`](plugins/devin/) | `@everme/devin` | Devin 原生生命周期 hooks |
+| [`plugins/dsh/`](plugins/dsh/) | `@everme/dsh` | DeepSeek Harness 原生生命周期插件 |
+| [`plugins/kimicode/`](plugins/kimicode/) | `@everme/kimicode` | Kimi Code 原生插件包 |
 | [`plugins/everme/`](plugins/everme/) | Codex marketplace 插件 | 通过 MCP resources 给 Codex App / Codex CLI 提供召回 |
 
 <br>
 
 ## 接入你的 Agent
 
-每个 Agent 的配置入口不同。`evercli plugin install <agent>` 会把对应文件写入对应路径，所有承载凭据的配置都强制 `0600` 权限。
+每个 Agent 的配置入口不同。`evercli plugin install <agent>` 会执行对应平台的安装流程，并将承载凭据的文件权限设为 `0600`。
 
 | Agent | 安装命令 | 写入的配置 |
 | :--- | :--- | :--- |
 | **Claude Code** | `evercli plugin install claude-code` | `~/.claude/everme.env` + 插件注册 |
 | **Codex（App + CLI）** | `evercli plugin install codex` | `~/.codex/config.toml` MCP 条目 + marketplace 插件 |
-| **Cursor** | `evercli plugin install cursor` | Cursor MCP 配置 |
-| **Hermes** | `evercli plugin install hermes` | `<hermes_home>/everme.env` + `~/.hermes/config.yaml` MCP 条目 |
+| **Cursor** | `evercli plugin install cursor` | `~/.cursor/mcp.json` + 原生生命周期 hooks |
 | **Claude Desktop** | `evercli plugin install claude-desktop` | Claude Desktop MCP 配置 |
-| **Gemini CLI** | `evercli plugin install gemini` | `~/.gemini/settings.json` MCP 条目 |
+| **Devin** | `evercli plugin install devin` | `~/.config/devin/mcp_config.json` + 原生生命周期 hooks |
+| **DeepSeek Harness** | `evercli plugin install dsh` | 原生生命周期插件 + 托管 profile 补丁 |
+| **Hermes** | `evercli plugin install hermes` | `$HERMES_HOME/config.yaml` + 内置 MemoryProvider |
+| **Kimi Code** | `evercli plugin install kimicode` | 插件包预配置 + TUI 注册步骤 |
 | **OpenCode** | `evercli plugin install opencode` | `~/.config/opencode/opencode.json` MCP 条目 |
 | **OpenClaw** | `evercli plugin install openclaw` | OpenClaw 插件注册 |
+| **Raven** | `evercli plugin install raven` | `~/.raven/config.json` + 内置 MemoryBackend |
+| **WorkBuddy** | `evercli plugin install workbuddy` | `~/.workbuddy/mcp.json` + 首次连接信任步骤 |
 
 所有 Agent 读写的记忆都落在**同一份记忆池**里，按你的账号隔离 —— 所以上下文跟着**你**走，而不是被锁在某个 App 里。
 

@@ -42,7 +42,7 @@
 
 ## Repository Overview
 
-This repository ships the **client-side toolchain** that connects AI Agents — Claude Code, Cursor, Codex, Hermes, OpenClaw, and others — to the [EverMe](https://evermind.ai/everme) memory layer. The managed product and the EverOS memory engine live separately:
+This repository ships the **client-side toolchain** that connects AI Agents — Claude Code, Cursor, Codex, Kimi Code, Hermes, Raven, OpenClaw, and others — to the [EverMe](https://evermind.ai/everme) memory layer. The managed product and the EverOS memory engine live separately:
 
 | Layer | What it gives you | Where it lives |
 | :--- | :--- | :--- |
@@ -80,14 +80,20 @@ evercli plugin install claude-code
 evercli plugin install claude-desktop
 evercli plugin install codex
 evercli plugin install cursor
-evercli plugin install gemini
+evercli plugin install devin
+evercli plugin install dsh
 evercli plugin install hermes
+evercli plugin install kimicode
 evercli plugin install opencode
 evercli plugin install openclaw
+evercli plugin install raven
+evercli plugin install workbuddy
 
 # 4. Verify
 evercli doctor
 ```
+
+Kimi Code needs one final host-owned step after staging: run `/plugins install ~/.kimi-code/everme` inside its TUI. WorkBuddy asks you to trust the new MCP server in its MCP management dialog.
 
 Once installed, open your Agent and ask "what do you remember about me?" — it will use the MCP `mem://profile` resource to recall.
 
@@ -106,24 +112,32 @@ Once installed, open your Agent and ask "what do you remember about me?" — it 
 | [`plugins/openclaw/`](plugins/openclaw/) | `@everme/openclaw` | OpenClaw ContextEngine plugin |
 | [`plugins/cli/`](plugins/cli/) | `@everme/cli` | npm wrapper that downloads the platform-native `evercli` binary |
 | [`plugins/codex/`](plugins/codex/) | `@everme/codex` | Codex lifecycle hooks and marketplace build tooling |
+| [`plugins/cursor/`](plugins/cursor/) | `@everme/cursor` | Native Cursor lifecycle hooks |
+| [`plugins/devin/`](plugins/devin/) | `@everme/devin` | Native Devin lifecycle hooks |
+| [`plugins/dsh/`](plugins/dsh/) | `@everme/dsh` | Native DeepSeek Harness lifecycle plugin |
+| [`plugins/kimicode/`](plugins/kimicode/) | `@everme/kimicode` | Native Kimi Code plugin bundle |
 | [`plugins/everme/`](plugins/everme/) | Codex marketplace plugin | Codex App / Codex CLI recall via MCP resources |
 
 <br>
 
 ## Use It With Your Agent
 
-Each Agent has its own configuration surface. `evercli plugin install <agent>` writes the right file at the right path, with `0600` permissions for any credential-bearing config.
+Each Agent has its own configuration surface. `evercli plugin install <agent>` applies the host-specific setup and protects credential-bearing files with `0600` permissions.
 
 | Agent | Install command | What gets configured |
 | :--- | :--- | :--- |
 | **Claude Code** | `evercli plugin install claude-code` | `~/.claude/everme.env` + plugin registration |
 | **Codex (App + CLI)** | `evercli plugin install codex` | `~/.codex/config.toml` MCP entry + marketplace plugin |
-| **Cursor** | `evercli plugin install cursor` | Cursor MCP config |
-| **Hermes** | `evercli plugin install hermes` | `<hermes_home>/everme.env` + `~/.hermes/config.yaml` MCP entry |
+| **Cursor** | `evercli plugin install cursor` | `~/.cursor/mcp.json` + native lifecycle hooks |
 | **Claude Desktop** | `evercli plugin install claude-desktop` | Claude Desktop MCP config |
-| **Gemini CLI** | `evercli plugin install gemini` | `~/.gemini/settings.json` MCP entry |
+| **Devin** | `evercli plugin install devin` | `~/.config/devin/mcp_config.json` + native lifecycle hooks |
+| **DeepSeek Harness** | `evercli plugin install dsh` | Native lifecycle plugin + managed profile patches |
+| **Hermes** | `evercli plugin install hermes` | `$HERMES_HOME/config.yaml` + embedded MemoryProvider |
+| **Kimi Code** | `evercli plugin install kimicode` | Plugin bundle staging + TUI registration step |
 | **OpenCode** | `evercli plugin install opencode` | `~/.config/opencode/opencode.json` MCP entry |
 | **OpenClaw** | `evercli plugin install openclaw` | OpenClaw plugin registration |
+| **Raven** | `evercli plugin install raven` | `~/.raven/config.json` + embedded MemoryBackend |
+| **WorkBuddy** | `evercli plugin install workbuddy` | `~/.workbuddy/mcp.json` + first-connection trust step |
 
 The memory each Agent reads and writes lives in **one shared memory pool** keyed to your account — so context follows *you*, not the app.
 
