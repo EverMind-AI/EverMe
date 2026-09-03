@@ -33,8 +33,7 @@ Codex variants differ in what the LLM-facing tool layer surfaces:
   `/mcp` panel but typically NOT exposed to the LLM as callable
   functions.
 - **Codex CLI** (the `codex` terminal command) — has been observed to
-  expose both Resources and Tools to the LLM in practice, so
-  `tools/call mem_save_turn` may also work there.
+  expose both Resources and Tools to the LLM in practice.
 
 The memory server is configured under
 `~/.codex/config.toml::mcp_servers.everme` (auto-managed by
@@ -71,19 +70,9 @@ Use these explicit MCP operations only when they add value:
    `q` short — a few keywords or one short phrase naming the topic. Quote
    relevant fragments inline when answering.
 
-3. **The user states a durable fact** (a preference, habit, trait, or
-   long-term decision — even without saying "remember this"):
-   if your Codex variant exposes MCP Tools (Codex CLI typically does),
-   call `tools/call mem_save_fact` with that fact — it writes the user's
-   long-term profile (the block loaded at session start). Only
-   `extracted: true` / `profileUpdated: true` in the result means the
-   profile really updated; on `no_extraction` do not tell the user the
-   fact was remembered, and do not auto-retry. Use
-   `tools/call mem_save_turn` instead when you want to record the
-   conversation trajectory (how a task was solved). Chat-dual-write backends
-   may also update the profile; check `profileUpdated`. Use `mem_save_fact`
-   for a deliberate durable fact. Normal completed turns are already captured
-   by Stop.
+3. **Saving is automatic** — the native hooks capture every completed turn,
+   so there is nothing to call to save. The MCP write tools were retired;
+   these explicit operations are read-only recall.
 
 ## When NOT to call these resources
 

@@ -18,7 +18,8 @@ function resolveHookKnobs(env = process.env) {
     flushMode,
     injectTopK: strictInteger(env.EVERME_INJECT_TOPK, 10, 1, 20),
     injectProfile: strictBoolean(env.EVERME_INJECT_PROFILE, false),
-    injectMinScore: strictFloat(env.EVERME_INJECT_MIN_SCORE, 0.1, 0, 1)
+    injectMinScore: strictFloat(env.EVERME_INJECT_MIN_SCORE, 0.1, 0, 1),
+    telemetry: strictBoolean(env.EVERME_TELEMETRY, true)
   };
 }
 function strictInteger(value, fallback, min, max) {
@@ -80,6 +81,7 @@ var HOST_HOOK_TIMEOUT_S = Object.freeze({
   SessionStart: 30,
   UserPromptSubmit: 10,
   Stop: 30,
+  SubagentStop: 30,
   SessionEnd: 30,
   PreCompact: 30
 });
@@ -128,13 +130,17 @@ function redactError(msg) {
   const text = msg instanceof Error ? msg.message : String(msg);
   return text.replace(evtRe, (m) => m.slice(0, 8) + "_REDACTED").replace(emkRe, (m) => m.slice(0, 8) + "_REDACTED").replace(s3SigParamRe, (_, name) => name + "=[REDACTED]").replace(awsKeyIDRe, "[REDACTED-AWSKEY]");
 }
+function boundedDiagnostic(value, maxChars = 240) {
+  const text = redactError(value).replace(/\s+/g, " ").trim();
+  return text.length > maxChars ? `${text.slice(0, maxChars)}…` : text;
+}
 var EvermeError = class extends Error {
   constructor({ message, status = 0, code = 0, requestId = "", type = "upstream" }) {
-    super(redactError(message));
+    super(boundedDiagnostic(message, 240));
     this.name = "EvermeError";
     this.httpStatus = status;
     this.code = code;
-    this.requestId = requestId;
+    this.requestId = boundedDiagnostic(requestId, 128);
     this.type = type;
   }
   /**
@@ -152,13 +158,13 @@ var EvermeError = class extends Error {
 };
 function describeError(err) {
   if (err instanceof EvermeError) return err.describe();
-  return redactError(err?.message || String(err));
+  return boundedDiagnostic(err?.message || String(err), 240);
 }
-async function requestMeta(client, method, path3, body, opts) {
+async function requestMeta(client, method, path4, body, opts) {
   if (typeof client?.requestWithMeta === "function") {
-    return client.requestWithMeta(method, path3, body, opts);
+    return client.requestWithMeta(method, path4, body, opts);
   }
-  return { result: await client.request(method, path3, body, opts), requestId: "" };
+  return { result: await client.request(method, path4, body, opts), requestId: "" };
 }
 function createClient(cfg, log = noop) {
   const headers = (requestId) => ({
@@ -171,9 +177,9 @@ function createClient(cfg, log = noop) {
     // even when the request times out before any response arrives.
     requestId
   });
-  async function requestWithMeta(method, path3, body, { timeoutMs = TIMEOUT_MS, query } = {}) {
+  async function requestWithMeta(method, path4, body, { timeoutMs = TIMEOUT_MS, query } = {}) {
     const requestId = randomUUID();
-    const url = buildUrl(cfg.baseUrl, path3, query);
+    const url = buildUrl(cfg.baseUrl, path4, query);
     const init = {
       method,
       headers: headers(requestId),
@@ -181,8 +187,8 @@ function createClient(cfg, log = noop) {
     };
     return execWithRetry(url, init, boundedTimeoutMs(timeoutMs, cfg.deadlineAt), log, requestId);
   }
-  async function request(method, path3, body, opts) {
-    const { result } = await requestWithMeta(method, path3, body, opts);
+  async function request(method, path4, body, opts) {
+    const { result } = await requestWithMeta(method, path4, body, opts);
     return result;
   }
   async function rawPost(uploadUrl, body, contentType, { timeoutMs = TIMEOUT_MS } = {}) {
@@ -239,7 +245,7 @@ function createClient(cfg, log = noop) {
   }
   return { request, requestWithMeta, rawPost };
 }
-function buildUrl(base, path3, query) {
+function buildUrl(base, path4, query) {
   const qs = query ? new URLSearchParams() : null;
   if (qs) {
     for (const [k, v] of Object.entries(query)) {
@@ -249,7 +255,7 @@ function buildUrl(base, path3, query) {
     }
   }
   const q = qs?.toString();
-  return q ? `${base}${path3}?${q}` : `${base}${path3}`;
+  return q ? `${base}${path4}?${q}` : `${base}${path4}`;
 }
 async function execWithRetry(url, init, timeoutMs, log, requestId) {
   try {
@@ -262,7 +268,7 @@ async function execWithRetry(url, init, timeoutMs, log, requestId) {
     if (method !== "GET" && method !== "HEAD") {
       throw err;
     }
-    log.warn?.(`[everme] ${method} failed, retrying once (requestId=${requestId}): ${redactError(err?.message)}`);
+    log.warn?.(`[everme] ${method} failed, retrying once (requestId=${boundedDiagnostic(requestId, 128)}): ${boundedDiagnostic(err, 240)}`);
     await sleep(150);
     return execOnce(url, init, timeoutMs, requestId);
   }
@@ -388,34 +394,63 @@ var AGENT_MEMORY_TOOL_CALL_TYPES = Object.freeze({
   FUNCTION: "function"
 });
 var MAX_MESSAGES_PER_REQUEST = 500;
-async function saveAgentMemory(client, { conversationId, messages = [], flush = true } = {}, log = { info() {
+var LOG_ID_MAX_CHARS = 128;
+var LOG_ERROR_MAX_CHARS = 240;
+function logValue(value, maxChars = LOG_ID_MAX_CHARS) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  return text.length > maxChars ? `${text.slice(0, maxChars)}…` : text;
+}
+async function saveAgentMemory(client, { conversationId, messages = [], flush = true, channel, turns } = {}, log = { info() {
 }, warn() {
 } }) {
-  if (!conversationId) return null;
+  if (!conversationId) {
+    log.info?.("[everme] agent-memory stage=skip reason=missing_conversation_id");
+    return null;
+  }
   const flushOnly = flush === true && messages.length === 0;
   const stamp2 = Date.now();
   const converted = messages.map((m, i) => convertAgentMessage(m, stamp2 + i)).filter(Boolean).filter((m) => m.content != null || m.toolCalls && m.toolCalls.length);
-  if (!converted.length && !flushOnly) return null;
+  if (!converted.length && !flushOnly) {
+    log.info?.(`[everme] agent-memory stage=skip reason=no_parseable_messages conversationId=${logValue(conversationId)} inputMessages=${messages.length}`);
+    return null;
+  }
   const batches = Math.max(1, Math.ceil(converted.length / MAX_MESSAGES_PER_REQUEST));
+  if (batches > 1) {
+    log.info?.(`[everme] agent-memory stage=start conversationId=${logValue(conversationId)} messages=${converted.length} batches=${batches} flush=${flush === true}`);
+  }
+  const declaredTurns = Number.isInteger(turns) && turns >= 0 ? turns : null;
   let res = null;
   const requestIds = [];
   for (let batch = 0; batch < batches; batch += 1) {
     const slice = converted.slice(batch * MAX_MESSAGES_PER_REQUEST, (batch + 1) * MAX_MESSAGES_PER_REQUEST);
     const isLast = batch === batches - 1;
-    const { result, requestId } = await requestMeta(client, "POST", "/mem/agent-memory", {
-      conversationId,
-      messages: slice,
-      flush: isLast ? flush : false,
-      // Leading batches of a flushing upload must keep the server's
-      // synchronous-add guarantee: an async leading batch can still be
-      // invisible to the final request's flush (first-flush data loss,
-      // one request boundary later). Servers without the field ignore it.
-      ...!isLast && flush === true ? { sync: true } : {}
-    });
-    res = result;
-    requestIds.push(requestId);
+    try {
+      const { result, requestId } = await requestMeta(client, "POST", "/mem/agent-memory", {
+        conversationId,
+        messages: slice,
+        flush: isLast ? flush : false,
+        // Leading batches of a flushing upload must keep the server's
+        // synchronous-add guarantee: an async leading batch can still be
+        // invisible to the final request's flush (first-flush data loss,
+        // one request boundary later). Servers without the field ignore it.
+        ...!isLast && flush === true ? { sync: true } : {},
+        ...channel ? { channel } : {},
+        ...declaredTurns !== null && slice.length ? { turns: isLast ? declaredTurns : 0 } : {}
+      });
+      res = result;
+      requestIds.push(requestId);
+      if (batches > 1) {
+        log.info?.(`[everme] agent-memory stage=batch result=accepted conversationId=${logValue(conversationId)} batch=${batch + 1}/${batches} messages=${slice.length} requestId=${logValue(requestId)}`);
+      }
+    } catch (error) {
+      if (batches > 1) {
+        log.warn?.(`[everme] agent-memory stage=batch result=failed conversationId=${logValue(conversationId)} batch=${batch + 1}/${batches} messages=${slice.length} error=${boundedDiagnostic(error, LOG_ERROR_MAX_CHARS)}`);
+      }
+      throw error;
+    }
   }
-  log.info?.(`[everme] saveAgentMemory ok: messages=${converted.length} batches=${batches} flushed=${Boolean(res?.flushed)} status=${res?.status ?? ""} requestId=${requestIds.join(",")}`);
+  const lastRequestId = requestIds[requestIds.length - 1] || "";
+  log.info?.(`[everme] agent-memory stage=complete result=accepted conversationId=${logValue(conversationId)} messages=${converted.length} batches=${batches} flushed=${Boolean(res?.flushed)} status=${logValue(res?.status)} requestId=${logValue(lastRequestId)} requestIdCount=${requestIds.filter(Boolean).length}`);
   return res == null ? res : { ...res, requestId: requestIds[requestIds.length - 1], requestIds };
 }
 async function flushAgentMemory(client, { conversationId } = {}, log) {
@@ -510,7 +545,12 @@ async function searchMemory(client, params, log = noop2) {
     ...Array.isArray(params.memoryTypes) && params.memoryTypes.length ? { memoryTypes: params.memoryTypes } : {}
   };
   const { result: res, requestId } = await requestMeta(client, "POST", "/mem/search", body);
-  log.info?.(`[everme] POST /mem/search topK=${body.topK} q="${truncate(body.query, 60)}" requestId=${requestId}`);
+  const memoryCount = Array.isArray(res?.items) ? res.items.length : 0;
+  const profileCount = Array.isArray(res?.profiles) ? res.profiles.length : 0;
+  const rawMessageCount = Array.isArray(res?.rawMessages) ? res.rawMessages.length : 0;
+  const caseCount = Array.isArray(res?.agentMemory?.cases) ? res.agentMemory.cases.length : 0;
+  const skillCount = Array.isArray(res?.agentMemory?.skills) ? res.agentMemory.skills.length : 0;
+  log.info?.(`[everme] memory-search stage=complete result=success queryChars=${body.query.length} topK=${body.topK} memories=${memoryCount} profiles=${profileCount} rawMessages=${rawMessageCount} cases=${caseCount} skills=${skillCount} requestId=${boundedDiagnostic(requestId, 128)}`);
   return {
     memories: res?.items ?? [],
     profiles: res?.profiles ?? [],
@@ -518,10 +558,6 @@ async function searchMemory(client, params, log = noop2) {
     agentMemory: res?.agentMemory ?? { cases: [], skills: [] },
     requestId
   };
-}
-function truncate(s, n) {
-  s = String(s || "");
-  return s.length > n ? s.slice(0, n) + "…" : s;
 }
 
 // ../agent-sdk/src/prompt.js
@@ -720,13 +756,41 @@ function createTurnCounter({ stateDir = DEFAULT_STATE_DIR } = {}) {
       }
       return { count: current.count + 1, duplicate: false };
     },
-    async commit(sessionId, turnId) {
+    // `extra` rides along on the same write so clearing the delivery marker
+    // on a committed turn costs no second file write.
+    async commit(sessionId, turnId, extra = {}) {
       const current = await store.read(sessionId);
       const next = await store.patch(sessionId, {
         count: current.count + 1,
-        lastTurnId: turnId || ""
+        lastTurnId: turnId || "",
+        ...extra
       });
       return { count: next.count, duplicate: false };
+    }
+  };
+}
+function createTranscriptCheckpointStore({ stateDir = DEFAULT_STATE_DIR } = {}) {
+  const fileFor = (stateId) => path.join(stateDir, `${sanitizeSessionId(stateId)}.transcript.json`);
+  return {
+    async read(stateId) {
+      try {
+        const parsed = JSON.parse(await readFile(fileFor(stateId), "utf8"));
+        return {
+          initialized: parsed.initialized === true,
+          uploadedCount: nonNegativeInteger(parsed.uploadedCount)
+        };
+      } catch (error) {
+        if (error?.code !== "ENOENT" && !(error instanceof SyntaxError)) throw error;
+        return { initialized: false, uploadedCount: 0 };
+      }
+    },
+    async commit(stateId, uploadedCount) {
+      await mkdir(stateDir, { recursive: true, mode: 448 });
+      const file = fileFor(stateId);
+      const next = { initialized: true, uploadedCount: nonNegativeInteger(uploadedCount) };
+      await writeState(file, next);
+      await pruneStaleStateFiles(stateDir, file);
+      return next;
     }
   };
 }
@@ -736,12 +800,20 @@ async function readState(file) {
     return {
       count: nonNegativeInteger(parsed.count),
       lastTurnId: typeof parsed.lastTurnId === "string" ? parsed.lastTurnId : "",
-      uploadedCount: nonNegativeInteger(parsed.uploadedCount)
+      uploadedCount: nonNegativeInteger(parsed.uploadedCount),
+      pendingTurn: pendingTurn(parsed.pendingTurn),
+      lostTurns: nonNegativeInteger(parsed.lostTurns)
     };
   } catch (error) {
     if (error?.code !== "ENOENT" && !(error instanceof SyntaxError)) throw error;
-    return { count: 0, lastTurnId: "", uploadedCount: 0 };
+    return { count: 0, lastTurnId: "", uploadedCount: 0, pendingTurn: null, lostTurns: 0 };
   }
+}
+function pendingTurn(value) {
+  if (!value || typeof value !== "object") return null;
+  const startedAt = nonNegativeInteger(value.startedAt);
+  if (!startedAt) return null;
+  return { startedAt, turnId: typeof value.turnId === "string" ? value.turnId : "" };
 }
 function nonNegativeInteger(value) {
   return Number.isSafeInteger(value) && value >= 0 ? value : 0;
@@ -777,6 +849,46 @@ async function pruneStaleStateFiles(stateDir, keepFile) {
 function sanitizeSessionId(sessionId) {
   const sanitized = String(sessionId || "default").replace(/[^a-zA-Z0-9._-]+/g, "_").replace(/^\.+/, "").slice(0, 120);
   return sanitized || "default";
+}
+
+// ../agent-sdk/src/hooks/telemetry.js
+var TELEMETRY_PATH = "/mem/import-events";
+var TELEMETRY_TIMEOUT_MS = 2e3;
+var MIN_TELEMETRY_BUDGET_MS = 1500;
+function turnDeliveryEvent({ outcome, code = "" }) {
+  return { event: "turn_delivery", channel: "hooks", outcome, ...code ? { code } : {} };
+}
+function hookDegradedEvent({ hookEvent, code = "" }) {
+  return { event: "hook_degraded", channel: "hooks", hookEvent, ...code ? { code } : {} };
+}
+function degradedCode(error) {
+  if (error?.name === "EvermeError") {
+    return String(error.code || error.type || "upstream").slice(0, 64);
+  }
+  return String(error?.code || error?.name || "error").slice(0, 64);
+}
+function telemetryTimeoutMs(deadlineAt, now = Date.now()) {
+  if (!deadlineAt) return TELEMETRY_TIMEOUT_MS;
+  const remaining = deadlineAt - now;
+  if (remaining < MIN_TELEMETRY_BUDGET_MS) return 0;
+  return Math.min(TELEMETRY_TIMEOUT_MS, remaining);
+}
+function createTelemetry({ client, config = {}, now = Date.now } = {}) {
+  const enabled = Boolean(client) && config.telemetry !== false;
+  return {
+    enabled,
+    async report(event) {
+      if (!enabled || !event) return false;
+      const timeoutMs = telemetryTimeoutMs(config.deadlineAt, now());
+      if (!timeoutMs) return false;
+      try {
+        await requestMeta(client, "POST", TELEMETRY_PATH, { ...event, ts: now() }, { timeoutMs });
+        return true;
+      } catch {
+        return false;
+      }
+    }
+  };
 }
 
 // ../agent-sdk/src/hooks/runtime.js
@@ -843,7 +955,7 @@ async function runSessionStart({ client, log }) {
   const { result, requestId } = await requestMeta(client, "POST", "/mem/context", {});
   const profile = result?.profile;
   const count = profileItemCount(profile);
-  log?.info?.(`[everme] SessionStart profile: items=${count} requestId=${requestId}`);
+  log?.info?.(`[everme] memory-context stage=complete result=success items=${count} requestId=${boundedDiagnostic(requestId, 128)}`);
   return {
     block: renderProfileBlock(profile),
     count,
@@ -862,14 +974,14 @@ function renderProfileBlock(profile) {
       const description = item?.description || item?.evidence || "";
       if (!description) continue;
       const category = item.category ? `[${item.category}] ` : "";
-      lines.push(`- ${category}${truncate2(description, 240)}`);
+      lines.push(`- ${category}${truncate(description, 240)}`);
     }
   }
   if (implicit.length) {
     lines.push("Implicit traits:");
     for (const item of implicit.slice(0, 6)) {
       const name = item?.trait || item?.name || "trait";
-      lines.push(`- ${name}: ${truncate2(item?.description || "", 200)}`);
+      lines.push(`- ${name}: ${truncate(item?.description || "", 200)}`);
     }
   }
   lines.push("</everme_profile>");
@@ -879,7 +991,7 @@ function profileItemCount(profile) {
   if (!profile) return 0;
   return (Array.isArray(profile.explicit_info) ? profile.explicit_info.length : 0) + (Array.isArray(profile.implicit_traits) ? profile.implicit_traits.length : 0);
 }
-function truncate2(value, maxLength) {
+function truncate(value, maxLength) {
   const text = String(value).replace(/\s+/g, " ").trim();
   return text.length <= maxLength ? text : `${text.slice(0, maxLength - 1)}…`;
 }
@@ -921,27 +1033,87 @@ function createHookRuntime({ enqueue, flush, diagnostic = () => {
 }
 
 // ../agent-sdk/src/hooks/store.js
-async function runStore({ input, adapter, client, config, counter, stateDir, log, diagnostic }) {
+async function runStore({
+  input,
+  adapter,
+  client,
+  config,
+  counter,
+  checkpointStore,
+  sessionState,
+  stateDir,
+  log,
+  diagnostic,
+  telemetry
+}) {
   const sessionId = input?.sessionId;
-  if (!sessionId) return { block: "", count: 0 };
-  const messages = await adapter.readLastTurn(input, { stateDir });
-  if (!Array.isArray(messages) || !messages.length) return { block: "", count: 0 };
+  if (!sessionId) {
+    log.info?.("[everme] store stage=skip reason=missing_session_id");
+    return { block: "", count: 0 };
+  }
+  const previous = sessionState ? await sessionState.read(sessionId) : {};
+  const pending = previous.pendingTurn ?? null;
+  const telemetryOn = Boolean(telemetry?.enabled);
+  const carried = telemetryOn ? normalizeDebt(previous.lostTurns) : 0;
+  const provisionalDebt = telemetryOn && pending ? carried + 1 : carried;
+  const provisionalTurnId = input?.turnId || "";
+  await markInFlight(sessionState, sessionId, provisionalTurnId, provisionalDebt);
   const turnId = await resolveTurnId(adapter, input);
+  const retryOfPending = Boolean(pending && pending.turnId && pending.turnId === turnId);
+  const owed = await payDownLosses(telemetry, retryOfPending ? provisionalDebt - 1 : provisionalDebt);
+  if (turnId !== provisionalTurnId || owed !== provisionalDebt) {
+    await markInFlight(sessionState, sessionId, turnId, owed);
+  }
+  if (typeof adapter.readStoreBatches === "function") {
+    const batches = await adapter.readStoreBatches(input, { checkpointStore, stateDir });
+    if (Array.isArray(batches)) {
+      return runStoreBatches({
+        batches,
+        input,
+        adapter,
+        client,
+        config,
+        counter,
+        checkpointStore,
+        sessionState,
+        log,
+        diagnostic,
+        telemetry,
+        retryOfPending,
+        turnId
+      });
+    }
+  }
+  const messages = await adapter.readLastTurn(input, { stateDir });
+  if (!Array.isArray(messages) || !messages.length) {
+    log.info?.(`[everme] store stage=skip reason=no_messages sessionId=${logId(sessionId)}`);
+    await clearMarker(sessionState, sessionId);
+    return { block: "", count: 0 };
+  }
   const state = await counter.peek(sessionId, turnId);
-  if (state.duplicate) return { block: "", count: 0, duplicate: true };
+  if (state.duplicate) {
+    log.info?.(`[everme] store stage=skip reason=duplicate sessionId=${logId(sessionId)} turnId=${logId(turnId)}`);
+    await clearMarker(sessionState, sessionId);
+    return { block: "", count: 0, duplicate: true };
+  }
   const runtime = createHookRuntime({
-    enqueue: (turn) => saveAgentMemory(client, turn, log),
+    // One Stop = one logical turn: claim the hook channel and declare it, so
+    // the gateway's write counter (L1-2's denominator) stays in turns even
+    // when a long turn is split into several requests.
+    enqueue: (turn) => saveAgentMemory(client, { ...turn, channel: "hook", turns: 1 }, log),
     flush: (conversationId) => flushAgentMemory(client, { conversationId }, log),
     diagnostic,
     rethrowOnError: true
   });
   if (config.flushMode === "legacy") {
     const saved2 = await runtime.flushSession({ conversationId: sessionId, messages });
-    await counter.commit(sessionId, turnId);
+    await counter.commit(sessionId, turnId, { pendingTurn: null });
+    await reportRecovery(telemetry, retryOfPending);
     return { block: "", count: messages.length, flushed: true, status: saved2?.status, requestId: saved2?.requestId };
   }
   const saved = await runtime.enqueueTurn({ conversationId: sessionId, messages });
-  const committed = await counter.commit(sessionId, turnId);
+  const committed = await counter.commit(sessionId, turnId, { pendingTurn: null });
+  await reportRecovery(telemetry, retryOfPending);
   const flushed = config.flushEveryTurns > 0 && committed.count % config.flushEveryTurns === 0;
   let requestId = saved?.requestId;
   if (flushed) {
@@ -950,12 +1122,107 @@ async function runStore({ input, adapter, client, config, counter, stateDir, log
   }
   return { block: "", count: messages.length, flushed, requestId };
 }
+async function runStoreBatches({
+  batches,
+  input,
+  adapter,
+  client,
+  config,
+  counter,
+  checkpointStore,
+  sessionState,
+  log,
+  diagnostic,
+  telemetry,
+  retryOfPending,
+  turnId
+}) {
+  const ready = batches.filter((batch) => batch && typeof batch.conversationId === "string" && batch.conversationId && Array.isArray(batch.messages) && batch.messages.length);
+  if (!ready.length) {
+    log.info?.(`[everme] store stage=skip reason=no_ready_batches sessionId=${logId(input?.sessionId)} inputBatches=${Array.isArray(batches) ? batches.length : 0}`);
+    await clearMarker(sessionState, input?.sessionId);
+    return { block: "", count: 0 };
+  }
+  const turn = await counter.peek(input.sessionId, turnId);
+  const runtime = createHookRuntime({
+    enqueue: (batch) => saveAgentMemory(client, batch, log),
+    flush: (conversationId) => flushAgentMemory(client, { conversationId }, log),
+    diagnostic,
+    rethrowOnError: true
+  });
+  let requestId;
+  let status;
+  let count = 0;
+  for (const batch of ready) {
+    const saved = config.flushMode === "legacy" ? await runtime.flushSession(batch) : await runtime.enqueueTurn(batch);
+    requestId = saved?.requestId || requestId;
+    status = saved?.status || status;
+    count += batch.messages.length;
+    if (batch.checkpoint && checkpointStore) {
+      await checkpointStore.commit(batch.checkpoint.stateId, batch.checkpoint.uploadedCount);
+    }
+  }
+  let committed = { count: turn.count };
+  if (turn.duplicate) {
+    await clearMarker(sessionState, input.sessionId);
+  } else {
+    committed = await counter.commit(input.sessionId, turnId, { pendingTurn: null });
+  }
+  await reportRecovery(telemetry, retryOfPending);
+  if (config.flushMode === "legacy") {
+    return { block: "", count, flushed: true, status, requestId };
+  }
+  const flushed = config.flushEveryTurns > 0 && committed.count % config.flushEveryTurns === 0;
+  if (flushed) {
+    for (const conversationId of new Set(ready.map((batch) => batch.conversationId))) {
+      const flushRes = await runtime.flush(conversationId);
+      requestId = flushRes?.requestId || requestId;
+    }
+  }
+  return { block: "", count, flushed, requestId };
+}
+async function reportRecovery(telemetry, retryOfPending) {
+  if (!retryOfPending) return;
+  await telemetry?.report(turnDeliveryEvent({ outcome: "recovered" }));
+}
+async function payDownLosses(telemetry, owed) {
+  if (owed <= 0) return 0;
+  if (await telemetry?.report(turnDeliveryEvent({ outcome: "lost_prev" }))) return owed - 1;
+  return owed;
+}
+function normalizeDebt(value) {
+  return Number.isSafeInteger(value) && value > 0 ? value : 0;
+}
+async function markInFlight(sessionState, sessionId, turnId, lostTurns) {
+  if (!sessionState) return;
+  await sessionState.patch(sessionId, {
+    pendingTurn: { startedAt: Date.now(), turnId },
+    lostTurns: normalizeDebt(lostTurns)
+  });
+}
+async function clearMarker(sessionState, sessionId) {
+  if (!sessionState) return;
+  await sessionState.patch(sessionId, { pendingTurn: null });
+}
 async function resolveTurnId(adapter, input) {
   if (input?.turnId) return input.turnId;
   if (typeof adapter?.resolveTurnId !== "function") return "";
   return await adapter.resolveTurnId(input) || "";
 }
-async function runBoundaryFlush({ input, adapter, client, sessionState, log, diagnostic }) {
+function logId(value) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  return text.length > 128 ? `${text.slice(0, 128)}…` : text;
+}
+async function runBoundaryFlush({
+  input,
+  adapter,
+  client,
+  sessionState,
+  checkpointStore,
+  stateDir,
+  log,
+  diagnostic
+}) {
   if (!input?.sessionId) return { block: "", count: 0 };
   const runtime = createHookRuntime({
     enqueue: (turn) => saveAgentMemory(client, turn, log),
@@ -963,22 +1230,46 @@ async function runBoundaryFlush({ input, adapter, client, sessionState, log, dia
     diagnostic,
     rethrowOnError: true
   });
+  if (typeof adapter?.readSessionBatches === "function") {
+    const batches = await adapter.readSessionBatches(input, { checkpointStore, stateDir });
+    if (Array.isArray(batches)) {
+      const ready = batches.filter((batch) => batch && typeof batch.conversationId === "string" && batch.conversationId && Array.isArray(batch.messages) && batch.messages.length);
+      if (!ready.length) return { block: "", count: 0, skipped: true };
+      let count = 0;
+      let requestId;
+      for (const batch of ready) {
+        const saved = await runtime.flushSession(batch);
+        requestId = saved?.requestId || requestId;
+        count += batch.messages.length;
+        if (batch.checkpoint && checkpointStore) {
+          await checkpointStore.commit(batch.checkpoint.stateId, batch.checkpoint.uploadedCount);
+        }
+      }
+      return { block: "", count, flushed: true, requestId };
+    }
+  }
   if (typeof adapter?.readSession === "function") {
     const messages = await adapter.readSession(input);
     if (!Array.isArray(messages) || !messages.length) return { block: "", count: 0 };
     const uploadedCount = sessionState ? (await sessionState.read(input.sessionId)).uploadedCount : 0;
     const delta = uploadedCount > 0 ? messages.slice(uploadedCount) : messages;
     if (!delta.length) return { block: "", count: 0, skipped: true };
-    const saved = await runtime.flushSession({ conversationId: input.sessionId, messages: delta });
+    const saved = adapter?.boundaryFlush === false ? await runtime.enqueueTurn({ conversationId: input.sessionId, messages: delta }) : await runtime.flushSession({ conversationId: input.sessionId, messages: delta });
     if (sessionState) await sessionState.patch(input.sessionId, { uploadedCount: messages.length });
-    return { block: "", count: delta.length, flushed: true, status: saved?.status, requestId: saved?.requestId };
+    return {
+      block: "",
+      count: delta.length,
+      flushed: adapter?.boundaryFlush !== false,
+      status: saved?.status,
+      requestId: saved?.requestId
+    };
   }
   const flushRes = await runtime.onSessionEnd(input.sessionId);
   return { block: "", count: 0, flushed: true, requestId: flushRes?.requestId };
 }
 
 // ../agent-sdk/src/hooks/runtime.js
-var WRITE_EVENTS = /* @__PURE__ */ new Set(["Stop", "SessionEnd", "PreCompact", "PostToolUse"]);
+var WRITE_EVENTS = /* @__PURE__ */ new Set(["Stop", "SubagentStop", "SessionEnd", "PreCompact", "PostToolUse"]);
 var ROTATED_KEYS = /* @__PURE__ */ new Set(["EVERME_AGENT_TOKEN", "EVERME_AGENT_ID"]);
 async function runHook(event, rawInput, adapter, deps = {}) {
   const stopWatchdog = startHookWatchdog({
@@ -1000,6 +1291,8 @@ async function runHook(event, rawInput, adapter, deps = {}) {
       createClient,
       createTurnCounter,
       createSessionState,
+      createTranscriptCheckpointStore,
+      createTelemetry,
       runSessionStart,
       runInject,
       runStore,
@@ -1025,8 +1318,11 @@ var stderrLog = {
 async function runHostHook(event, rawInput, adapter, deps = {}) {
   const hostEvent = event;
   let result = { block: "", count: 0 };
+  let telemetry = null;
+  let degradedEvent = hostEvent;
   try {
     const canonicalEvent = adapter.mapEvent?.(hostEvent) || hostEvent;
+    degradedEvent = canonicalEvent;
     const input = await adapter.normalizeInput(rawInput || {}, hostEvent);
     const env = deps.env || await loadRuntimeEnv(adapter, deps.baseEnv || process.env);
     const baseConfig = deps.config || requireOperation(deps.resolveConfig, "resolveConfig")(env);
@@ -1038,23 +1334,29 @@ async function runHostHook(event, rawInput, adapter, deps = {}) {
     const config = budgetMs ? { ...baseConfig, deadlineAt: Date.now() + budgetMs } : baseConfig;
     const log = deps.log || stderrLog;
     const client = deps.client || requireOperation(deps.createClient, "createClient")(config, log);
+    telemetry = deps.telemetry || (typeof deps.createTelemetry === "function" ? deps.createTelemetry({ client, config }) : null);
     if (canonicalEvent === "SessionStart") {
       result = await requireOperation(deps.runSessionStart, "runSessionStart")({ input, client, config, log });
     } else if (canonicalEvent === "UserPromptSubmit") {
       result = await requireOperation(deps.runInject, "runInject")({ input, client, config, search: deps.searchMemory, log });
-    } else if (canonicalEvent === "Stop") {
+    } else if (canonicalEvent === "Stop" || canonicalEvent === "SubagentStop") {
       const counter = deps.counter || requireOperation(deps.createTurnCounter, "createTurnCounter")({ stateDir: env.EVERME_STATE_DIR });
+      const checkpointStore = deps.checkpointStore || (typeof deps.createTranscriptCheckpointStore === "function" ? deps.createTranscriptCheckpointStore({ stateDir: env.EVERME_STATE_DIR }) : void 0);
+      const sessionState = deps.sessionState || (typeof deps.createSessionState === "function" ? deps.createSessionState({ stateDir: env.EVERME_STATE_DIR }) : void 0);
       result = await requireOperation(deps.runStore, "runStore")({
         input,
         adapter,
         client,
         config,
         counter,
+        checkpointStore,
+        sessionState,
         stateDir: env.EVERME_STATE_DIR,
         log,
         diagnostic: (line) => {
           throw new Error(line);
-        }
+        },
+        telemetry
       });
     } else if (canonicalEvent === "PostToolUse") {
       if (typeof adapter.bufferToolUse === "function") {
@@ -1062,11 +1364,14 @@ async function runHostHook(event, rawInput, adapter, deps = {}) {
       }
     } else if (canonicalEvent === "SessionEnd" || canonicalEvent === "PreCompact") {
       const sessionState = deps.sessionState || (typeof deps.createSessionState === "function" ? deps.createSessionState({ stateDir: env.EVERME_STATE_DIR }) : void 0);
+      const checkpointStore = deps.checkpointStore || (typeof deps.createTranscriptCheckpointStore === "function" ? deps.createTranscriptCheckpointStore({ stateDir: env.EVERME_STATE_DIR }) : void 0);
       result = await requireOperation(deps.runBoundaryFlush, "runBoundaryFlush")({
         input,
         adapter,
         client,
         sessionState,
+        checkpointStore,
+        stateDir: env.EVERME_STATE_DIR,
         log,
         diagnostic: (line) => {
           throw new Error(line);
@@ -1076,6 +1381,10 @@ async function runHostHook(event, rawInput, adapter, deps = {}) {
     return formatOutput(adapter, hostEvent, result);
   } catch (error) {
     writeDiagnostic(hostEvent, error, deps.redactError || redactError, deps.writeStderr);
+    try {
+      await telemetry?.report(hookDegradedEvent({ hookEvent: degradedEvent, code: degradedCode(error) }));
+    } catch {
+    }
     return formatOutput(adapter, hostEvent, { block: "", count: 0, degraded: true });
   }
 }
@@ -1131,6 +1440,7 @@ function writeDiagnostic(event, error, redact = redactError, writer = (line) => 
     SessionStart: "start",
     UserPromptSubmit: "inject",
     Stop: "store",
+    SubagentStop: "subagent-store",
     SessionEnd: "summary",
     PreCompact: "compact"
   }[event] || event;
@@ -1144,73 +1454,331 @@ function formatOutput(adapter, event, result) {
 
 // src/adapter.js
 import os2 from "node:os";
+import path3 from "node:path";
+
+// src/store-batches.js
+import { readFile as readFile3, readdir as readdir2 } from "node:fs/promises";
 import path2 from "node:path";
 
 // src/transcript.js
 import { createReadStream } from "node:fs";
+import { stat as stat2 } from "node:fs/promises";
 import { createInterface } from "node:readline";
-async function readLastTurn(transcriptPath) {
+var INJECTED_CONTEXT_TAGS = [
+  "app-context",
+  "apps_instructions",
+  "codex_internal_context",
+  "environment_context",
+  "in-app-browser-context",
+  "multi_agent_mode",
+  "permissions",
+  "plugins_instructions",
+  "recommended_plugins",
+  "skills_instructions"
+];
+var SYNTHETIC_USER_TAGS = [
+  "bash-input",
+  "bash-stdout",
+  "command-name",
+  "local-command-stdout",
+  "task-notification",
+  "turn_aborted"
+];
+function readLastTurn(transcriptPath) {
+  return readTranscript(transcriptPath, { lastTurnOnly: true });
+}
+function readCanonicalTranscript(transcriptPath) {
+  return readTranscript(transcriptPath, { lastTurnOnly: false });
+}
+async function readTranscript(transcriptPath, { lastTurnOnly }) {
   if (!transcriptPath) return [];
+  const legacyUsersBySegment = await collectLegacyUserMessages(transcriptPath);
+  const fallbackTimestampBase = await transcriptFallbackTimestampBase(transcriptPath);
   const lines = createInterface({
     input: createReadStream(transcriptPath, { encoding: "utf8" }),
     crlfDelay: Infinity
   });
-  let delta = [];
-  let foundUser = false;
-  for await (const line of lines) {
+  const state = newParseState(legacyUsersBySegment);
+  let messages = [];
+  let lineNumber = 0;
+  for await (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    lineNumber += 1;
     let event;
     try {
       event = JSON.parse(line);
     } catch {
       continue;
     }
-    if (event?.type !== "response_item" || !event.payload) continue;
-    const message = mapPayload(event.payload, event.timestamp);
+    const payload = event?.payload;
+    if (event?.type === "session_meta") {
+      observeSessionMeta(state, payload);
+      if (lastTurnOnly) messages = [];
+      continue;
+    }
+    if (skipsInheritedSubagentEvent(state, event)) continue;
+    if (event?.type === "event_msg") {
+      continue;
+    }
+    if (event?.type !== "response_item" || !payload) continue;
+    const message = mapPayload(
+      payload,
+      event.timestamp,
+      fallbackTimestampBase + lineNumber,
+      lineNumber,
+      state
+    );
     if (!message) continue;
-    if (message.role === "user") {
-      delta = [message];
-      foundUser = true;
-    } else if (foundUser) {
-      delta.push(message);
+    if (lastTurnOnly && message.role === "user") {
+      messages = [message];
+    } else {
+      messages.push(message);
     }
   }
-  return foundUser ? delta : [];
+  return messages;
 }
-function mapPayload(payload, timestampValue) {
-  const timestamp = normalizeTimestamp2(timestampValue);
-  if (payload.type === "message") {
-    if (payload.role !== "user" && payload.role !== "assistant") return null;
-    const content = contentText(payload.content);
-    if (!content) return null;
-    return { role: payload.role, ...stamp(timestamp), content };
+async function collectLegacyUserMessages(transcriptPath) {
+  const usersBySegment = [];
+  const lines = createInterface({
+    input: createReadStream(transcriptPath, { encoding: "utf8" }),
+    crlfDelay: Infinity
+  });
+  const state = newParseState([]);
+  for await (const rawLine of lines) {
+    let event;
+    try {
+      event = JSON.parse(rawLine);
+    } catch {
+      continue;
+    }
+    const payload = event?.payload;
+    if (event?.type === "session_meta") {
+      observeSessionMeta(state, payload);
+      continue;
+    }
+    if (skipsInheritedSubagentEvent(state, event) || state.isSubagent || event?.type !== "event_msg" || payload?.type !== "user_message" || typeof payload.message !== "string") continue;
+    const text = payload.message.trim();
+    if (!text) continue;
+    if (!usersBySegment[state.segmentIndex]) usersBySegment[state.segmentIndex] = /* @__PURE__ */ new Map();
+    const users = usersBySegment[state.segmentIndex];
+    users.set(text, (users.get(text) || 0) + 1);
   }
-  if (payload.type === "function_call") {
+  return usersBySegment;
+}
+function newParseState(legacyUsersBySegment) {
+  return {
+    historyMode: "",
+    isSubagent: false,
+    segmentIndex: 0,
+    seenSessionMeta: false,
+    outerSessionIsSubagent: false,
+    hasSubagentHistoryStart: false,
+    subagentHistoryStart: 0,
+    legacyUsersBySegment,
+    legacyUserMessages: new Map(legacyUsersBySegment[0] || []),
+    pendingLegacyToolCallIds: []
+  };
+}
+function observeSessionMeta(state, payload) {
+  const firstSessionMeta = !state.seenSessionMeta;
+  if (!firstSessionMeta) state.segmentIndex += 1;
+  else state.seenSessionMeta = true;
+  if (firstSessionMeta) state.outerSessionIsSubagent = sessionMetaIsSubagent(payload);
+  if (firstSessionMeta || !state.outerSessionIsSubagent) {
+    state.historyMode = typeof payload?.history_mode === "string" ? payload.history_mode : "";
+    state.isSubagent = sessionMetaIsSubagent(payload);
+    state.hasSubagentHistoryStart = Number.isFinite(payload?.subagent_history_start_ordinal);
+    state.subagentHistoryStart = state.hasSubagentHistoryStart ? Math.trunc(payload.subagent_history_start_ordinal) : 0;
+  } else {
+    state.isSubagent = true;
+  }
+  state.legacyUserMessages = new Map(state.legacyUsersBySegment[state.segmentIndex] || []);
+  state.pendingLegacyToolCallIds = [];
+}
+function skipsInheritedSubagentEvent(state, event) {
+  return state.isSubagent && state.hasSubagentHistoryStart && Number.isFinite(event?.ordinal) && Math.trunc(event.ordinal) < state.subagentHistoryStart;
+}
+function sessionMetaIsSubagent(payload) {
+  if (payload && payload.thread_source !== void 0 && payload.thread_source !== null) {
+    return String(payload.thread_source).trim() === "subagent";
+  }
+  return Boolean(payload?.parent_thread_id);
+}
+function mapPayload(payload, timestampValue, fallbackTimestamp, lineNumber, state) {
+  const timestamp = normalizeTimestamp2(timestampValue, fallbackTimestamp);
+  if (payload.type === "message") {
+    if (payload.role === "developer") return null;
+    const rawText = contentText(payload.content);
+    if (!rawText) return null;
+    if (payload.role === "user") {
+      if (state.isSubagent) return null;
+      const content = normalizeUserMessage(state, rawText);
+      if (!content) return null;
+      state.pendingLegacyToolCallIds = [];
+      return { role: "user", ...stamp(timestamp), content: capText(content) };
+    }
+    if (payload.role !== "assistant") return null;
+    const legacyTool = mapLegacyToolMessage(state, rawText, timestamp, lineNumber);
+    if (legacyTool.matched) return legacyTool.message;
+    return { role: "assistant", ...stamp(timestamp), content: capText(rawText) };
+  }
+  if (payload.type === "function_call" || payload.type === "custom_tool_call") {
+    const custom = payload.type === "custom_tool_call";
     return {
       role: "assistant",
       ...stamp(timestamp),
       toolCalls: [{
-        id: payload.call_id || `codex_tool_${timestamp ?? "untimed"}`,
+        id: payload.call_id || `${custom ? "codex_custom_tool" : "codex_tool"}_${timestamp ?? "untimed"}`,
         type: "function",
         name: payload.name || "unknown",
-        arguments: argumentText(payload.arguments)
+        arguments: redactText(argumentText(custom ? payload.input : payload.arguments))
       }]
     };
   }
-  if (payload.type === "function_call_output" && payload.call_id) {
+  if (["function_call_output", "custom_tool_call_output"].includes(payload.type) && payload.call_id) {
     return {
       role: "tool",
       ...stamp(timestamp),
       toolCallId: payload.call_id,
-      content: capText(payload.output || "tool result")
+      content: capText(outputText(payload.output) || "tool result")
     };
   }
+  if (payload.type === "web_search_call") {
+    return {
+      role: "assistant",
+      ...stamp(timestamp),
+      toolCalls: [{
+        id: `codex_web_search_${timestamp ?? "untimed"}_${lineNumber}`,
+        type: "function",
+        name: "web_search",
+        arguments: redactText(argumentText(payload.action))
+      }]
+    };
+  }
+  if (payload.type === "agent_message") return null;
+  return null;
+}
+function normalizeUserMessage(state, text) {
+  if (state.historyMode !== "paginated") {
+    const remaining = state.legacyUserMessages.get(text) || 0;
+    if (remaining === 0) return "";
+    state.legacyUserMessages.set(text, remaining - 1);
+    return text;
+  }
+  return normalizePaginatedUserText(text);
+}
+function normalizePaginatedUserText(text) {
+  let trimmed = text.trim();
+  const tags = [...INJECTED_CONTEXT_TAGS, ...SYNTHETIC_USER_TAGS, "command-args", "command-message"];
+  while (trimmed) {
+    const command = commandIntent(trimmed);
+    if (command) return command;
+    const agentsRemainder = stripLeadingAgentsInstructions(trimmed);
+    if (agentsRemainder !== null) {
+      trimmed = agentsRemainder;
+      continue;
+    }
+    let stripped = false;
+    for (const tag of tags) {
+      const remainder = stripLeadingEnvelope(trimmed, tag);
+      if (remainder !== null) {
+        trimmed = remainder;
+        stripped = true;
+        break;
+      }
+    }
+    if (!stripped) break;
+  }
+  return !trimmed || hasEnvelopePrefix(trimmed, "command-message") ? "" : trimmed;
+}
+function commandIntent(text) {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("<command-message>")) return "";
+  const name = envelopeValue(trimmed, "command-name");
+  if (!name?.startsWith("/")) return "";
+  const args = envelopeValue(trimmed, "command-args");
+  return `${name} ${args}`.trim();
+}
+function stripLeadingEnvelope(text, tag) {
+  if (!hasEnvelopePrefix(text, tag)) return null;
+  const openEnd = text.indexOf(">");
+  if (openEnd < 0) return null;
+  const close = `</${tag}>`;
+  const closeStart = text.indexOf(close, openEnd + 1);
+  if (closeStart < 0) return null;
+  return text.slice(closeStart + close.length).trim();
+}
+function hasEnvelopePrefix(text, tag) {
+  if (!text.startsWith(`<${tag}`)) return false;
+  return [">", " ", "	", "\n", "\r"].includes(text.at(tag.length + 1));
+}
+function stripLeadingAgentsInstructions(text) {
+  if (!text.startsWith("# AGENTS.md instructions for ") || !text.includes("<INSTRUCTIONS>")) return null;
+  const close = "</INSTRUCTIONS>";
+  const closeStart = text.indexOf(close);
+  return closeStart < 0 ? "" : text.slice(closeStart + close.length).trim();
+}
+function envelopeValue(text, tag) {
+  const open = `<${tag}>`;
+  const close = `</${tag}>`;
+  const start = text.indexOf(open);
+  if (start < 0) return "";
+  const valueStart = start + open.length;
+  const end = text.indexOf(close, valueStart);
+  return end < 0 ? "" : text.slice(valueStart, end).trim();
+}
+function mapLegacyToolMessage(state, text, timestamp, lineNumber) {
+  const envelope = legacyToolEnvelope(text);
+  if (!envelope) return { matched: false, message: null };
+  if (envelope.kind === "call") {
+    const callId = `codex_legacy_tool_${lineNumber}`;
+    state.pendingLegacyToolCallIds.push(callId);
+    return {
+      matched: true,
+      message: {
+        role: "assistant",
+        ...stamp(timestamp),
+        toolCalls: [{
+          id: callId,
+          type: "function",
+          name: envelope.name,
+          arguments: redactText(envelope.body)
+        }]
+      }
+    };
+  }
+  if (state.pendingLegacyToolCallIds.length !== 1) {
+    state.pendingLegacyToolCallIds = [];
+    return { matched: true, message: null };
+  }
+  const [toolCallId] = state.pendingLegacyToolCallIds;
+  state.pendingLegacyToolCallIds = [];
+  return {
+    matched: true,
+    message: {
+      role: "tool",
+      ...stamp(timestamp),
+      toolCallId,
+      content: capText(envelope.body || "tool result")
+    }
+  };
+}
+function legacyToolEnvelope(text) {
+  const trimmed = text.trim();
+  const callMatch = trimmed.match(/^\[external_agent_tool_call:\s*([^\]]+)\]\s*([\s\S]*?)\s*\[\/external_agent_tool_call\]$/);
+  if (callMatch) {
+    return { kind: "call", name: callMatch[1].trim() || "unknown", body: callMatch[2].trim() };
+  }
+  const resultMatch = trimmed.match(/^\[external_agent_tool_result\]\s*([\s\S]*?)\s*\[\/external_agent_tool_result\]$/);
+  if (resultMatch) return { kind: "result", body: resultMatch[1].trim() };
   return null;
 }
 function stamp(timestamp) {
   return timestamp === void 0 ? {} : { timestamp };
 }
 function contentText(content) {
-  if (typeof content === "string") return capText(content);
+  if (typeof content === "string") return content.trim();
   if (!Array.isArray(content)) return "";
   const parts = [];
   for (const item of content) {
@@ -1220,7 +1788,10 @@ function contentText(content) {
       parts.push(item.text);
     }
   }
-  return capText(parts.join("\n"));
+  return parts.join("\n").trim();
+}
+function outputText(value) {
+  return typeof value === "string" ? value.trim() : contentText(value);
 }
 function argumentText(value) {
   if (typeof value === "string") return value;
@@ -1230,15 +1801,134 @@ function argumentText(value) {
     return "{}";
   }
 }
-function normalizeTimestamp2(value) {
+function normalizeTimestamp2(value, fallbackTimestamp) {
   if (typeof value === "number" && Number.isFinite(value)) {
     return value > 1e10 ? Math.trunc(value) : Math.trunc(value * 1e3);
   }
   const parsed = Date.parse(value);
-  return Number.isFinite(parsed) ? parsed : void 0;
+  return Number.isFinite(parsed) ? parsed : fallbackTimestamp;
+}
+async function transcriptFallbackTimestampBase(transcriptPath) {
+  try {
+    return Math.trunc((await stat2(transcriptPath)).mtimeMs);
+  } catch {
+    return 0;
+  }
 }
 function capText(value) {
-  return capRunes(String(value || "").trim());
+  return capRunes(redactText(String(value || "").trim()));
+}
+function redactText(value) {
+  return String(value || "").replace(/sk-[A-Za-z0-9_-]{16,}/g, "[redacted]").replace(/evt_[A-Za-z0-9_-]{8,}/g, "[redacted]").replace(/emk_[A-Za-z0-9_-]{8,}/g, "[redacted]").replace(/ghp_[A-Za-z0-9]{20,}/g, "[redacted]").replace(/AKIA[0-9A-Z]{16}/g, "[redacted]").replace(/bearer\s+[A-Za-z0-9._=-]{10,}/gi, "[redacted]").replace(/X-Amz-Signature=[A-Za-z0-9%]+/g, "[redacted]").replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, "[redacted]");
+}
+
+// src/store-batches.js
+async function readCodexStoreBatches(input, { checkpointStore } = {}) {
+  if (!input?.sessionId || !input?.transcriptPath) return [];
+  const batches = [];
+  const root = await transcriptBatch({
+    checkpointStore,
+    conversationId: input.sessionId,
+    initialTailOnly: true,
+    transcriptPath: input.transcriptPath
+  });
+  if (root) batches.push(root);
+  for (const child of await completedDescendants(input.transcriptPath, input.sessionId)) {
+    const batch = await transcriptBatch({
+      checkpointStore,
+      conversationId: child.id,
+      initialTailOnly: false,
+      transcriptPath: child.path
+    });
+    if (batch) batches.push(batch);
+  }
+  return batches;
+}
+async function transcriptBatch({ checkpointStore, conversationId, initialTailOnly, transcriptPath }) {
+  const canonical = await readCanonicalTranscript(transcriptPath);
+  const stateId = `codex:${conversationId}`;
+  const checkpoint = checkpointStore ? await checkpointStore.read(stateId) : { initialized: false, uploadedCount: 0 };
+  let messages;
+  if (checkpoint.initialized && checkpoint.uploadedCount <= canonical.length) {
+    messages = canonical.slice(checkpoint.uploadedCount);
+  } else {
+    messages = initialTailOnly ? await readLastTurn(transcriptPath) : canonical;
+  }
+  if (!messages.length) return null;
+  return {
+    conversationId,
+    messages,
+    checkpoint: { stateId, uploadedCount: canonical.length }
+  };
+}
+async function completedDescendants(rootPath, rootId) {
+  let names;
+  try {
+    names = await readdir2(path2.dirname(rootPath));
+  } catch {
+    return [];
+  }
+  const candidates = [];
+  for (const name of names) {
+    if (!name.endsWith(".jsonl")) continue;
+    const candidatePath = path2.join(path2.dirname(rootPath), name);
+    if (candidatePath === rootPath) continue;
+    const metadata = await rolloutMetadata(candidatePath);
+    if (metadata?.isSubagent && metadata.complete) {
+      candidates.push({ ...metadata, path: candidatePath });
+    }
+  }
+  const descendants = [];
+  const parents = /* @__PURE__ */ new Set([rootId]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const candidate of candidates) {
+      if (candidate.selected || !parents.has(candidate.parentId)) continue;
+      candidate.selected = true;
+      parents.add(candidate.id);
+      descendants.push(candidate);
+      changed = true;
+    }
+  }
+  return descendants;
+}
+async function rolloutMetadata(transcriptPath) {
+  let raw;
+  try {
+    raw = await readFile3(transcriptPath, "utf8");
+  } catch {
+    return null;
+  }
+  let metadata;
+  let complete = false;
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (!metadata && event?.type === "session_meta") {
+      const payload = event.payload || {};
+      const id = stringValue(payload.id || payload.session_id);
+      const parentId = stringValue(payload.parent_thread_id || payload.forked_from_id);
+      metadata = {
+        id,
+        parentId,
+        isSubagent: payload.thread_source === "subagent" || Boolean(parentId)
+      };
+    }
+    if (event?.type === "event_msg" && event?.payload?.type === "task_complete" || event?.type === "task_complete") {
+      complete = true;
+    }
+  }
+  if (!metadata?.id || !metadata.parentId) return null;
+  return { ...metadata, complete };
+}
+function stringValue(value) {
+  return typeof value === "string" ? value.trim() : "";
 }
 
 // src/adapter.js
@@ -1246,7 +1936,7 @@ var CONTEXT_EVENTS = /* @__PURE__ */ new Set(["SessionStart", "UserPromptSubmit"
 var codexAdapter = {
   platform: "codex",
   envFile() {
-    return process.env.EVERME_ENV_FILE_PATH || path2.join(os2.homedir(), ".codex", "everme.env");
+    return process.env.EVERME_ENV_FILE_PATH || path3.join(os2.homedir(), ".codex", "everme.env");
   },
   normalizeInput(rawInput) {
     return {
@@ -1263,6 +1953,9 @@ var codexAdapter = {
   },
   readLastTurn(input) {
     return readLastTurn(input?.transcriptPath);
+  },
+  readStoreBatches(input, options) {
+    return readCodexStoreBatches(input, options);
   },
   formatOutput(event, { block = "" } = {}) {
     if (!CONTEXT_EVENTS.has(event) || !block) return {};
