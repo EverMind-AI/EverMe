@@ -383,6 +383,50 @@ function capRunes(text, max = MAX_CONTENT_RUNES) {
   return cps.slice(0, head).join("") + marker + cps.slice(cps.length - tail).join("");
 }
 
+// ../agent-sdk/src/turns.js
+var USER = "user";
+function turnOrdinals(messages) {
+  const out = new Array(messages.length);
+  let ordinal = 0;
+  let seenUser = false;
+  for (let i = 0; i < messages.length; i += 1) {
+    if (messages[i]?.role === USER) {
+      if (seenUser) ordinal += 1;
+      seenUser = true;
+    }
+    out[i] = ordinal;
+  }
+  return out;
+}
+function splitTurnAligned(messages, max) {
+  const slices = [];
+  let cur = [];
+  let curIsTail = false;
+  for (const message of messages) {
+    const isUser = message?.role === USER;
+    if (cur.length && (cur.length >= max || isUser && curIsTail)) {
+      slices.push(cur);
+      cur = [];
+      curIsTail = !isUser;
+    }
+    cur.push(message);
+  }
+  if (cur.length) slices.push(cur);
+  return slices;
+}
+function completedTurns(slices, i, baseTurn) {
+  const slice = slices[i];
+  if (!Array.isArray(slice) || !slice.length) return 0;
+  let n = slice.filter((message) => message?.role === USER).length;
+  if (slice[0]?.role !== USER && (i > 0 || baseTurn > 0)) n += 1;
+  if (i < slices.length - 1) {
+    if (slices[i + 1]?.[0]?.role !== USER) n -= 1;
+  } else if (slice[slice.length - 1]?.role === USER) {
+    n -= 1;
+  }
+  return n < 0 ? 0 : n;
+}
+
 // ../agent-sdk/src/agent-memory.js
 var AGENT_MEMORY_ROLES = Object.freeze({
   USER: "user",
@@ -400,7 +444,7 @@ function logValue(value, maxChars = LOG_ID_MAX_CHARS) {
   const text = String(value ?? "").replace(/\s+/g, " ").trim();
   return text.length > maxChars ? `${text.slice(0, maxChars)}…` : text;
 }
-async function saveAgentMemory(client, { conversationId, messages = [], flush = true, channel, turns } = {}, log = { info() {
+async function saveAgentMemory(client, { conversationId, messages = [], flush = true, channel, turns, baseTurn } = {}, log = { info() {
 }, warn() {
 } }) {
   if (!conversationId) {
@@ -414,16 +458,26 @@ async function saveAgentMemory(client, { conversationId, messages = [], flush = 
     log.info?.(`[everme] agent-memory stage=skip reason=no_parseable_messages conversationId=${logValue(conversationId)} inputMessages=${messages.length}`);
     return null;
   }
-  const batches = Math.max(1, Math.ceil(converted.length / MAX_MESSAGES_PER_REQUEST));
+  const hasBase = Number.isInteger(baseTurn) && baseTurn >= 0;
+  const slices = hasBase ? splitTurnAligned(converted, MAX_MESSAGES_PER_REQUEST) : Array.from(
+    { length: Math.max(1, Math.ceil(converted.length / MAX_MESSAGES_PER_REQUEST)) },
+    (_, i) => converted.slice(i * MAX_MESSAGES_PER_REQUEST, (i + 1) * MAX_MESSAGES_PER_REQUEST)
+  );
+  const ordinals = hasBase ? turnOrdinals(converted) : null;
+  const batches = slices.length;
   if (batches > 1) {
     log.info?.(`[everme] agent-memory stage=start conversationId=${logValue(conversationId)} messages=${converted.length} batches=${batches} flush=${flush === true}`);
   }
   const declaredTurns = Number.isInteger(turns) && turns >= 0 ? turns : null;
   let res = null;
   const requestIds = [];
+  let offset = 0;
   for (let batch = 0; batch < batches; batch += 1) {
-    const slice = converted.slice(batch * MAX_MESSAGES_PER_REQUEST, (batch + 1) * MAX_MESSAGES_PER_REQUEST);
+    const slice = slices[batch];
     const isLast = batch === batches - 1;
+    const sliceBase = hasBase ? baseTurn + ordinals[offset] : null;
+    const sliceTurns = hasBase ? completedTurns(slices, batch, baseTurn) : null;
+    offset += slice.length;
     try {
       const { result, requestId } = await requestMeta(client, "POST", "/mem/agent-memory", {
         conversationId,
@@ -435,7 +489,7 @@ async function saveAgentMemory(client, { conversationId, messages = [], flush = 
         // one request boundary later). Servers without the field ignore it.
         ...!isLast && flush === true ? { sync: true } : {},
         ...channel ? { channel } : {},
-        ...declaredTurns !== null && slice.length ? { turns: isLast ? declaredTurns : 0 } : {}
+        ...hasBase ? { baseTurn: sliceBase, turns: sliceTurns } : declaredTurns !== null && slice.length ? { turns: isLast ? declaredTurns : 0 } : {}
       });
       res = result;
       requestIds.push(requestId);
@@ -1153,8 +1207,10 @@ async function runStoreBatches({
   let requestId;
   let status;
   let count = 0;
-  for (const batch of ready) {
-    const saved = config.flushMode === "legacy" ? await runtime.flushSession(batch) : await runtime.enqueueTurn(batch);
+  const perTurn = adapter?.turnBoundary === "stop";
+  for (const [index, batch] of ready.entries()) {
+    const payload = perTurn ? { ...batch, channel: "hook", turns: Number.isInteger(batch.turns) ? batch.turns : index === ready.length - 1 ? 1 : 0 } : batch;
+    const saved = config.flushMode === "legacy" ? await runtime.flushSession(payload) : await runtime.enqueueTurn(payload);
     requestId = saved?.requestId || requestId;
     status = saved?.status || status;
     count += batch.messages.length;
@@ -1848,16 +1904,18 @@ async function transcriptBatch({ checkpointStore, conversationId, initialTailOnl
   const canonical = await readCanonicalTranscript(transcriptPath);
   const stateId = `codex:${conversationId}`;
   const checkpoint = checkpointStore ? await checkpointStore.read(stateId) : { initialized: false, uploadedCount: 0 };
-  let messages;
-  if (checkpoint.initialized && checkpoint.uploadedCount <= canonical.length) {
-    messages = canonical.slice(checkpoint.uploadedCount);
-  } else {
-    messages = initialTailOnly ? await readLastTurn(transcriptPath) : canonical;
-  }
+  const continuation = checkpoint.initialized && checkpoint.uploadedCount <= canonical.length;
+  const messages = continuation ? canonical.slice(checkpoint.uploadedCount) : initialTailOnly ? await readLastTurn(transcriptPath) : canonical;
   if (!messages.length) return null;
   return {
     conversationId,
     messages,
+    // Address by absolute turn only when everything before the slice is
+    // known to be covered: a checkpoint continuation, or the whole canonical
+    // transcript. A cold-start tail must not claim the turns it skipped, or
+    // the importer would trim the history it still has to bring in; left
+    // unaddressed, the gate appends it at the current watermark instead.
+    ...(continuation || messages.length === canonical.length) && messages.length <= canonical.length ? { baseTurn: turnOrdinals(canonical)[canonical.length - messages.length] } : { turns: 0 },
     checkpoint: { stateId, uploadedCount: canonical.length }
   };
 }
@@ -1935,6 +1993,10 @@ function stringValue(value) {
 var CONTEXT_EVENTS = /* @__PURE__ */ new Set(["SessionStart", "UserPromptSubmit"]);
 var codexAdapter = {
   platform: "codex",
+  // One hook invocation is one logical turn and the delivery marker runs on
+  // every one of them, so the SDK claims channel="hook" for these writes and
+  // they enter L1-2's denominator. Whole-session hosts leave this unset.
+  turnBoundary: "stop",
   envFile() {
     return process.env.EVERME_ENV_FILE_PATH || path3.join(os2.homedir(), ".codex", "everme.env");
   },

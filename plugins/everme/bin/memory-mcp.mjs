@@ -16020,14 +16020,27 @@ var DEFAULT_STATE_DIR = path.join(os.homedir(), ".everme", "state");
 var STATE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1e3;
 
 // ../memory-mcp/src/mcp.js
-var PKG_VERSION = true ? "0.6.2" : createRequire(import.meta.url)("../package.json").version;
+var PKG_VERSION = true ? "0.6.4" : createRequire(import.meta.url)("../package.json").version;
 var EVERME_MCP_INSTRUCTIONS = [
-  "EverMe memory is connected. Saving is fully automatic — the host's hooks",
-  "record every turn as you work; there is nothing for you to call to save.",
-  "These two READ tools are yours to call AUTONOMOUSLY the moment a trigger",
-  'fires — never wait for the user to ask you to "recall".',
-  "1. START of a session — if the host has NOT already injected a non-empty <everme_profile> block, call `mem_context` once. It returns the user's durable Profile ONLY (no semantic search, no episodes, no raw transcript). Never re-fetch it later in the session unless the user asks to refresh the profile.",
-  "2. The user references earlier conversations, decisions, conventions, or previously solved problems — call `mem_search` with a SHORT query. Skip it when the host already injected a non-empty, relevant <everme_recall> block this turn, and do not repeat an identical query in the same turn. Rows under the provisional unextracted-transcript header are not yet extracted — treat them as a provisional transcript, never as established facts.",
+  "EverMe is the user's long-term memory across sessions.",
+  "",
+  "When a <everme_profile> or <everme_recall> block appears in your context,",
+  "this host keeps that memory on its own: what matters in the conversation —",
+  "preferences, decisions, the work you do together — is retained without",
+  "anyone saving it by hand. If the user asks you to remember something, a",
+  `short acknowledgement is enough ("Noted — I'll remember that."); there is`,
+  'nothing to call and nothing to set up. If they ask how it works, "EverMe',
+  'keeps a memory of our conversations" is the whole story from their side —',
+  "the mechanics are not something to narrate.",
+  "",
+  "When neither block appears, this connection only reads EverMe memory.",
+  "Whether the conversation is being kept is up to the host, so do not tell",
+  "the user something has been saved through you.",
+  "",
+  "Two read tools bring memory into the conversation. Use them on your own",
+  'judgment rather than waiting to be asked to "recall":',
+  "1. START of a session — if no non-empty <everme_profile> block was injected, call `mem_context` once. It returns the user's durable Profile ONLY (no semantic search, no episodes, no raw transcript). Do not re-fetch it later in the session unless the user asks to refresh the profile.",
+  "2. The user leans on earlier conversations, decisions, conventions, or previously solved problems — call `mem_search` with a SHORT query. Skip it when a non-empty, relevant <everme_recall> block is already in this turn, and never repeat an identical query in one turn. Rows under the provisional unextracted-transcript header are not yet extracted — treat them as a provisional transcript, never as established facts.",
   "",
   "Keep the `mem_search` query short: a few keywords, NOT the whole",
   "conversation or the full user message pasted in — a long query searches",
