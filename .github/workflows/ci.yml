@@ -181,8 +181,14 @@ jobs:
           # import redactor exists to *strip* credentials, so it necessarily
           # carries the PEM header pattern, and its fixtures are fabricated
           # placeholder bodies the test asserts get replaced.
+          # The plugin redactors (codex transcript.js and the everme/bin bundles
+          # built from it) carry the PEM header as a *regex literal*
+          # ("BEGIN [A-Z ]*PRIVATE KEY"). A real PEM header spells out the
+          # algorithm ("BEGIN RSA PRIVATE KEY"), so dropping the character-class
+          # form keeps the check exact while letting the redactor pattern through.
           if grep -R --exclude-dir=.git --exclude-dir=node_modules --exclude=ci.yml \
-            --exclude=redact.go --exclude=redact_test.go -n "BEGIN .*PRIVATE KEY" .; then
+            --exclude=redact.go --exclude=redact_test.go -n "BEGIN .*PRIVATE KEY" . \
+            | grep -v 'BEGIN \[A-Z \]\*PRIVATE KEY'; then
             echo "::error::Private key material detected"
             exit 1
           fi
