@@ -160,11 +160,11 @@ function describeError(err) {
   if (err instanceof EvermeError) return err.describe();
   return boundedDiagnostic(err?.message || String(err), 240);
 }
-async function requestMeta(client, method, path4, body, opts) {
+async function requestMeta(client, method, path5, body, opts) {
   if (typeof client?.requestWithMeta === "function") {
-    return client.requestWithMeta(method, path4, body, opts);
+    return client.requestWithMeta(method, path5, body, opts);
   }
-  return { result: await client.request(method, path4, body, opts), requestId: "" };
+  return { result: await client.request(method, path5, body, opts), requestId: "" };
 }
 function createClient(cfg, log = noop) {
   const headers = (requestId) => ({
@@ -177,9 +177,9 @@ function createClient(cfg, log = noop) {
     // even when the request times out before any response arrives.
     requestId
   });
-  async function requestWithMeta(method, path4, body, { timeoutMs = TIMEOUT_MS, query } = {}) {
+  async function requestWithMeta(method, path5, body, { timeoutMs = TIMEOUT_MS, query } = {}) {
     const requestId = randomUUID();
-    const url = buildUrl(cfg.baseUrl, path4, query);
+    const url = buildUrl(cfg.baseUrl, path5, query);
     const init = {
       method,
       headers: headers(requestId),
@@ -187,8 +187,8 @@ function createClient(cfg, log = noop) {
     };
     return execWithRetry(url, init, boundedTimeoutMs(timeoutMs, cfg.deadlineAt), log, requestId);
   }
-  async function request(method, path4, body, opts) {
-    const { result } = await requestWithMeta(method, path4, body, opts);
+  async function request(method, path5, body, opts) {
+    const { result } = await requestWithMeta(method, path5, body, opts);
     return result;
   }
   async function rawPost(uploadUrl, body, contentType, { timeoutMs = TIMEOUT_MS } = {}) {
@@ -245,7 +245,7 @@ function createClient(cfg, log = noop) {
   }
   return { request, requestWithMeta, rawPost };
 }
-function buildUrl(base, path4, query) {
+function buildUrl(base, path5, query) {
   const qs = query ? new URLSearchParams() : null;
   if (qs) {
     for (const [k, v] of Object.entries(query)) {
@@ -255,7 +255,7 @@ function buildUrl(base, path4, query) {
     }
   }
   const q = qs?.toString();
-  return q ? `${base}${path4}?${q}` : `${base}${path4}`;
+  return q ? `${base}${path5}?${q}` : `${base}${path5}`;
 }
 async function execWithRetry(url, init, timeoutMs, log, requestId) {
   try {
@@ -328,34 +328,13 @@ async function execOnce(url, init, timeoutMs, requestId = "") {
 }
 
 // ../agent-sdk/src/messages.js
-var METADATA_BLOCK_PATTERNS = [
-  // "Conversation info / Sender (untrusted metadata):" + fenced block.
-  // Fence language tag is optional (```json / ```JSON / plain ```).
-  /(?:Conversation info|Sender|会话信息|发送者)\s*(?:\(untrusted metadata\))?\s*:\s*```[a-zA-Z]*\s*[\s\S]*?```/gi,
-  // [message_id: xxx] optionally followed by a `key: value` line
-  // (sender_id / from / etc.). Use horizontal whitespace after `]`
-  // so the optional newline + key:value clause can still match;
-  // \s* would greedily consume the newline.
-  /\[message_id:\s*[^\]]*\][ \t]*(?:\r?\n\s*[\w.-]+\s*:\s*[^\r\n]*)?/gi
-];
-var LEADING_TIMESTAMP_PATTERN = /^\[(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+)?\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?(?:\s+(?:GMT|UTC)[+-]\d+(?::\d{2})?|\s+[+-]\d{2}:?\d{2})?\]\s*/i;
-function stripChannelMetadata(text) {
-  if (!text) return text;
-  let cleaned = text;
-  for (const pattern of METADATA_BLOCK_PATTERNS) {
-    cleaned = cleaned.replace(pattern, "");
-  }
-  cleaned = cleaned.trim().replace(LEADING_TIMESTAMP_PATTERN, "");
-  return cleaned.trim();
-}
-function toText(content) {
-  if (typeof content === "string") return stripChannelMetadata(content);
+function extractText(content) {
+  if (typeof content === "string") return content;
   if (Array.isArray(content)) {
-    const joined = content.map((p) => typeof p === "string" ? p : p?.text || p?.content || "").filter(Boolean).join("\n");
-    return stripChannelMetadata(joined);
+    return content.map((p) => typeof p === "string" ? p : p?.text || p?.content || "").filter(Boolean).join("\n");
   }
   if (content && typeof content === "object" && typeof content.text === "string") {
-    return stripChannelMetadata(content.text);
+    return content.text;
   }
   return "";
 }
@@ -383,6 +362,203 @@ function capRunes(text, max = MAX_CONTENT_RUNES) {
   return cps.slice(0, head).join("") + marker + cps.slice(cps.length - tail).join("");
 }
 
+// ../agent-sdk/src/agent-batches.js
+var TURN_BOUNDARY = 2;
+var TOOL_BOUNDARY = 1;
+function batchAgentMessages(messages, maxMessages, metadata = [], alignTails = false) {
+  const boundaries2 = classifyBoundaries(messages, metadata);
+  const batches = [];
+  for (let start = 0; start < messages.length; ) {
+    const limit = Math.min(start + maxMessages, messages.length);
+    let end = limit === messages.length ? limit : chooseBoundary(boundaries2, start, limit);
+    if (alignTails && start > 0 && messages[start]?.role !== "user") {
+      for (let next = start + 1; next < end; next += 1) {
+        if (messages[next]?.role === "user") {
+          end = next;
+          break;
+        }
+      }
+    }
+    batches.push(messages.slice(start, end));
+    start = end;
+  }
+  return batches;
+}
+function classifyBoundaries(messages, metadata) {
+  const boundaries2 = new Array(messages.length + 1).fill(0);
+  const pending = /* @__PURE__ */ new Map();
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index];
+    for (const call of message.toolCalls || []) {
+      pending.set(call.id, (pending.get(call.id) || 0) + 1);
+    }
+    const matched = matchResult(messages, index, pending);
+    if (pending.size !== 0) continue;
+    if (isTurnEnd(messages, metadata, index)) {
+      boundaries2[index + 1] = TURN_BOUNDARY;
+    } else if (matched) {
+      boundaries2[index + 1] = TOOL_BOUNDARY;
+    }
+  }
+  return boundaries2;
+}
+function matchResult(messages, index, pending) {
+  const message = messages[index];
+  const count = pending.get(message.toolCallId);
+  if (message.role !== "tool" || !count) return false;
+  const next = messages[index + 1];
+  if (next?.role === "tool" && next.toolCallId === message.toolCallId) return false;
+  if (count === 1) pending.delete(message.toolCallId);
+  else pending.set(message.toolCallId, count - 1);
+  return true;
+}
+function isTurnEnd(messages, metadata, index) {
+  const message = messages[index];
+  if (message.role !== "assistant" || message.toolCalls?.length) return false;
+  const current = metadata[index];
+  const next = metadata[index + 1];
+  if (current?.turnComplete === false) return false;
+  return current?.turnComplete === true || messages[index + 1]?.role === "user" || Boolean(current?.turnId && next?.turnId && current.turnId !== next.turnId);
+}
+function chooseBoundary(boundaries2, start, limit) {
+  for (const kind of [TURN_BOUNDARY, TOOL_BOUNDARY]) {
+    for (let end = limit; end > start; end -= 1) {
+      if (boundaries2[end] === kind) return end;
+    }
+  }
+  return limit;
+}
+
+// ../agent-sdk/src/task-batches.js
+var SOFT_BYTES = 64 * 1024;
+var HARD_BYTES = 280 * 1024;
+var MAX_MESSAGES = 500;
+var bytes = (message) => Buffer.byteLength(JSON.stringify(message));
+var totalBytes = (messages) => messages.reduce((sum, message) => sum + bytes(message), 0);
+var isText = (message) => ["user", "assistant"].includes(message.role) && typeof message.content === "string" && message.content !== "" && !message.toolCalls?.length;
+function batchUserTasks(messages, metadata = [], log = {}) {
+  const tasks = userTasks(messages);
+  const prepared = messages.map((message) => ({ ...message }));
+  let trimmed = 0;
+  for (const { start, end } of tasks) {
+    const task = messages.slice(start, end);
+    if (totalBytes(task) <= HARD_BYTES) continue;
+    let candidate;
+    for (const budget of [4096, 3072, 2048]) {
+      candidate = task.map((message) => message.role === "tool" && typeof message.content === "string" ? { ...message, content: trimToolResult(message.content, budget) } : message);
+      if (totalBytes(candidate) <= HARD_BYTES) break;
+    }
+    candidate.forEach((message, index) => {
+      if (message.content !== task[index].content) trimmed++;
+      prepared[start + index] = message;
+    });
+  }
+  if (trimmed) log.info?.(`[everme] task-batching trimmedToolResults=${trimmed} minBytes=2048 maxBytes=4096`);
+  return splitTasks(prepared, metadata, tasks);
+}
+function userTasks(messages) {
+  const tasks = [];
+  for (let start = 0; start < messages.length; ) {
+    let end = start + 1;
+    while (end < messages.length && messages[end].role !== "user") end++;
+    tasks.push({ start, end });
+    start = end;
+  }
+  return tasks;
+}
+function trimToolResult(text, budget) {
+  const raw = Buffer.from(text);
+  if (raw.length <= budget) return text;
+  const marker = (removed) => `
+[... trimmed ${removed} bytes of ${raw.length} ...]
+`;
+  const available = budget - Buffer.byteLength(marker(raw.length));
+  let head = Math.floor(available * 7 / 10);
+  let tail = raw.length - (available - head);
+  while (head > 0 && (raw[head] & 192) === 128) head--;
+  while (tail < raw.length && (raw[tail] & 192) === 128) tail++;
+  return raw.subarray(0, head).toString() + marker(tail - head) + raw.subarray(tail).toString();
+}
+function splitTasks(messages, metadata, tasks) {
+  const sizes = messages.map(bytes);
+  const protectedCuts = /* @__PURE__ */ new Map();
+  for (const task of tasks) {
+    if (messages[task.start].role !== "user" || task.end - task.start > MAX_MESSAGES || sizes.slice(task.start, task.end).reduce((a, b) => a + b, 0) > HARD_BYTES) continue;
+    for (let cut = task.start + 1; cut < task.end; cut++) protectedCuts.set(cut, task);
+  }
+  const { text, pairs } = boundaries(messages, metadata);
+  const batches = [];
+  for (let start = 0; start < messages.length; ) {
+    let hard = limitEnd(sizes, start, HARD_BYTES);
+    if (start > 0 && messages[start].role !== "user") {
+      for (let next = start + 1; next < hard; next++) {
+        if (messages[next].role === "user") {
+          hard = next;
+          break;
+        }
+      }
+    }
+    const preferred = Math.min(limitEnd(sizes, start, SOFT_BYTES), hard);
+    let end = preferred === messages.length ? preferred : chooseText(text, start, preferred, hard);
+    if (!end) {
+      for (let cut = hard; cut > start; cut--) {
+        if (pairs.has(cut)) {
+          end = cut;
+          break;
+        }
+      }
+    }
+    if (!end) end = hard;
+    const task = protectedCuts.get(end);
+    if (task) end = task.end <= hard ? task.end : task.start;
+    batches.push(messages.slice(start, end));
+    start = end;
+  }
+  return batches;
+}
+function limitEnd(sizes, start, budget) {
+  let end = start;
+  let size = 0;
+  while (end < sizes.length && end - start < MAX_MESSAGES) {
+    if (end > start && size + sizes[end] > budget) break;
+    size += sizes[end++];
+  }
+  return end;
+}
+function complete(messages, metadata, index) {
+  if (messages[index].role !== "assistant" || messages[index].toolCalls?.length) return false;
+  if (typeof metadata[index]?.turnComplete === "boolean") return metadata[index].turnComplete;
+  return messages[index + 1]?.role === "user" || Boolean(metadata[index]?.turnId && metadata[index + 1]?.turnId && metadata[index].turnId !== metadata[index + 1].turnId);
+}
+function boundaries(messages, metadata) {
+  const text = /* @__PURE__ */ new Map();
+  const pairs = /* @__PURE__ */ new Set();
+  const pending = /* @__PURE__ */ new Map();
+  messages.forEach((message, index) => {
+    for (const call of message.toolCalls || []) pending.set(call.id, (pending.get(call.id) || 0) + 1);
+    const count = pending.get(message.toolCallId);
+    const matched = message.role === "tool" && count;
+    if (matched) {
+      if (count === 1) pending.delete(message.toolCallId);
+      else pending.set(message.toolCallId, count - 1);
+    }
+    if (pending.size) return;
+    const end = index + 1;
+    if (matched && !(messages[end]?.role === "tool" && messages[end].toolCallId === message.toolCallId)) pairs.add(end);
+    if (!isText(message) || message.role === "assistant" && !complete(messages, metadata, index)) return;
+    if (end === messages.length || messages[end].role === "user") text.set(end, 2);
+    else if (message.role === "assistant" && isText(messages[end])) text.set(end, 1);
+  });
+  return { text, pairs };
+}
+function chooseText(boundaries2, start, preferred, hard) {
+  for (const kind of [2, 1]) {
+    for (let end = preferred; end > start; end--) if (boundaries2.get(end) === kind) return end;
+    for (let end = preferred + 1; end <= hard; end++) if (boundaries2.get(end) === kind) return end;
+  }
+  return 0;
+}
+
 // ../agent-sdk/src/turns.js
 var USER = "user";
 function turnOrdinals(messages) {
@@ -397,22 +573,6 @@ function turnOrdinals(messages) {
     out[i] = ordinal;
   }
   return out;
-}
-function splitTurnAligned(messages, max) {
-  const slices = [];
-  let cur = [];
-  let curIsTail = false;
-  for (const message of messages) {
-    const isUser = message?.role === USER;
-    if (cur.length && (cur.length >= max || isUser && curIsTail)) {
-      slices.push(cur);
-      cur = [];
-      curIsTail = !isUser;
-    }
-    cur.push(message);
-  }
-  if (cur.length) slices.push(cur);
-  return slices;
 }
 function completedTurns(slices, i, baseTurn) {
   const slice = slices[i];
@@ -444,7 +604,7 @@ function logValue(value, maxChars = LOG_ID_MAX_CHARS) {
   const text = String(value ?? "").replace(/\s+/g, " ").trim();
   return text.length > maxChars ? `${text.slice(0, maxChars)}…` : text;
 }
-async function saveAgentMemory(client, { conversationId, messages = [], flush = true, channel, turns, baseTurn } = {}, log = { info() {
+async function saveAgentMemory(client, { conversationId, messages = [], flush = true, sync = false, channel, turns, baseTurn, taskBatching = false, deduplication, syncScope } = {}, log = { info() {
 }, warn() {
 } }) {
   if (!conversationId) {
@@ -453,16 +613,19 @@ async function saveAgentMemory(client, { conversationId, messages = [], flush = 
   }
   const flushOnly = flush === true && messages.length === 0;
   const stamp2 = Date.now();
-  const converted = messages.map((m, i) => convertAgentMessage(m, stamp2 + i)).filter(Boolean).filter((m) => m.content != null || m.toolCalls && m.toolCalls.length);
+  const entries = messages.map((source, i) => ({ source, message: convertAgentMessage(source, stamp2 + i) })).filter(({ message }) => message && (message.content != null || message.toolCalls?.length));
+  const converted = entries.map(({ message }) => message);
   if (!converted.length && !flushOnly) {
     log.info?.(`[everme] agent-memory stage=skip reason=no_parseable_messages conversationId=${logValue(conversationId)} inputMessages=${messages.length}`);
     return null;
   }
+  if (syncScope) {
+    await requireSyncScopeSupport(client, conversationId, syncScope, channel);
+  }
   const hasBase = Number.isInteger(baseTurn) && baseTurn >= 0;
-  const slices = hasBase ? splitTurnAligned(converted, MAX_MESSAGES_PER_REQUEST) : Array.from(
-    { length: Math.max(1, Math.ceil(converted.length / MAX_MESSAGES_PER_REQUEST)) },
-    (_, i) => converted.slice(i * MAX_MESSAGES_PER_REQUEST, (i + 1) * MAX_MESSAGES_PER_REQUEST)
-  );
+  const metadata = entries.map(({ source }) => source);
+  const slices = taskBatching ? batchUserTasks(converted, metadata, log) : batchAgentMessages(converted, MAX_MESSAGES_PER_REQUEST, metadata, hasBase);
+  if (flushOnly) slices.push([]);
   const ordinals = hasBase ? turnOrdinals(converted) : null;
   const batches = slices.length;
   if (batches > 1) {
@@ -475,7 +638,7 @@ async function saveAgentMemory(client, { conversationId, messages = [], flush = 
   for (let batch = 0; batch < batches; batch += 1) {
     const slice = slices[batch];
     const isLast = batch === batches - 1;
-    const sliceBase = hasBase ? baseTurn + ordinals[offset] : null;
+    const sliceBase = hasBase ? baseTurn + (ordinals[offset] ?? 0) : null;
     const sliceTurns = hasBase ? completedTurns(slices, batch, baseTurn) : null;
     offset += slice.length;
     try {
@@ -487,8 +650,10 @@ async function saveAgentMemory(client, { conversationId, messages = [], flush = 
         // synchronous-add guarantee: an async leading batch can still be
         // invisible to the final request's flush (first-flush data loss,
         // one request boundary later). Servers without the field ignore it.
-        ...!isLast && flush === true ? { sync: true } : {},
+        ...sync === true || !isLast && flush === true ? { sync: true } : {},
         ...channel ? { channel } : {},
+        ...syncScope ? { syncScope } : {},
+        ...deduplication ? { deduplication } : {},
         ...hasBase ? { baseTurn: sliceBase, turns: sliceTurns } : declaredTurns !== null && slice.length ? { turns: isLast ? declaredTurns : 0 } : {}
       });
       res = result;
@@ -507,6 +672,15 @@ async function saveAgentMemory(client, { conversationId, messages = [], flush = 
   log.info?.(`[everme] agent-memory stage=complete result=accepted conversationId=${logValue(conversationId)} messages=${converted.length} batches=${batches} flushed=${Boolean(res?.flushed)} status=${logValue(res?.status)} requestId=${logValue(lastRequestId)} requestIdCount=${requestIds.filter(Boolean).length}`);
   return res == null ? res : { ...res, requestId: requestIds[requestIds.length - 1], requestIds };
 }
+async function requireSyncScopeSupport(client, conversationId, syncScope, channel) {
+  const { result } = await requestMeta(client, "POST", "/mem/agent-memory/state", {
+    sessions: [{ conversationId, syncScope }]
+  });
+  const supported = channel === "hook" ? result?.hookSyncScopeSupported === true : channel === "import" && result?.syncScopeSupported === true;
+  if (!supported) {
+    throw new Error("Agent memory sync scope is not supported for this channel; upgrade the EverMe server before retrying");
+  }
+}
 async function flushAgentMemory(client, { conversationId } = {}, log) {
   return saveAgentMemory(client, { conversationId, messages: [], flush: true }, log);
 }
@@ -514,7 +688,7 @@ function convertAgentMessage(msg, fallbackTimestamp) {
   if (!msg || !msg.role) return null;
   const timestamp = normalizeTimestamp(msg.timestamp, fallbackTimestamp);
   if (msg.role === AGENT_MEMORY_ROLES.USER) {
-    const content = cap(toText(msg.content));
+    const content = cap(extractText(msg.content).trim());
     return content ? { role: AGENT_MEMORY_ROLES.USER, timestamp, content } : null;
   }
   if (msg.role === AGENT_MEMORY_ROLES.ASSISTANT) {
@@ -527,7 +701,7 @@ function convertAgentMessage(msg, fallbackTimestamp) {
       role: AGENT_MEMORY_ROLES.TOOL,
       timestamp,
       toolCallId,
-      content: cap(toText(msg.content))
+      content: extractText(msg.content).trim()
     };
   }
   return null;
@@ -564,13 +738,14 @@ function convertAssistant(msg, timestamp) {
       });
     }
   }
-  const content = cap(stripChannelMetadata(textParts.join("\n")));
+  const content = cap(textParts.join("\n").trim());
   if (!content && !toolCalls.length) return null;
   return {
     role: AGENT_MEMORY_ROLES.ASSISTANT,
     timestamp,
     ...content ? { content } : {},
-    ...toolCalls.length ? { toolCalls } : {}
+    ...toolCalls.length ? { toolCalls } : {},
+    ...typeof msg.turnComplete === "boolean" ? { turnComplete: msg.turnComplete } : {}
   };
 }
 function normalizeTimestamp(ts, fallback) {
@@ -831,17 +1006,19 @@ function createTranscriptCheckpointStore({ stateDir = DEFAULT_STATE_DIR } = {}) 
         const parsed = JSON.parse(await readFile(fileFor(stateId), "utf8"));
         return {
           initialized: parsed.initialized === true,
-          uploadedCount: nonNegativeInteger(parsed.uploadedCount)
+          uploadedCount: nonNegativeInteger(parsed.uploadedCount),
+          ...Array.isArray(parsed.nativeMessageIds) ? { nativeMessageIds: parsed.nativeMessageIds } : {}
         };
       } catch (error) {
         if (error?.code !== "ENOENT" && !(error instanceof SyntaxError)) throw error;
         return { initialized: false, uploadedCount: 0 };
       }
     },
-    async commit(stateId, uploadedCount) {
+    async commit(stateId, uploadedCount, identity = {}) {
       await mkdir(stateDir, { recursive: true, mode: 448 });
       const file = fileFor(stateId);
       const next = { initialized: true, uploadedCount: nonNegativeInteger(uploadedCount) };
+      if (Array.isArray(identity.nativeMessageIds)) next.nativeMessageIds = identity.nativeMessageIds;
       await writeState(file, next);
       await pruneStaleStateFiles(stateDir, file);
       return next;
@@ -1069,7 +1246,7 @@ function createHookRuntime({ enqueue, flush, diagnostic = () => {
   }
   return {
     enqueueTurn(turn) {
-      return safe("turn enqueue", () => enqueue({ ...turn, flush: false }));
+      return safe("turn enqueue", () => enqueue({ ...turn, flush: false, sync: true }));
     },
     onStop(conversationId) {
       return safe("Stop flush", () => flush(conversationId));
@@ -1154,7 +1331,7 @@ async function runStore({
     // One Stop = one logical turn: claim the hook channel and declare it, so
     // the gateway's write counter (L1-2's denominator) stays in turns even
     // when a long turn is split into several requests.
-    enqueue: (turn) => saveAgentMemory(client, { ...turn, channel: "hook", turns: 1 }, log),
+    enqueue: (turn) => saveAgentMemory(client, { ...turn, channel: "hook", turns: 1, taskBatching: adapter.taskBatching === true }, log),
     flush: (conversationId) => flushAgentMemory(client, { conversationId }, log),
     diagnostic,
     rethrowOnError: true
@@ -1199,7 +1376,7 @@ async function runStoreBatches({
   }
   const turn = await counter.peek(input.sessionId, turnId);
   const runtime = createHookRuntime({
-    enqueue: (batch) => saveAgentMemory(client, batch, log),
+    enqueue: (batch) => saveAgentMemory(client, { ...batch, taskBatching: adapter.taskBatching === true }, log),
     flush: (conversationId) => flushAgentMemory(client, { conversationId }, log),
     diagnostic,
     rethrowOnError: true
@@ -1215,7 +1392,7 @@ async function runStoreBatches({
     status = saved?.status || status;
     count += batch.messages.length;
     if (batch.checkpoint && checkpointStore) {
-      await checkpointStore.commit(batch.checkpoint.stateId, batch.checkpoint.uploadedCount);
+      await checkpointStore.commit(batch.checkpoint.stateId, batch.checkpoint.uploadedCount, batch.checkpoint);
     }
   }
   let committed = { count: turn.count };
@@ -1279,9 +1456,12 @@ async function runBoundaryFlush({
   log,
   diagnostic
 }) {
-  if (!input?.sessionId) return { block: "", count: 0 };
+  if (!input?.sessionId) {
+    log.info?.("[everme] boundary-flush stage=skip reason=missing_session_id");
+    return { block: "", count: 0 };
+  }
   const runtime = createHookRuntime({
-    enqueue: (turn) => saveAgentMemory(client, turn, log),
+    enqueue: (turn) => saveAgentMemory(client, { ...turn, taskBatching: adapter.taskBatching === true }, log),
     flush: (conversationId) => flushAgentMemory(client, { conversationId }, log),
     diagnostic,
     rethrowOnError: true
@@ -1510,11 +1690,11 @@ function formatOutput(adapter, event, result) {
 
 // src/adapter.js
 import os2 from "node:os";
-import path3 from "node:path";
+import path4 from "node:path";
 
 // src/store-batches.js
 import { readFile as readFile3, readdir as readdir2 } from "node:fs/promises";
-import path2 from "node:path";
+import path3 from "node:path";
 
 // src/transcript.js
 import { createReadStream } from "node:fs";
@@ -1540,13 +1720,37 @@ var SYNTHETIC_USER_TAGS = [
   "task-notification",
   "turn_aborted"
 ];
-function readLastTurn(transcriptPath) {
-  return readTranscript(transcriptPath, { lastTurnOnly: true });
+var KNOWN_EVENT_MESSAGES = /* @__PURE__ */ new Set([
+  "agent_message",
+  "agent_reasoning",
+  "context_compacted",
+  "item_completed",
+  "mcp_tool_call_begin",
+  "mcp_tool_call_end",
+  "patch_apply_begin",
+  "patch_apply_end",
+  "reasoning",
+  "task_complete",
+  "task_started",
+  "sub_agent_activity",
+  "thread_goal_updated",
+  "thread_rolled_back",
+  "thread_settings_applied",
+  "token_count",
+  "turn_aborted",
+  "turn_complete",
+  "user_message",
+  "web_search_begin",
+  "web_search_end"
+]);
+function readLastTurn(transcriptPath, options = {}) {
+  return readTranscript(transcriptPath, { ...options, lastTurnOnly: true });
 }
-function readCanonicalTranscript(transcriptPath) {
-  return readTranscript(transcriptPath, { lastTurnOnly: false });
+function readCanonicalTranscript(transcriptPath, options = {}) {
+  return readTranscript(transcriptPath, { ...options, lastTurnOnly: false });
 }
-async function readTranscript(transcriptPath, { lastTurnOnly }) {
+async function readTranscript(transcriptPath, { lastTurnOnly, diagnostic = () => {
+} }) {
   if (!transcriptPath) return [];
   const legacyUsersBySegment = await collectLegacyUserMessages(transcriptPath);
   const fallbackTimestampBase = await transcriptFallbackTimestampBase(transcriptPath);
@@ -1565,6 +1769,7 @@ async function readTranscript(transcriptPath, { lastTurnOnly }) {
     try {
       event = JSON.parse(line);
     } catch {
+      countDiagnostic(state, "malformed_json");
       continue;
     }
     const payload = event?.payload;
@@ -1573,11 +1778,32 @@ async function readTranscript(transcriptPath, { lastTurnOnly }) {
       if (lastTurnOnly) messages = [];
       continue;
     }
-    if (skipsInheritedSubagentEvent(state, event)) continue;
-    if (event?.type === "event_msg") {
+    if (skipsInheritedSubagentEvent(state, event)) {
+      countDiagnostic(state, "inherited_context");
       continue;
     }
-    if (event?.type !== "response_item" || !payload) continue;
+    observeTurn(state, payload);
+    if (event?.type === "turn_context") {
+      continue;
+    }
+    if (["task_complete", "turn_complete"].includes(event?.type) || event?.type === "event_msg" && ["task_complete", "turn_complete"].includes(payload?.type)) {
+      if (event.type !== "event_msg" && typeof event.turn_id === "string" && event.turn_id) {
+        observeTurn(state, event);
+      }
+      const last = messages.at(-1);
+      if (last && last === state.lastAssistant && last.turnComplete !== false && (last.turnId || "") === state.turnId) {
+        setBoundaryMetadata(last, "turnComplete", true);
+      }
+      continue;
+    }
+    if (event?.type === "event_msg") {
+      if (!KNOWN_EVENT_MESSAGES.has(payload?.type)) countDiagnostic(state, "unknown_event_message");
+      continue;
+    }
+    if (event?.type !== "response_item" || !payload) {
+      if (!["compacted"].includes(event?.type)) countDiagnostic(state, "unknown_event");
+      continue;
+    }
     const message = mapPayload(
       payload,
       event.timestamp,
@@ -1586,13 +1812,52 @@ async function readTranscript(transcriptPath, { lastTurnOnly }) {
       state
     );
     if (!message) continue;
+    if (state.turnId) setBoundaryMetadata(message, "turnId", state.turnId);
     if (lastTurnOnly && message.role === "user") {
       messages = [message];
     } else {
       messages.push(message);
     }
   }
+  if (state.isSubagent && !messages.some((message) => message.role === "user")) {
+    countDiagnostic(state, "subagent_without_user");
+    messages = [];
+  }
+  diagnoseToolPairs(messages, state);
+  if (Object.keys(state.diagnostics).length) {
+    const counts = Object.entries(state.diagnostics).map(([reason, count]) => `${reason}=${count}`).join(" ");
+    diagnostic(`[everme] codex parse lines=${lineNumber} messages=${messages.length} ${counts}`.slice(0, 1024));
+  }
   return messages;
+}
+function countDiagnostic(state, reason) {
+  state.diagnostics[reason] = (state.diagnostics[reason] || 0) + 1;
+}
+function sourceCallId(payload) {
+  return typeof payload?.call_id === "string" && payload.call_id.trim() ? payload.call_id : "";
+}
+function diagnoseToolPairs(messages, state) {
+  const seen = /* @__PURE__ */ new Set();
+  const pending = /* @__PURE__ */ new Map();
+  for (const message of messages) {
+    for (const call of message.toolCalls || []) {
+      if (seen.has(call.id)) countDiagnostic(state, "duplicate_call_id");
+      seen.add(call.id);
+      pending.set(call.id, (pending.get(call.id) || 0) + 1);
+    }
+    if (message.role !== "tool") continue;
+    const count = pending.get(message.toolCallId) || 0;
+    if (!count) countDiagnostic(state, "orphan_result");
+    else if (count === 1) pending.delete(message.toolCallId);
+    else pending.set(message.toolCallId, count - 1);
+  }
+  for (const count of pending.values()) {
+    state.diagnostics.missing_result = (state.diagnostics.missing_result || 0) + count;
+  }
+}
+function setBoundaryMetadata(message, key, value) {
+  Object.defineProperty(message, key, { value, writable: true, configurable: true });
+  return message;
 }
 async function collectLegacyUserMessages(transcriptPath) {
   const usersBySegment = [];
@@ -1622,6 +1887,11 @@ async function collectLegacyUserMessages(transcriptPath) {
   }
   return usersBySegment;
 }
+function observeTurn(state, payload) {
+  const turnId = payload?.turn_id || payload?.internal_chat_message_metadata_passthrough?.turn_id;
+  if (typeof turnId !== "string" || !turnId) return;
+  state.turnId = turnId;
+}
 function newParseState(legacyUsersBySegment) {
   return {
     historyMode: "",
@@ -1633,7 +1903,9 @@ function newParseState(legacyUsersBySegment) {
     subagentHistoryStart: 0,
     legacyUsersBySegment,
     legacyUserMessages: new Map(legacyUsersBySegment[0] || []),
-    pendingLegacyToolCallIds: []
+    diagnostics: {},
+    turnId: "",
+    lastAssistant: null
   };
 }
 function observeSessionMeta(state, payload) {
@@ -1650,7 +1922,8 @@ function observeSessionMeta(state, payload) {
     state.isSubagent = true;
   }
   state.legacyUserMessages = new Map(state.legacyUsersBySegment[state.segmentIndex] || []);
-  state.pendingLegacyToolCallIds = [];
+  state.turnId = "";
+  state.lastAssistant = null;
 }
 function skipsInheritedSubagentEvent(state, event) {
   return state.isSubagent && state.hasSubagentHistoryStart && Number.isFinite(event?.ordinal) && Math.trunc(event.ordinal) < state.subagentHistoryStart;
@@ -1664,55 +1937,92 @@ function sessionMetaIsSubagent(payload) {
 function mapPayload(payload, timestampValue, fallbackTimestamp, lineNumber, state) {
   const timestamp = normalizeTimestamp2(timestampValue, fallbackTimestamp);
   if (payload.type === "message") {
-    if (payload.role === "developer") return null;
+    if (["developer", "system"].includes(payload.role)) {
+      countDiagnostic(state, "system_message");
+      return null;
+    }
     const rawText = contentText(payload.content);
-    if (!rawText) return null;
+    if (!rawText) {
+      countDiagnostic(state, "empty_or_nontext_message");
+      return null;
+    }
     if (payload.role === "user") {
-      if (state.isSubagent) return null;
+      if (state.isSubagent) {
+        countDiagnostic(state, "subagent_user");
+        return null;
+      }
       const content = normalizeUserMessage(state, rawText);
-      if (!content) return null;
-      state.pendingLegacyToolCallIds = [];
+      if (!content) {
+        countDiagnostic(state, "injected_user");
+        return null;
+      }
+      if (content !== rawText) countDiagnostic(state, "stripped_user_wrapper");
       return { role: "user", ...stamp(timestamp), content: capText(content) };
     }
-    if (payload.role !== "assistant") return null;
-    const legacyTool = mapLegacyToolMessage(state, rawText, timestamp, lineNumber);
-    if (legacyTool.matched) return legacyTool.message;
-    return { role: "assistant", ...stamp(timestamp), content: capText(rawText) };
+    if (payload.role !== "assistant") {
+      countDiagnostic(state, "unknown_role");
+      return null;
+    }
+    if (legacyToolEnvelope(rawText)) {
+      countDiagnostic(state, "dropped_legacy_tool_without_id");
+      return null;
+    }
+    const message = { role: "assistant", ...stamp(timestamp), content: capText(rawText) };
+    if (typeof payload.phase === "string" && payload.phase) {
+      setBoundaryMetadata(message, "turnComplete", payload.phase === "final_answer");
+    }
+    state.lastAssistant = message;
+    return message;
   }
   if (payload.type === "function_call" || payload.type === "custom_tool_call") {
     const custom = payload.type === "custom_tool_call";
+    const callId = sourceCallId(payload);
+    if (!callId) {
+      countDiagnostic(state, "dropped_missing_call_id");
+      return null;
+    }
     return {
       role: "assistant",
       ...stamp(timestamp),
       toolCalls: [{
-        id: payload.call_id || `${custom ? "codex_custom_tool" : "codex_tool"}_${timestamp ?? "untimed"}`,
+        id: callId,
         type: "function",
         name: payload.name || "unknown",
-        arguments: redactText(argumentText(custom ? payload.input : payload.arguments))
+        arguments: redactText(custom ? customToolArguments(payload.input) : argumentText(payload.arguments))
       }]
     };
   }
-  if (["function_call_output", "custom_tool_call_output"].includes(payload.type) && payload.call_id) {
+  if (["function_call_output", "custom_tool_call_output"].includes(payload.type)) {
+    const toolCallId = sourceCallId(payload);
+    if (!toolCallId) {
+      countDiagnostic(state, "dropped_missing_result_id");
+      return null;
+    }
+    if (!Object.hasOwn(payload, "output")) countDiagnostic(state, "missing_output_field");
     return {
       role: "tool",
       ...stamp(timestamp),
-      toolCallId: payload.call_id,
-      content: capText(outputText(payload.output) || "tool result")
+      toolCallId,
+      content: redactText(outputText(payload.output))
     };
   }
   if (payload.type === "web_search_call") {
-    return {
+    return setBoundaryMetadata({
       role: "assistant",
       ...stamp(timestamp),
-      toolCalls: [{
-        id: `codex_web_search_${timestamp ?? "untimed"}_${lineNumber}`,
-        type: "function",
-        name: "web_search",
-        arguments: redactText(argumentText(payload.action))
-      }]
-    };
+      // This source record has no paired result; preserve it without inventing one.
+      content: capText(JSON.stringify(payload))
+    }, "turnComplete", false);
   }
-  if (payload.type === "agent_message") return null;
+  if (payload.type === "agent_message") {
+    countDiagnostic(state, "internal_agent_message");
+    return null;
+  }
+  if (payload.type === "reasoning") {
+    countDiagnostic(state, "internal_reasoning");
+    return null;
+  }
+  countDiagnostic(state, "unknown_payload");
   return null;
 }
 function normalizeUserMessage(state, text) {
@@ -1728,6 +2038,8 @@ function normalizePaginatedUserText(text) {
   let trimmed = text.trim();
   const tags = [...INJECTED_CONTEXT_TAGS, ...SYNTHETIC_USER_TAGS, "command-args", "command-message"];
   while (trimmed) {
+    const objective = goalObjective(trimmed);
+    if (objective) return objective;
     const command = commandIntent(trimmed);
     if (command) return command;
     const agentsRemainder = stripLeadingAgentsInstructions(trimmed);
@@ -1784,41 +2096,20 @@ function envelopeValue(text, tag) {
   const end = text.indexOf(close, valueStart);
   return end < 0 ? "" : text.slice(valueStart, end).trim();
 }
-function mapLegacyToolMessage(state, text, timestamp, lineNumber) {
-  const envelope = legacyToolEnvelope(text);
-  if (!envelope) return { matched: false, message: null };
-  if (envelope.kind === "call") {
-    const callId = `codex_legacy_tool_${lineNumber}`;
-    state.pendingLegacyToolCallIds.push(callId);
-    return {
-      matched: true,
-      message: {
-        role: "assistant",
-        ...stamp(timestamp),
-        toolCalls: [{
-          id: callId,
-          type: "function",
-          name: envelope.name,
-          arguments: redactText(envelope.body)
-        }]
-      }
-    };
-  }
-  if (state.pendingLegacyToolCallIds.length !== 1) {
-    state.pendingLegacyToolCallIds = [];
-    return { matched: true, message: null };
-  }
-  const [toolCallId] = state.pendingLegacyToolCallIds;
-  state.pendingLegacyToolCallIds = [];
-  return {
-    matched: true,
-    message: {
-      role: "tool",
-      ...stamp(timestamp),
-      toolCallId,
-      content: capText(envelope.body || "tool result")
-    }
-  };
+function goalObjective(text) {
+  const prefix = '<codex_internal_context source="goal">';
+  if (!text.startsWith(prefix)) return "";
+  const close = "</codex_internal_context>";
+  const end = text.indexOf(close, prefix.length);
+  if (end < 0) return "";
+  const body = text.slice(prefix.length, end);
+  if (!body.includes("The objective below is user-provided data.")) return "";
+  const objective = envelopeValue(body, "objective");
+  if (!objective) return "";
+  const suffix = normalizePaginatedUserText(text.slice(end + close.length));
+  return suffix ? `${objective}
+
+${suffix}` : objective;
 }
 function legacyToolEnvelope(text) {
   const trimmed = text.trim();
@@ -1850,9 +2141,25 @@ function outputText(value) {
   return typeof value === "string" ? value.trim() : contentText(value);
 }
 function argumentText(value) {
-  if (typeof value === "string") return value;
+  if (typeof value === "string") {
+    if (!value.trim()) return "{}";
+    try {
+      JSON.parse(value);
+      return value;
+    } catch {
+      return JSON.stringify({ input: value });
+    }
+  }
   try {
     return JSON.stringify(value ?? {});
+  } catch {
+    return "{}";
+  }
+}
+function customToolArguments(value) {
+  if (value == null || value === "") return "{}";
+  try {
+    return JSON.stringify({ input: value });
   } catch {
     return "{}";
   }
@@ -1878,12 +2185,49 @@ function redactText(value) {
   return String(value || "").replace(/sk-[A-Za-z0-9_-]{16,}/g, "[redacted]").replace(/evt_[A-Za-z0-9_-]{8,}/g, "[redacted]").replace(/emk_[A-Za-z0-9_-]{8,}/g, "[redacted]").replace(/ghp_[A-Za-z0-9]{20,}/g, "[redacted]").replace(/AKIA[0-9A-Z]{16}/g, "[redacted]").replace(/bearer\s+[A-Za-z0-9._=-]{10,}/gi, "[redacted]").replace(/X-Amz-Signature=[A-Za-z0-9%]+/g, "[redacted]").replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, "[redacted]");
 }
 
+// src/fragment.js
+import { createReadStream as createReadStream2 } from "node:fs";
+import path2 from "node:path";
+import { createInterface as createInterface2 } from "node:readline";
+var UUID = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}";
+var ROLLOUT = new RegExp(`^rollout-\\d{4}-\\d{2}-\\d{2}T\\d{2}-\\d{2}-\\d{2}-(${UUID})(?:_(${UUID}))?\\.jsonl$`);
+async function readFragmentScope(transcriptPath) {
+  const stream = createReadStream2(transcriptPath, { encoding: "utf8" });
+  const lines = createInterface2({ input: stream, crlfDelay: Infinity });
+  try {
+    for await (const line of lines) {
+      let event;
+      try {
+        event = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (event?.type !== "session_meta") continue;
+      if (event.payload?.history_mode !== "paginated") return "";
+      const match = path2.basename(transcriptPath).match(ROLLOUT);
+      if (!match) {
+        if (event.payload?.history_base?.thread_id) {
+          throw new Error("codex paginated fragment has no native rollout filename identity");
+        }
+        return "";
+      }
+      return `codex-fragment-${match[2] || match[1]}`;
+    }
+    return "";
+  } finally {
+    lines.close();
+    stream.destroy();
+  }
+}
+
 // src/store-batches.js
-async function readCodexStoreBatches(input, { checkpointStore } = {}) {
+async function readCodexStoreBatches(input, { checkpointStore, diagnostic = () => {
+} } = {}) {
   if (!input?.sessionId || !input?.transcriptPath) return [];
   const batches = [];
   const root = await transcriptBatch({
     checkpointStore,
+    diagnostic,
     conversationId: input.sessionId,
     initialTailOnly: true,
     transcriptPath: input.transcriptPath
@@ -1892,6 +2236,7 @@ async function readCodexStoreBatches(input, { checkpointStore } = {}) {
   for (const child of await completedDescendants(input.transcriptPath, input.sessionId)) {
     const batch = await transcriptBatch({
       checkpointStore,
+      diagnostic,
       conversationId: child.id,
       initialTailOnly: false,
       transcriptPath: child.path
@@ -1900,15 +2245,18 @@ async function readCodexStoreBatches(input, { checkpointStore } = {}) {
   }
   return batches;
 }
-async function transcriptBatch({ checkpointStore, conversationId, initialTailOnly, transcriptPath }) {
-  const canonical = await readCanonicalTranscript(transcriptPath);
-  const stateId = `codex:${conversationId}`;
+async function transcriptBatch({ checkpointStore, conversationId, initialTailOnly, transcriptPath, diagnostic }) {
+  const canonical = await readCanonicalTranscript(transcriptPath, { diagnostic });
+  if (!canonical.length) return null;
+  const syncScope = await readFragmentScope(transcriptPath);
+  const stateId = syncScope ? `codex:${conversationId}:${syncScope}` : `codex:${conversationId}`;
   const checkpoint = checkpointStore ? await checkpointStore.read(stateId) : { initialized: false, uploadedCount: 0 };
   const continuation = checkpoint.initialized && checkpoint.uploadedCount <= canonical.length;
   const messages = continuation ? canonical.slice(checkpoint.uploadedCount) : initialTailOnly ? await readLastTurn(transcriptPath) : canonical;
   if (!messages.length) return null;
   return {
     conversationId,
+    ...syncScope ? { syncScope } : {},
     messages,
     // Address by absolute turn only when everything before the slice is
     // known to be covered: a checkpoint continuation, or the whole canonical
@@ -1922,14 +2270,14 @@ async function transcriptBatch({ checkpointStore, conversationId, initialTailOnl
 async function completedDescendants(rootPath, rootId) {
   let names;
   try {
-    names = await readdir2(path2.dirname(rootPath));
+    names = await readdir2(path3.dirname(rootPath));
   } catch {
     return [];
   }
   const candidates = [];
   for (const name of names) {
     if (!name.endsWith(".jsonl")) continue;
-    const candidatePath = path2.join(path2.dirname(rootPath), name);
+    const candidatePath = path3.join(path3.dirname(rootPath), name);
     if (candidatePath === rootPath) continue;
     const metadata = await rolloutMetadata(candidatePath);
     if (metadata?.isSubagent && metadata.complete) {
@@ -1959,7 +2307,7 @@ async function rolloutMetadata(transcriptPath) {
     return null;
   }
   let metadata;
-  let complete = false;
+  let complete2 = false;
   for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
     let event;
@@ -1979,11 +2327,11 @@ async function rolloutMetadata(transcriptPath) {
       };
     }
     if (event?.type === "event_msg" && event?.payload?.type === "task_complete" || event?.type === "task_complete") {
-      complete = true;
+      complete2 = true;
     }
   }
   if (!metadata?.id || !metadata.parentId) return null;
-  return { ...metadata, complete };
+  return { ...metadata, complete: complete2 };
 }
 function stringValue(value) {
   return typeof value === "string" ? value.trim() : "";
@@ -1997,8 +2345,9 @@ var codexAdapter = {
   // every one of them, so the SDK claims channel="hook" for these writes and
   // they enter L1-2's denominator. Whole-session hosts leave this unset.
   turnBoundary: "stop",
+  taskBatching: true,
   envFile() {
-    return process.env.EVERME_ENV_FILE_PATH || path3.join(os2.homedir(), ".codex", "everme.env");
+    return process.env.EVERME_ENV_FILE_PATH || path4.join(os2.homedir(), ".codex", "everme.env");
   },
   normalizeInput(rawInput) {
     return {
@@ -2014,10 +2363,10 @@ var codexAdapter = {
     };
   },
   readLastTurn(input) {
-    return readLastTurn(input?.transcriptPath);
+    return readLastTurn(input?.transcriptPath, { diagnostic: (line) => console.error(line) });
   },
   readStoreBatches(input, options) {
-    return readCodexStoreBatches(input, options);
+    return readCodexStoreBatches(input, { ...options, diagnostic: (line) => console.error(line) });
   },
   formatOutput(event, { block = "" } = {}) {
     if (!CONTEXT_EVENTS.has(event) || !block) return {};

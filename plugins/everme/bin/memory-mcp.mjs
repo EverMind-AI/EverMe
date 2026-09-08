@@ -15768,6 +15768,10 @@ async function execOnce(url, init, timeoutMs, requestId = "") {
   });
 }
 
+// ../agent-sdk/src/task-batches.js
+var SOFT_BYTES = 64 * 1024;
+var HARD_BYTES = 280 * 1024;
+
 // ../agent-sdk/src/agent-memory.js
 var AGENT_MEMORY_ROLES = Object.freeze({
   USER: "user",
@@ -16020,7 +16024,7 @@ var DEFAULT_STATE_DIR = path.join(os.homedir(), ".everme", "state");
 var STATE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1e3;
 
 // ../memory-mcp/src/mcp.js
-var PKG_VERSION = true ? "0.6.4" : createRequire(import.meta.url)("../package.json").version;
+var PKG_VERSION = true ? "0.6.5" : createRequire(import.meta.url)("../package.json").version;
 var EVERME_MCP_INSTRUCTIONS = [
   "EverMe is the user's long-term memory across sessions.",
   "",
