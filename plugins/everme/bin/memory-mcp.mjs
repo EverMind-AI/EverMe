@@ -3229,8 +3229,8 @@ var require_utils = __commonJS({
       }
       return ind;
     }
-    function removeDotSegments(path2) {
-      let input = path2;
+    function removeDotSegments(path3) {
+      let input = path3;
       const output = [];
       let nextSlash = -1;
       let len = 0;
@@ -3482,8 +3482,8 @@ var require_schemes = __commonJS({
         wsComponent.secure = void 0;
       }
       if (wsComponent.resourceName) {
-        const [path2, query] = wsComponent.resourceName.split("?");
-        wsComponent.path = path2 && path2 !== "/" ? path2 : void 0;
+        const [path3, query] = wsComponent.resourceName.split("?");
+        wsComponent.path = path3 && path3 !== "/" ? path3 : void 0;
         wsComponent.query = query;
         wsComponent.resourceName = void 0;
       }
@@ -7138,10 +7138,10 @@ function mergeDefs(...defs) {
 function cloneDef(schema) {
   return mergeDefs(schema._zod.def);
 }
-function getElementAtPath(obj, path2) {
-  if (!path2)
+function getElementAtPath(obj, path3) {
+  if (!path3)
     return obj;
-  return path2.reduce((acc, key) => acc?.[key], obj);
+  return path3.reduce((acc, key) => acc?.[key], obj);
 }
 function promiseAllObject(promisesObj) {
   const keys = Object.keys(promisesObj);
@@ -7550,11 +7550,11 @@ function explicitlyAborted(x, startIndex = 0) {
   }
   return false;
 }
-function prefixIssues(path2, issues) {
+function prefixIssues(path3, issues) {
   return issues.map((iss) => {
     var _a3;
     (_a3 = iss).path ?? (_a3.path = []);
-    iss.path.unshift(path2);
+    iss.path.unshift(path3);
     return iss;
   });
 }
@@ -7701,16 +7701,16 @@ function flattenError(error2, mapper = (issue2) => issue2.message) {
 }
 function formatError(error2, mapper = (issue2) => issue2.message) {
   const fieldErrors = { _errors: [] };
-  const processError = (error3, path2 = []) => {
+  const processError = (error3, path3 = []) => {
     for (const issue2 of error3.issues) {
       if (issue2.code === "invalid_union" && issue2.errors.length) {
-        issue2.errors.map((issues) => processError({ issues }, [...path2, ...issue2.path]));
+        issue2.errors.map((issues) => processError({ issues }, [...path3, ...issue2.path]));
       } else if (issue2.code === "invalid_key") {
-        processError({ issues: issue2.issues }, [...path2, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path3, ...issue2.path]);
       } else if (issue2.code === "invalid_element") {
-        processError({ issues: issue2.issues }, [...path2, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path3, ...issue2.path]);
       } else {
-        const fullpath = [...path2, ...issue2.path];
+        const fullpath = [...path3, ...issue2.path];
         if (fullpath.length === 0) {
           fieldErrors._errors.push(mapper(issue2));
         } else {
@@ -15460,6 +15460,9 @@ import { randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 
 // ../agent-sdk/src/hooks/knobs.js
+var DEFAULT_INJECT_TOPK = 5;
+var MAX_INJECT_TOPK = 20;
+var DEFAULT_INJECT_MIN_SCORE = 0.3;
 function resolveHookKnobs(env = process.env) {
   const flushMode = String(env.EVERME_FLUSH_MODE ?? "").trim().toLowerCase();
   const configuredFlushEveryTurns = strictInteger(
@@ -15471,9 +15474,9 @@ function resolveHookKnobs(env = process.env) {
   return {
     flushEveryTurns: flushMode === "legacy" ? 1 : configuredFlushEveryTurns,
     flushMode,
-    injectTopK: strictInteger(env.EVERME_INJECT_TOPK, 10, 1, 20),
+    injectTopK: strictInteger(env.EVERME_INJECT_TOPK, DEFAULT_INJECT_TOPK, 1, MAX_INJECT_TOPK),
     injectProfile: strictBoolean(env.EVERME_INJECT_PROFILE, false),
-    injectMinScore: strictFloat(env.EVERME_INJECT_MIN_SCORE, 0.1, 0, 1),
+    injectMinScore: strictFloat(env.EVERME_INJECT_MIN_SCORE, DEFAULT_INJECT_MIN_SCORE, 0, 1),
     telemetry: strictBoolean(env.EVERME_TELEMETRY, true)
   };
 }
@@ -15524,7 +15527,11 @@ function resolveConfig(host = {}) {
     topK: host.topK ?? 10,
     ...hookKnobs,
     // Deprecated: retained for the existing both-zero compatibility switch.
-    flushMaxBytes: host.flushMaxBytes ?? 64 * 1024
+    flushMaxBytes: host.flushMaxBytes ?? 64 * 1024,
+    // Client identity for X-EverMe-Client. Set by the hook runtime ("hook" +
+    // adapter.version), memory-mcp ("mcp" + PKG_VERSION) and host-native
+    // plugins; absent for bare callers, which the server files as unknown.
+    ...host.clientKind ? { clientKind: host.clientKind, clientVersion: host.clientVersion || "" } : {}
   };
 }
 function assertConfigUsable(cfg, { requireAgentId = true } = {}) {
@@ -15601,26 +15608,32 @@ function describeError(err) {
   if (err instanceof EvermeError) return err.describe();
   return boundedDiagnostic(err?.message || String(err), 240);
 }
-async function requestMeta(client, method, path2, body, opts) {
+async function requestMeta(client, method, path3, body, opts) {
   if (typeof client?.requestWithMeta === "function") {
-    return client.requestWithMeta(method, path2, body, opts);
+    return client.requestWithMeta(method, path3, body, opts);
   }
-  return { result: await client.request(method, path2, body, opts), requestId: "" };
+  return { result: await client.request(method, path3, body, opts), requestId: "" };
 }
 function createClient(cfg, log = noop) {
+  const identity = cfg.clientKind && cfg.clientVersion ? `${cfg.clientKind}/${cfg.clientVersion}` : "";
   const headers = (requestId) => ({
     "Content-Type": "application/json",
     Accept: "application/json",
     Authorization: `Bearer ${cfg.agentToken}`,
-    "User-Agent": `everme-memory-mcp/0.1 (agentId=${cfg.agentId})`,
+    // Versioned when the caller declared who it is; the legacy literal
+    // otherwise, so old integrations keep their exact wire shape.
+    "User-Agent": identity ? `everme-${identity} (agentId=${cfg.agentId})` : `everme-memory-mcp/0.1 (agentId=${cfg.agentId})`,
+    // Structured attribution header (server: middleware.ClientAttribution).
+    // No platform here: the server derives it from the evt agent row.
+    ...identity ? { "X-EverMe-Client": identity } : {},
     // Client-generated trace id. The gateway reuses a valid inbound value,
     // so plugin logs, EverMe ELK, and the cloud platform all join on it —
     // even when the request times out before any response arrives.
     requestId
   });
-  async function requestWithMeta(method, path2, body, { timeoutMs = TIMEOUT_MS, query } = {}) {
+  async function requestWithMeta(method, path3, body, { timeoutMs = TIMEOUT_MS, query } = {}) {
     const requestId = randomUUID();
-    const url = buildUrl(cfg.baseUrl, path2, query);
+    const url = buildUrl(cfg.baseUrl, path3, query);
     const init = {
       method,
       headers: headers(requestId),
@@ -15628,8 +15641,8 @@ function createClient(cfg, log = noop) {
     };
     return execWithRetry(url, init, boundedTimeoutMs(timeoutMs, cfg.deadlineAt), log, requestId);
   }
-  async function request(method, path2, body, opts) {
-    const { result } = await requestWithMeta(method, path2, body, opts);
+  async function request(method, path3, body, opts) {
+    const { result } = await requestWithMeta(method, path3, body, opts);
     return result;
   }
   async function rawPost(uploadUrl, body, contentType, { timeoutMs = TIMEOUT_MS } = {}) {
@@ -15686,7 +15699,7 @@ function createClient(cfg, log = noop) {
   }
   return { request, requestWithMeta, rawPost };
 }
-function buildUrl(base, path2, query) {
+function buildUrl(base, path3, query) {
   const qs = query ? new URLSearchParams() : null;
   if (qs) {
     for (const [k, v] of Object.entries(query)) {
@@ -15696,7 +15709,7 @@ function buildUrl(base, path2, query) {
     }
   }
   const q = qs?.toString();
-  return q ? `${base}${path2}?${q}` : `${base}${path2}`;
+  return q ? `${base}${path3}?${q}` : `${base}${path3}`;
 }
 async function execWithRetry(url, init, timeoutMs, log, requestId) {
   try {
@@ -15783,77 +15796,134 @@ var AGENT_MEMORY_TOOL_CALL_TYPES = Object.freeze({
   FUNCTION: "function"
 });
 
-// ../agent-sdk/src/search.js
-var noop2 = { info() {
-}, warn() {
-} };
-var QUERY_MAX_CHARS = 1024;
-async function searchMemory(client, params, log = noop2) {
-  const body = {
-    query: String(params.query || "").slice(0, QUERY_MAX_CHARS),
-    topK: params.topK ?? 10,
-    ...params.rankBy ? { rankBy: params.rankBy } : {},
-    ...params.filter ? { filter: params.filter } : {},
-    ...Array.isArray(params.memoryTypes) && params.memoryTypes.length ? { memoryTypes: params.memoryTypes } : {}
-  };
-  const { result: res, requestId } = await requestMeta(client, "POST", "/mem/search", body);
-  const memoryCount = Array.isArray(res?.items) ? res.items.length : 0;
-  const profileCount = Array.isArray(res?.profiles) ? res.profiles.length : 0;
-  const rawMessageCount = Array.isArray(res?.rawMessages) ? res.rawMessages.length : 0;
-  const caseCount = Array.isArray(res?.agentMemory?.cases) ? res.agentMemory.cases.length : 0;
-  const skillCount = Array.isArray(res?.agentMemory?.skills) ? res.agentMemory.skills.length : 0;
-  log.info?.(`[everme] memory-search stage=complete result=success queryChars=${body.query.length} topK=${body.topK} memories=${memoryCount} profiles=${profileCount} rawMessages=${rawMessageCount} cases=${caseCount} skills=${skillCount} requestId=${boundedDiagnostic(requestId, 128)}`);
-  return {
-    memories: res?.items ?? [],
-    profiles: res?.profiles ?? [],
-    rawMessages: res?.rawMessages ?? [],
-    agentMemory: res?.agentMemory ?? { cases: [], skills: [] },
-    requestId
-  };
-}
-async function getContext(client, _query, opts = {}, log = noop2) {
-  const body = opts.forceRefresh ? { forceRefresh: true } : {};
-  const { result: res, requestId } = await requestMeta(client, "POST", "/mem/context", body);
-  log.info?.(`[everme] memory-context stage=complete result=success forceRefresh=${!!opts.forceRefresh} requestId=${boundedDiagnostic(requestId, 128)}`);
-  if (typeof res?.context === "string" && res.context) {
-    return { context: res.context, memoryCount: res.memoryCount ?? estimateCount(res), requestId };
+// ../agent-sdk/src/hooks/skill-cache.js
+import { mkdir as mkdir2, readFile as readFile2 } from "node:fs/promises";
+import path2 from "node:path";
+
+// ../agent-sdk/src/hooks/state.js
+import { mkdir, readFile, readdir, rename, stat, unlink, writeFile, chmod } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+var DEFAULT_STATE_DIR = path.join(os.homedir(), ".everme", "state");
+var STATE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1e3;
+var LOCK_WAIT_MS = 10 * 60 * 1e3;
+var LOCK_ABANDONED_MS = 10 * 60 * 1e3;
+async function writeState(file, state) {
+  const temp = `${file}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    await writeFile(temp, JSON.stringify(state), { encoding: "utf8", mode: 384, flag: "wx" });
+    await rename(temp, file);
+    await chmod(file, 384);
+  } catch (error2) {
+    await unlink(temp).catch(() => {
+    });
+    throw error2;
   }
-  if (res?.profile) {
-    const rendered = renderProfile(res.profile);
-    if (rendered) {
-      return { context: rendered, memoryCount: estimateProfileCount(res.profile), requestId };
+}
+async function pruneStaleStateFiles(stateDir, keepFile) {
+  try {
+    const cutoff = Date.now() - STATE_MAX_AGE_MS;
+    for (const name of await readdir(stateDir)) {
+      if (!name.endsWith(".json") && !name.endsWith(".toolbuf.jsonl")) continue;
+      const file = path.join(stateDir, name);
+      if (file === keepFile) continue;
+      try {
+        const info = await stat(file);
+        if (info.mtimeMs < cutoff) await unlink(file);
+      } catch {
+      }
     }
+  } catch {
   }
-  return { context: "", memoryCount: estimateCount(res), requestId };
 }
-function renderProfile(profile) {
-  if (!profile || typeof profile !== "object") return "";
-  const lines = [];
-  for (const row of profile.explicit_info || []) {
-    const cat = row.category ? `[${row.category}] ` : "";
-    if (row.description) lines.push(`- ${cat}${oneLineText(row.description)}`);
+function sanitizeSessionId(sessionId) {
+  const sanitized = String(sessionId || "default").replace(/[^a-zA-Z0-9._-]+/g, "_").replace(/^\.+/, "").slice(0, 120);
+  return sanitized || "default";
+}
+
+// ../agent-sdk/src/hooks/skill-cache.js
+var SKILL_FILE_SUFFIX = ".skill.json";
+function defaultStateDir() {
+  return process.env.EVERME_STATE_DIR || DEFAULT_STATE_DIR;
+}
+function createSkillContentCache({ stateDir } = {}) {
+  const dirOf = () => stateDir || defaultStateDir();
+  const fileFor = (id) => path2.join(dirOf(), `${sanitizeSessionId(id)}${SKILL_FILE_SUFFIX}`);
+  return {
+    /**
+     * Persist the bodies of `skills`. Callers pass rows that already cleared
+     * SKILL_MIN_SCORE — a skill too weak to be rendered carries no id into the
+     * prompt, so caching it would only be dead weight.
+     *
+     * @returns {Promise<number>} how many bodies were written
+     */
+    async write(skills) {
+      const rows = (skills || []).filter((skill) => skill?.id && skill?.content);
+      if (!rows.length) return 0;
+      const dir = dirOf();
+      await mkdir2(dir, { recursive: true, mode: 448 });
+      let written = 0;
+      let lastFile = "";
+      for (const skill of rows) {
+        const file = fileFor(skill.id);
+        try {
+          await writeState(file, {
+            id: String(skill.id),
+            name: String(skill.name || ""),
+            description: String(skill.description || ""),
+            content: String(skill.content),
+            cachedAt: (/* @__PURE__ */ new Date()).toISOString()
+          });
+          written += 1;
+          lastFile = file;
+        } catch {
+        }
+      }
+      await pruneStaleStateFiles(dir, lastFile);
+      return written;
+    },
+    /**
+     * @returns {Promise<{id, name, description, content, cachedAt}|null>}
+     *          null when this id was never cached or the file is unreadable.
+     *          A miss is reported as a miss; there is no substitute body to
+     *          serve in its place.
+     */
+    async read(id) {
+      const key = String(id || "").trim();
+      if (!key) return null;
+      try {
+        const parsed = JSON.parse(await readFile2(fileFor(key), "utf8"));
+        if (typeof parsed?.content !== "string" || !parsed.content) return null;
+        return {
+          id: typeof parsed.id === "string" ? parsed.id : key,
+          name: typeof parsed.name === "string" ? parsed.name : "",
+          description: typeof parsed.description === "string" ? parsed.description : "",
+          content: parsed.content,
+          cachedAt: typeof parsed.cachedAt === "string" ? parsed.cachedAt : ""
+        };
+      } catch (error2) {
+        if (error2?.code !== "ENOENT" && !(error2 instanceof SyntaxError)) throw error2;
+        return null;
+      }
+    }
+  };
+}
+async function cacheSkillContent(skills, options) {
+  try {
+    return await createSkillContentCache(options).write(skills);
+  } catch {
+    return 0;
   }
-  for (const row of profile.implicit_traits || []) {
-    const t = row.trait ? `${row.trait}: ` : "";
-    if (row.description) lines.push(`- ${t}${oneLineText(row.description)}`);
-  }
-  if (!lines.length) return "";
-  return "```memory\n## Relevant memory\n" + lines.join("\n") + "\n```";
-}
-function estimateProfileCount(profile) {
-  if (!profile) return 0;
-  return (profile.explicit_info?.length || 0) + (profile.implicit_traits?.length || 0);
-}
-function oneLineText(s) {
-  return String(s).replace(/\s+/g, " ").trim().slice(0, 280);
-}
-function estimateCount(res) {
-  if (!res || typeof res !== "object") return 0;
-  const arr = res.items || [];
-  return Array.isArray(arr) ? arr.length : 0;
 }
 
 // ../agent-sdk/src/prompt.js
+var ONE_LINE_MAX_CHARS = 280;
+var EPISODE_MAX_CHARS = 1500;
+var PROFILE_MAX_CHARS = 500;
+var PROFILE_MAX_ITEMS = 60;
+var SKILL_MIN_SCORE = 0.1;
+var SKILLS_HEADER_FETCH = "### Agent skills — summary only; call mem_skill with a skill id for the full text";
+var SKILLS_FOOTER = "If the task at hand matches a skill above, call mem_skill with its id before starting: those lines are summaries, the body holds the actual steps.";
 var MEMORY_TYPES = Object.freeze({
   EPISODIC: "episodic",
   EPISODIC_MEMORY: "episodic_memory",
@@ -15868,13 +15938,12 @@ var MEMORY_TYPE_LABELS = Object.freeze({
   [MEMORY_TYPES.AGENT_MEMORY]: "agent",
   [MEMORY_TYPES.RAW_MESSAGE]: "recent"
 });
-function buildMemoryPrompt(memoriesOrBundle, { wrapInCodeBlock = false, sections: requestedSections } = {}) {
+function buildMemoryPrompt(memoriesOrBundle, { wrapInCodeBlock = false, sections: requestedSections, skillFetch = false } = {}) {
   const bundle = Array.isArray(memoriesOrBundle) ? { memories: memoriesOrBundle } : memoriesOrBundle || {};
   const enabled = {
     episodes: true,
     profiles: true,
     skills: true,
-    cases: true,
     rawMessages: true,
     ...requestedSections
   };
@@ -15883,14 +15952,16 @@ function buildMemoryPrompt(memoriesOrBundle, { wrapInCodeBlock = false, sections
   if (enabled.episodes && episodes.length) sections.push(["### Episodic memory", ...episodes].join("\n"));
   const profiles = (bundle.profiles || []).map(formatProfile).filter(Boolean);
   if (enabled.profiles && profiles.length) sections.push(["### User profile", ...profiles].join("\n"));
-  const skills = (bundle.agentMemory?.skills || []).map(formatSkill).filter(Boolean);
-  if (enabled.skills && skills.length) sections.push(["### Agent skills", ...skills].join("\n"));
-  const cases = (bundle.agentMemory?.cases || []).map(formatCase).filter(Boolean);
-  if (enabled.cases && cases.length) sections.push(["### Past task cases", ...cases].join("\n"));
+  const canFetchSkill = skillFetch === true;
+  const skills = canFetchSkill ? filterSkillsByScore(bundle.agentMemory?.skills).map(formatSkill).filter(Boolean) : [];
+  if (enabled.skills && skills.length) {
+    sections.push([SKILLS_HEADER_FETCH, ...skills].join("\n"));
+  }
   const raw = (bundle.rawMessages || []).map(formatRawMessage).filter(Boolean);
   if (enabled.rawMessages && raw.length) sections.push(["### Recent unextracted transcript — provisional, not a stable memory", ...raw].join("\n"));
   if (!sections.length) return "";
-  const body = ["## Relevant memory", ...sections].join("\n\n");
+  const trailer = enabled.skills && skills.length ? [SKILLS_FOOTER] : [];
+  const body = ["## Relevant memory", ...sections, ...trailer].join("\n\n");
   return wrapInCodeBlock ? "```memory\n" + body + "\n```" : body;
 }
 function formatRow(m) {
@@ -15898,7 +15969,7 @@ function formatRow(m) {
   const label = MEMORY_TYPE_LABELS[m.type] || m.type || "memory";
   const text = m.episode || m.summary || m.content || m.text || "";
   if (!text) return "";
-  return `- [${label}] ${oneLine(text)}`;
+  return `- [${label}] ${oneLine(text, EPISODE_MAX_CHARS)}`;
 }
 function formatProfile(p) {
   if (!p) return "";
@@ -15908,20 +15979,19 @@ function formatProfile(p) {
   const tag = data.item_type || "profile";
   return `- [${tag}] ${oneLine(text)}`;
 }
+function filterSkillsByScore(skills, minScore = SKILL_MIN_SCORE) {
+  return (skills || []).filter((skill) => {
+    const score = skill?.relevanceScore ?? skill?.score;
+    return score == null || score >= minScore;
+  });
+}
 function formatSkill(s) {
   if (!s) return "";
+  const id = String(s.id || "").trim();
   const name = s.name || "(unnamed skill)";
-  const desc = s.description || s.content || "";
-  const head = `- [skill] ${name}`;
+  const desc = s.description || "";
+  const head = id ? `- [skill ${id}] ${name}` : `- [skill] ${name}`;
   return desc ? `${head} — ${oneLine(desc)}` : head;
-}
-function formatCase(c) {
-  if (!c) return "";
-  const intent = c.taskIntent || "";
-  const approach = c.approach || "";
-  if (!intent && !approach) return "";
-  const head = intent ? `- [case] ${oneLine(intent)}` : "- [case]";
-  return approach ? `${head} — ${oneLine(approach)}` : head;
 }
 function formatRawMessage(m) {
   if (!m) return "";
@@ -15949,8 +16019,177 @@ function rawMessageText(parts) {
   }
   return chunks.join(" ");
 }
-function oneLine(s) {
-  return String(s).replace(/\s+/g, " ").trim().slice(0, 280);
+function oneLine(s, max = ONE_LINE_MAX_CHARS) {
+  return String(s).replace(/\s+/g, " ").trim().slice(0, max);
+}
+
+// ../agent-sdk/src/search.js
+var noop2 = { info() {
+}, warn() {
+} };
+var QUERY_MAX_CHARS = 1024;
+var DEFAULT_SEARCH_TOPK = 10;
+function hostTimeZone() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  } catch {
+    return "UTC";
+  }
+}
+var NAIVE_ISO = /^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2})?)?$/;
+var ZONED_ISO = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2})?(\.\d+)?(Z|[+-]\d{2}:?\d{2})$/i;
+var ZONE_PROBE_OPTS = {
+  hour12: false,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit"
+};
+function zoneOffsetMinutes(date3, timeZone) {
+  const at = {};
+  for (const part of new Intl.DateTimeFormat("en-US", { timeZone, ...ZONE_PROBE_OPTS }).formatToParts(date3)) {
+    at[part.type] = part.value;
+  }
+  const hour = Number(at.hour) % 24;
+  const wall = Date.UTC(
+    Number(at.year),
+    Number(at.month) - 1,
+    Number(at.day),
+    hour,
+    Number(at.minute),
+    Number(at.second)
+  );
+  return (wall - date3.getTime()) / 6e4;
+}
+function pad(value, width = 2) {
+  return String(Math.abs(value)).padStart(width, "0");
+}
+function zonedToISO(naive, timeZone) {
+  const [datePart, timePart] = naive.split("T");
+  const [year, month, day] = datePart.split("-").map(Number);
+  const [hour, minute, second] = timePart.split(":").map(Number);
+  const wall = Date.UTC(year, month - 1, day, hour, minute, second);
+  const probe = new Date(wall);
+  const rolled = Number.isNaN(wall) || probe.getUTCFullYear() !== year || probe.getUTCMonth() !== month - 1 || probe.getUTCDate() !== day || hour > 23 || minute > 59 || second > 59;
+  if (rolled) throw new RangeError(`invalid timestamp: ${naive}`);
+  let instant = wall;
+  for (let pass = 0; pass < 2; pass += 1) {
+    instant = wall - zoneOffsetMinutes(new Date(instant), timeZone) * 6e4;
+  }
+  const offset = zoneOffsetMinutes(new Date(instant), timeZone);
+  const sign = offset < 0 ? "-" : "+";
+  const offsetHours = Math.trunc(Math.abs(offset) / 60);
+  const offsetMinutes = Math.abs(offset) % 60;
+  return `${pad(year, 4)}-${pad(month)}-${pad(day)}T${pad(hour)}:${pad(minute)}:${pad(second)}${sign}${pad(offsetHours)}:${pad(offsetMinutes)}`;
+}
+function normalizeInstant(value, timeZone = hostTimeZone()) {
+  const text = String(value ?? "").trim();
+  if (!text) return "";
+  if (ZONED_ISO.test(text)) {
+    if (Number.isNaN(new Date(text.replace(" ", "T")).getTime())) {
+      throw new RangeError(`invalid timestamp: ${text}`);
+    }
+    return text;
+  }
+  if (!NAIVE_ISO.test(text)) {
+    const parsed = new Date(text);
+    if (Number.isNaN(parsed.getTime())) throw new RangeError(`invalid timestamp: ${text}`);
+    return parsed.toISOString();
+  }
+  const [datePart, timePart = "00:00:00"] = text.replace(" ", "T").split("T");
+  return zonedToISO(`${datePart}T${timePart.padEnd(8, ":00").slice(0, 8)}`, timeZone);
+}
+function buildTimestampFilter({ startTime, endTime, timeZone } = {}) {
+  const ts = {};
+  if (startTime) {
+    const gte = normalizeInstant(startTime, timeZone);
+    if (gte) ts.gte = gte;
+  }
+  if (endTime) {
+    const lte = normalizeInstant(endTime, timeZone);
+    if (lte) ts.lte = lte;
+  }
+  if (ts.gte && ts.lte && Date.parse(ts.gte) > Date.parse(ts.lte)) {
+    throw new RangeError("startTime must not be after endTime");
+  }
+  return Object.keys(ts).length ? { timestamp: ts } : null;
+}
+async function searchMemory(client, params, log = noop2) {
+  const body = {
+    query: String(params.query || "").slice(0, QUERY_MAX_CHARS),
+    topK: params.topK ?? DEFAULT_SEARCH_TOPK,
+    ...params.rankBy ? { rankBy: params.rankBy } : {},
+    // The gateway reads `filters` (plural). This used to say `filter`, which
+    // Go dropped silently as an unknown field — no caller narrowing has ever
+    // reached /mem/search until now.
+    ...params.filters ? { filters: params.filters } : {},
+    ...Array.isArray(params.memoryTypes) && params.memoryTypes.length ? { memoryTypes: params.memoryTypes } : {}
+  };
+  const { result: res, requestId } = await requestMeta(client, "POST", "/mem/search", body);
+  const memoryCount = Array.isArray(res?.items) ? res.items.length : 0;
+  const profileCount = Array.isArray(res?.profiles) ? res.profiles.length : 0;
+  const rawMessageCount = Array.isArray(res?.rawMessages) ? res.rawMessages.length : 0;
+  const caseCount = Array.isArray(res?.agentMemory?.cases) ? res.agentMemory.cases.length : 0;
+  const skillCount = Array.isArray(res?.agentMemory?.skills) ? res.agentMemory.skills.length : 0;
+  log.info?.(`[everme] memory-search stage=complete result=success queryChars=${body.query.length} topK=${body.topK} memories=${memoryCount} profiles=${profileCount} rawMessages=${rawMessageCount} cases=${caseCount} skills=${skillCount} requestId=${boundedDiagnostic(requestId, 128)}`);
+  if (params.skillFetch === true) {
+    await cacheSkillContent(filterSkillsByScore(res?.agentMemory?.skills));
+  }
+  return {
+    memories: res?.items ?? [],
+    profiles: res?.profiles ?? [],
+    rawMessages: res?.rawMessages ?? [],
+    agentMemory: res?.agentMemory ?? { cases: [], skills: [] },
+    requestId
+  };
+}
+async function getContext(client, _query, opts = {}, log = noop2) {
+  const body = opts.forceRefresh ? { forceRefresh: true } : {};
+  const { result: res, requestId } = await requestMeta(client, "POST", "/mem/context", body);
+  log.info?.(`[everme] memory-context stage=complete result=success forceRefresh=${!!opts.forceRefresh} requestId=${boundedDiagnostic(requestId, 128)}`);
+  if (typeof res?.context === "string" && res.context) {
+    return { context: res.context, memoryCount: res.memoryCount ?? estimateCount(res), requestId };
+  }
+  if (res?.profile) {
+    const rendered = renderProfile(res.profile);
+    if (rendered) {
+      return { context: rendered, memoryCount: estimateProfileCount(res.profile), requestId };
+    }
+  }
+  return { context: "", memoryCount: estimateCount(res), requestId };
+}
+function renderProfile(profile) {
+  if (!profile || typeof profile !== "object") return "";
+  const explicit = (profile.explicit_info || []).slice(0, PROFILE_MAX_ITEMS);
+  const implicit = (profile.implicit_traits || []).slice(
+    0,
+    Math.max(0, PROFILE_MAX_ITEMS - explicit.length)
+  );
+  const lines = [];
+  for (const row of explicit) {
+    const cat = row.category ? `[${row.category}] ` : "";
+    if (row.description) lines.push(`- ${cat}${oneLineText(row.description)}`);
+  }
+  for (const row of implicit) {
+    const t = row.trait ? `${row.trait}: ` : "";
+    if (row.description) lines.push(`- ${t}${oneLineText(row.description)}`);
+  }
+  if (!lines.length) return "";
+  return "```memory\n## Relevant memory\n" + lines.join("\n") + "\n```";
+}
+function estimateProfileCount(profile) {
+  if (!profile) return 0;
+  return (profile.explicit_info?.length || 0) + (profile.implicit_traits?.length || 0);
+}
+function oneLineText(s) {
+  return String(s).replace(/\s+/g, " ").trim().slice(0, PROFILE_MAX_CHARS);
+}
+function estimateCount(res) {
+  if (!res || typeof res !== "object") return 0;
+  const arr = res.items || [];
+  return Array.isArray(arr) ? arr.length : 0;
 }
 
 // ../agent-sdk/src/hooks/query.js
@@ -16017,14 +16256,8 @@ function formatQueryStats(stats) {
   return `raw=${stats?.rawChars ?? 0} query=${stats?.queryChars ?? 0} clamped=${Boolean(stats?.clamped)} removed{${removed}}`;
 }
 
-// ../agent-sdk/src/hooks/state.js
-import os from "node:os";
-import path from "node:path";
-var DEFAULT_STATE_DIR = path.join(os.homedir(), ".everme", "state");
-var STATE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1e3;
-
 // ../memory-mcp/src/mcp.js
-var PKG_VERSION = true ? "0.6.5" : createRequire(import.meta.url)("../package.json").version;
+var PKG_VERSION = true ? "0.7.0" : createRequire(import.meta.url)("../package.json").version;
 var EVERME_MCP_INSTRUCTIONS = [
   "EverMe is the user's long-term memory across sessions.",
   "",
@@ -16041,10 +16274,14 @@ var EVERME_MCP_INSTRUCTIONS = [
   "Whether the conversation is being kept is up to the host, so do not tell",
   "the user something has been saved through you.",
   "",
-  "Two read tools bring memory into the conversation. Use them on your own",
+  "Three read tools bring memory into the conversation. Use them on your own",
   'judgment rather than waiting to be asked to "recall":',
   "1. START of a session — if no non-empty <everme_profile> block was injected, call `mem_context` once. It returns the user's durable Profile ONLY (no semantic search, no episodes, no raw transcript). Do not re-fetch it later in the session unless the user asks to refresh the profile.",
   "2. The user leans on earlier conversations, decisions, conventions, or previously solved problems — call `mem_search` with a SHORT query. Skip it when a non-empty, relevant <everme_recall> block is already in this turn, and never repeat an identical query in one turn. Rows under the provisional unextracted-transcript header are not yet extracted — treat them as a provisional transcript, never as established facts.",
+  "",
+  "3. A skill line in a recall block names an id and a one-line summary, not",
+  "   the skill body. Call `mem_skill` with that id when the summary looks",
+  "   like it applies to the task at hand; skip it when it does not.",
   "",
   "Keep the `mem_search` query short: a few keywords, NOT the whole",
   "conversation or the full user message pasted in — a long query searches",
@@ -16054,18 +16291,109 @@ var EVERME_MCP_INSTRUCTIONS = [
   "If your host exposes MCP Resources (rather than Tools) to you, the same",
   "read data is available at these URIs — read them via `resources/read`:",
   "  mem://profile             → durable user Profile only (equivalent to mem_context)",
-  "  mem://search?q={query}    → search results (equivalent to mem_search)"
+  "  mem://search?q={query}    → search results (equivalent to mem_search)",
+  "  mem://skill?id={id}       → one agent skill's full text (equivalent to mem_skill)"
 ].join("\n");
 var MEM_RESOURCE_PROFILE_URI = "mem://profile";
 var MEM_RESOURCE_SEARCH_TEMPLATE = "mem://search?q={query}&topK={topK}";
+var MEM_RESOURCE_SKILL_TEMPLATE = "mem://skill?id={id}";
 var MEM_RESOURCE_DEFAULT_TOPK = 10;
+var START_TIME_DESCRIPTION = [
+  "ISO 8601 lower bound on WHEN THE CONVERSATION HAPPENED — not when the thing",
+  "being discussed happened. Example: 2026-09-09T00:00:00+08:00.",
+  "",
+  "Omit by default. Omitting costs you a few extra results you can ignore.",
+  "Setting it wrongly costs you everything: a wrong bound returns zero rows,",
+  "and zero rows is indistinguishable from a topic that was never discussed.",
+  "When a bound is arguable, choose the wider window. If in doubt, leave it out.",
+  "",
+  "SET IT ONLY when the user named a window of conversation you can put exact",
+  "dates on:",
+  '  - an explicit date or range: "Sep 3", "before Aug 20", "2026-09-08",',
+  '    "late August to early September"',
+  "  - a calendar-relative word that resolves to exact dates against today:",
+  '    "yesterday", "the day before yesterday", "today", "last week",',
+  '    "this month", "the last three days", "the past two weeks"',
+  "Resolve those against the current date and pass absolute values. Never pass",
+  'the word "yesterday" itself.',
+  "",
+  "DO NOT SET IT in these three cases:",
+  "",
+  '1. Vague recency with no agreed boundary — "recently", "lately", "a while',
+  '   back", "earlier", "previously", "last time", "that other session",',
+  '   "just now". A duration makes a phrase datable ("the last three days");',
+  '   a bare sense of recency does not ("recently"). Search unfiltered, and',
+  "   re-run with a bound only if the results actually come back too old.",
+  "",
+  "2. A date that belongs to the SUBJECT rather than to the conversation.",
+  '   "Which year did I graduate", "which company was I at in 2020", "when did',
+  '   this project start", "is the stack I chose last year still valid" — every',
+  "   one of these was discussed recently and must be searched unfiltered;",
+  "   filtering by the event's year returns nothing.",
+  '   This still holds when the user did discuss it at the time. "The stack I',
+  '   chose last year" was probably decided in a conversation last year, but',
+  "   the user is asking whether it still stands, and every later revision or",
+  "   reversal is dated after that window. Bounding to last year hides exactly",
+  "   the rows that answer the question.",
+  "   Rule of thumb: a past tense describing the EVENT is not a filter. Only a",
+  "   phrase describing WHEN YOU TWO TALKED is.",
+  "",
+  "3. A date-shaped string that is content, not a constraint — a version number",
+  '   ("v2026.09"), a timestamp quoted from a log or stack trace, a cron',
+  "   expression, a date format the user is asking how to parse. Put the string",
+  "   in `query` instead of in a bound."
+].join("\n");
+var END_TIME_DESCRIPTION = [
+  "ISO 8601 upper bound. Same rules as startTime; must not be earlier than it.",
+  'Either bound may be given alone: "since Sep 1" is startTime only, "before',
+  'Aug 20" is endTime only. For a single day, span the whole day',
+  '(T00:00:00 -> T23:59:59). Never set an endTime in the future: for "today" or',
+  '"this month", pass startTime alone.',
+  "",
+  "Both bounds assume the user's local timezone when no offset is given; pass",
+  "the offset explicitly when you can."
+].join("\n");
+var MEM_SKILL_DESCRIPTION = [
+  "Read the FULL TEXT of one agent skill, addressed by the id printed in an",
+  '"Agent skills" line of a recall block or of a mem_search result.',
+  "",
+  "Those lines carry the skill's name and a one-line summary only; the body —",
+  "the actual steps, checks and decision points — is what this returns. Call it",
+  "when a summary looks like it applies to the task in hand, and skip it when it",
+  "does not: the summaries exist so you can make that call without paying for",
+  "every body.",
+  "",
+  "The id must come from a search result seen in this session. Ids are not",
+  "guessable, and one that was never retrieved here is reported as a miss —",
+  "re-run mem_search rather than inventing an id."
+].join("\n");
+var MEM_SKILL_ID_DESCRIPTION = 'The skill id exactly as printed in the "[skill <id>]" prefix of an Agent skills line.';
+var MEM_SKILL_MISSING_ID = 'mem_skill requires an `id`: the value printed in the "[skill <id>]" prefix of an Agent skills line.';
+function skillCacheMiss(id) {
+  return `skill ${id} is not in this machine's local skill cache. Only skills returned by a recent search on this machine are cached, and entries expire. Run mem_search again and use an id from its Agent skills lines.`;
+}
+function renderSkill(skill) {
+  const head = `## Agent skill: ${skill.name || "(unnamed skill)"}`;
+  const meta2 = `_(id: ${skill.id}${skill.cachedAt ? `, cached ${skill.cachedAt}` : ""})_`;
+  const parts = [head, meta2];
+  if (skill.description) parts.push(skill.description);
+  parts.push(skill.content);
+  return parts.join("\n\n");
+}
+var QUERY_TIME_HYGIENE = [
+  "When you set a time bound, strip the time words out of `query`. For",
+  '"what did we decide last Tuesday about the recall pipeline", query is',
+  '"recall pipeline decision" — "last Tuesday" belongs in startTime/endTime,',
+  "and leaving it in the query dilutes the match."
+].join("\n");
 function createMcpServer({ logger: logger2, config: config2 } = {}) {
   const log = logger2 || { info() {
   }, warn() {
   } };
-  const cfg = resolveConfig(config2 || {});
+  const cfg = resolveConfig({ ...config2 || {}, clientKind: "mcp", clientVersion: PKG_VERSION });
   assertConfigUsable(cfg, { requireAgentId: config2 === void 0 });
   const client = createClient(cfg, log);
+  const skillCache = createSkillContentCache();
   const server = new Server(
     { name: "everme-memory-mcp", version: PKG_VERSION },
     {
@@ -16084,17 +16412,28 @@ function createMcpServer({ logger: logger2, config: config2 } = {}) {
     tools: [
       {
         name: "mem_search",
-        description: 'Search EverMe memory for entries relevant to a free-text query. Returns the top-K matching entries (episodic, profile, agent cases/skills, recent raw transcript) rendered as markdown; rows under the provisional transcript header are not yet extracted and must not be quoted as established facts.\n\nCall this proactively — without being asked — whenever the user references prior conversations, earlier decisions, project conventions, or previously solved problems ("what did we say about X", "remember when…", "like last time", "did we fix this before", "continue where we left off").\n\nSkip the call when the host already injected a non-empty, relevant <everme_recall> block this turn, and do not repeat an identical query within the same turn.\n\n`query` is KEYWORDS ONLY — the topic, not the conversation. Two to eight words, under ~100 characters, no sentences copied from the transcript. Never pass the user\'s whole message, a file, a log, a diff, or your own reasoning: the search embeds whatever you send, so boilerplate crowds out the topic and the results get worse. Good: "oauth token rotation". Bad: the last three turns pasted in. Rely on the default topK of 10; only raise it if a first search genuinely missed.',
+        description: 'Search EverMe memory for entries relevant to a free-text query. Returns the top-K matching entries (episodic, profile, agent skills, recent raw transcript) rendered as markdown; rows under the provisional transcript header are not yet extracted and must not be quoted as established facts.\n\nCall this proactively — without being asked — whenever the user references prior conversations, earlier decisions, project conventions, or previously solved problems ("what did we say about X", "remember when…", "like last time", "did we fix this before", "continue where we left off").\n\nSkip the call when the host already injected a non-empty, relevant <everme_recall> block this turn, and do not repeat an identical query within the same turn.\n\n`query` is KEYWORDS ONLY — the topic, not the conversation. Two to eight words, under ~100 characters, no sentences copied from the transcript. Never pass the user\'s whole message, a file, a log, a diff, or your own reasoning: the search embeds whatever you send, so boilerplate crowds out the topic and the results get worse. Good: "oauth token rotation". Bad: the last three turns pasted in. Rely on the default topK of 10; only raise it if a first search genuinely missed.',
         inputSchema: {
           type: "object",
           properties: {
             query: {
               type: "string",
-              description: "Keywords naming the topic to recall — two to eight words, under ~100 characters. Not a sentence from the transcript, not the user's whole message, not a pasted file or log."
+              description: "Keywords naming the topic to recall — two to eight words, under ~100 characters. Not a sentence from the transcript, not the user's whole message, not a pasted file or log.\n\n" + QUERY_TIME_HYGIENE
             },
-            topK: { type: "integer", description: "Max entries to return", default: 10 }
+            topK: { type: "integer", description: "Max entries to return", default: 10 },
+            startTime: { type: "string", description: START_TIME_DESCRIPTION },
+            endTime: { type: "string", description: END_TIME_DESCRIPTION }
           },
           required: ["query"]
+        }
+      },
+      {
+        name: "mem_skill",
+        description: MEM_SKILL_DESCRIPTION,
+        inputSchema: {
+          type: "object",
+          properties: { id: { type: "string", description: MEM_SKILL_ID_DESCRIPTION } },
+          required: ["id"]
         }
       },
       {
@@ -16125,14 +16464,31 @@ function createMcpServer({ logger: logger2, config: config2 } = {}) {
         case "mem_search": {
           const { query, stats } = extractUserIntent(args.query);
           log.info?.(`[everme] mem_search query: ${formatQueryStats(stats)}`);
+          let filters;
+          try {
+            filters = buildTimestampFilter(args);
+          } catch (err) {
+            if (!(err instanceof RangeError)) throw err;
+            return errResp(timeBoundHelp(err));
+          }
           const res = await searchMemory(
             client,
-            { query, topK: normalizeTopK(args.topK, cfg.topK || 10) },
+            { query, topK: normalizeTopK(args.topK, cfg.topK || 10), filters, skillFetch: true },
             log
           );
           return okMarkdown(
-            appendRequestID(redactError(renderSearchResultsAsMarkdown(query, res)), res?.requestId)
+            appendRequestID(
+              redactError(renderSearchResultsAsMarkdown(query, res) + appliedWindow(filters)),
+              res?.requestId
+            )
           );
+        }
+        case "mem_skill": {
+          const id = String(args.id || "").trim();
+          if (!id) return errResp(MEM_SKILL_MISSING_ID);
+          const skill = await skillCache.read(id);
+          if (!skill) return errResp(skillCacheMiss(id));
+          return okMarkdown(redactError(renderSkill(skill)));
         }
         case "mem_context": {
           const ctx = await getContext(client, "", { forceRefresh: args.forceRefresh === true }, log);
@@ -16165,6 +16521,12 @@ function createMcpServer({ logger: logger2, config: config2 } = {}) {
         name: "EverMe semantic search",
         description: 'Search EverMe memory for entries relevant to a free-text query. Use when the user references prior conversations ("what did we say about X", "remember when…"). topK defaults to 10; omit to use the default.',
         mimeType: "text/markdown"
+      },
+      {
+        uriTemplate: MEM_RESOURCE_SKILL_TEMPLATE,
+        name: "EverMe agent skill",
+        description: `The full text of one agent skill, addressed by the id printed in an "Agent skills" line. Read it when that line's summary looks relevant to the task in hand. The id must come from a search result in this session — ids are not guessable and an unknown one is reported as a miss rather than approximated.`,
+        mimeType: "text/markdown"
       }
     ]
   }));
@@ -16193,7 +16555,7 @@ function createMcpServer({ logger: logger2, config: config2 } = {}) {
         if (!query) {
           throw new Error(`mem://search requires non-empty 'q' parameter; got URI: ${uri}`);
         }
-        const res = await searchMemory(client, { query, topK }, log);
+        const res = await searchMemory(client, { query, topK, skillFetch: true }, log);
         return {
           contents: [{
             uri,
@@ -16206,7 +16568,16 @@ function createMcpServer({ logger: logger2, config: config2 } = {}) {
           }]
         };
       }
-      throw new Error(`unknown EverMe resource URI: ${uri} (supported: mem://profile, mem://search?q=…)`);
+      if (parsed.host === "skill") {
+        const id = String(parsed.searchParams.get("id") || "").trim();
+        if (!id) throw new Error(`mem://skill requires a non-empty 'id' parameter; got URI: ${uri}`);
+        const skill = await skillCache.read(id);
+        if (!skill) throw new Error(skillCacheMiss(id));
+        return {
+          contents: [{ uri, mimeType: "text/markdown", text: redactError(renderSkill(skill)) }]
+        };
+      }
+      throw new Error(`unknown EverMe resource URI: ${uri} (supported: mem://profile, mem://search?q=…, mem://skill?id=…)`);
     } catch (err) {
       const safe = describeError(err);
       log.warn?.(`[everme-mcp] resources/read ${uri} failed: ${safe}`);
@@ -16239,7 +16610,7 @@ function parseMemSearchURI(uri, defaultTopK) {
   return { query, topK };
 }
 function renderSearchResultsAsMarkdown(query, res) {
-  const body = buildMemoryPrompt(res, { wrapInCodeBlock: false });
+  const body = buildMemoryPrompt(res, { wrapInCodeBlock: false, skillFetch: true });
   const header = `## EverMe search results for "${query}"`;
   if (!body) return `${header}
 
@@ -16259,6 +16630,16 @@ function appendRequestID(text, requestId) {
   return `${text}
 
 _(requestId: ${requestId})_`;
+}
+function appliedWindow(filters) {
+  if (!filters?.timestamp) return "";
+  const { gte, lte } = filters.timestamp;
+  return `
+
+_Time filter applied: ${gte ?? "…"} → ${lte ?? "…"}_`;
+}
+function timeBoundHelp(err) {
+  return `${err.message}. Pass ISO 8601 instants, e.g. startTime "2026-09-09T00:00:00+08:00" and endTime "2026-09-09T23:59:59+08:00"; omit both to search unfiltered.`;
 }
 function errResp(msg) {
   return {

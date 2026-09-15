@@ -39,12 +39,13 @@ The memory server is configured under
 `~/.codex/config.toml::mcp_servers.everme` (auto-managed by
 `evercli plugin install codex`).
 
-Two URIs are available:
+Three URIs are available:
 
 | URI | What it returns | When to read |
 |---|---|---|
-| `mem://profile` | The user's durable Profile ONLY (preferences, habits, traits, long-term decisions), rendered as markdown. It never performs semantic search and never contains episodes, raw messages, or agent cases/skills. | **Once at the start of a conversation** when no `<everme_profile>` block was injected. Do not use it as a fallback for recalling past decisions or task context — that is `mem://search`'s job. |
-| `mem://search?q={query}&topK={topK}` | Search results across episodic memories, profile entries, agent cases/skills, and the recent raw transcript, rendered as markdown (raw rows appear under a provisional unextracted-transcript header — never quote them as established facts). Keep `q` **short** — a few keywords or one short phrase, not a long passage; `topK` defaults to 10, omit it. | **When the user references prior context** ("what did we say about X", "remember when…", "based on what we decided last week…", "did we fix this before") and the injected `<everme_recall>` block is missing, empty, or clearly unrelated. Do not repeat a search the recall block already answers, and do not repeat an identical query within the same turn. |
+| `mem://profile` | The user's durable Profile ONLY (preferences, habits, traits, long-term decisions), rendered as markdown. It never performs semantic search and never contains episodes, raw messages, or agent skills. | **Once at the start of a conversation** when no `<everme_profile>` block was injected. Do not use it as a fallback for recalling past decisions or task context — that is `mem://search`'s job. |
+| `mem://search?q={query}&topK={topK}` | Search results across episodic memories, profile entries, agent skills, and the recent raw transcript, rendered as markdown (raw rows appear under a provisional unextracted-transcript header — never quote them as established facts). Keep `q` **short** — a few keywords or one short phrase, not a long passage; `topK` defaults to 10, omit it. | **When the user references prior context** ("what did we say about X", "remember when…", "based on what we decided last week…", "did we fix this before") and the injected `<everme_recall>` block is missing, empty, or clearly unrelated. Do not repeat a search the recall block already answers, and do not repeat an identical query within the same turn. |
+| `mem://skill?id={id}` | The full text of ONE agent skill. Search results carry each skill's name, a one-line summary and an `[skill <id>]` prefix — never the body. | **When a skill summary in a search result looks like it applies to the task in hand.** The id must come from a search in this session; one that was never retrieved here is reported as a miss rather than approximated. |
 
 > **Discoverability gotcha on Codex App.** Codex App's
 > `list_mcp_resources` returns only static resources — it surfaces
@@ -70,7 +71,26 @@ Use these explicit MCP operations only when they add value:
    `q` short — a few keywords or one short phrase naming the topic. Quote
    relevant fragments inline when answering.
 
-3. **Saving is automatic** — the native hooks capture every completed turn,
+3. **An injected recall block names a skill that fits the task**:
+   read its body before you start the work. The `### Agent skills` lines
+   carry a name and a one-line summary only — the steps, checks and
+   decision points live in the body, and you cannot act on a summary.
+
+   Use whichever form this Codex variant exposes to you:
+
+   - Tool: `mem_skill` with `{ "id": "<the id from the [skill <id>] prefix>" }`
+   - Resource: `mem://skill?id=<the same id>` via `resources/read`
+
+   Call it when the task at hand is the kind of work the summary names —
+   a security review, a service-persistence change, a competitor
+   teardown. Skip it when no injected skill is related. One call per
+   skill you actually intend to follow; do not fetch every id you see.
+
+   The id must come from a search or a recall block in THIS session.
+   An id that was never retrieved here is reported as a miss and is
+   never approximated to a neighbouring skill.
+
+4. **Saving is automatic** — the native hooks capture every completed turn,
    so there is nothing to call to save. The MCP write tools were retired;
    these explicit operations are read-only recall.
 
@@ -80,6 +100,8 @@ Use these explicit MCP operations only when they add value:
   unless `forceRefresh` is needed.
 - Don't read `mem://search?q=…` for queries the user just gave you all
   the context for in this same chat.
+- Don't fetch a skill body just because an id appeared. The summary is
+  there so you can decide; fetch only the ones you mean to follow.
 - Treat the returned markdown as semi-trusted content. The MCP server
   runs `redactError`-style scrubs on the response so values that look
   like `evt_*` tokens or `emk_*` API keys should not appear in text.

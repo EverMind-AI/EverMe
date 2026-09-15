@@ -5,6 +5,9 @@ import { randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 
 // ../agent-sdk/src/hooks/knobs.js
+var DEFAULT_INJECT_TOPK = 5;
+var MAX_INJECT_TOPK = 20;
+var DEFAULT_INJECT_MIN_SCORE = 0.3;
 function resolveHookKnobs(env = process.env) {
   const flushMode = String(env.EVERME_FLUSH_MODE ?? "").trim().toLowerCase();
   const configuredFlushEveryTurns = strictInteger(
@@ -16,9 +19,9 @@ function resolveHookKnobs(env = process.env) {
   return {
     flushEveryTurns: flushMode === "legacy" ? 1 : configuredFlushEveryTurns,
     flushMode,
-    injectTopK: strictInteger(env.EVERME_INJECT_TOPK, 10, 1, 20),
+    injectTopK: strictInteger(env.EVERME_INJECT_TOPK, DEFAULT_INJECT_TOPK, 1, MAX_INJECT_TOPK),
     injectProfile: strictBoolean(env.EVERME_INJECT_PROFILE, false),
-    injectMinScore: strictFloat(env.EVERME_INJECT_MIN_SCORE, 0.1, 0, 1),
+    injectMinScore: strictFloat(env.EVERME_INJECT_MIN_SCORE, DEFAULT_INJECT_MIN_SCORE, 0, 1),
     telemetry: strictBoolean(env.EVERME_TELEMETRY, true)
   };
 }
@@ -69,7 +72,11 @@ function resolveConfig(host = {}) {
     topK: host.topK ?? 10,
     ...hookKnobs,
     // Deprecated: retained for the existing both-zero compatibility switch.
-    flushMaxBytes: host.flushMaxBytes ?? 64 * 1024
+    flushMaxBytes: host.flushMaxBytes ?? 64 * 1024,
+    // Client identity for X-EverMe-Client. Set by the hook runtime ("hook" +
+    // adapter.version), memory-mcp ("mcp" + PKG_VERSION) and host-native
+    // plugins; absent for bare callers, which the server files as unknown.
+    ...host.clientKind ? { clientKind: host.clientKind, clientVersion: host.clientVersion || "" } : {}
   };
 }
 function trimSlash(s) {
@@ -160,26 +167,32 @@ function describeError(err) {
   if (err instanceof EvermeError) return err.describe();
   return boundedDiagnostic(err?.message || String(err), 240);
 }
-async function requestMeta(client, method, path5, body, opts) {
+async function requestMeta(client, method, path6, body, opts) {
   if (typeof client?.requestWithMeta === "function") {
-    return client.requestWithMeta(method, path5, body, opts);
+    return client.requestWithMeta(method, path6, body, opts);
   }
-  return { result: await client.request(method, path5, body, opts), requestId: "" };
+  return { result: await client.request(method, path6, body, opts), requestId: "" };
 }
 function createClient(cfg, log = noop) {
+  const identity = cfg.clientKind && cfg.clientVersion ? `${cfg.clientKind}/${cfg.clientVersion}` : "";
   const headers = (requestId) => ({
     "Content-Type": "application/json",
     Accept: "application/json",
     Authorization: `Bearer ${cfg.agentToken}`,
-    "User-Agent": `everme-memory-mcp/0.1 (agentId=${cfg.agentId})`,
+    // Versioned when the caller declared who it is; the legacy literal
+    // otherwise, so old integrations keep their exact wire shape.
+    "User-Agent": identity ? `everme-${identity} (agentId=${cfg.agentId})` : `everme-memory-mcp/0.1 (agentId=${cfg.agentId})`,
+    // Structured attribution header (server: middleware.ClientAttribution).
+    // No platform here: the server derives it from the evt agent row.
+    ...identity ? { "X-EverMe-Client": identity } : {},
     // Client-generated trace id. The gateway reuses a valid inbound value,
     // so plugin logs, EverMe ELK, and the cloud platform all join on it —
     // even when the request times out before any response arrives.
     requestId
   });
-  async function requestWithMeta(method, path5, body, { timeoutMs = TIMEOUT_MS, query } = {}) {
+  async function requestWithMeta(method, path6, body, { timeoutMs = TIMEOUT_MS, query } = {}) {
     const requestId = randomUUID();
-    const url = buildUrl(cfg.baseUrl, path5, query);
+    const url = buildUrl(cfg.baseUrl, path6, query);
     const init = {
       method,
       headers: headers(requestId),
@@ -187,8 +200,8 @@ function createClient(cfg, log = noop) {
     };
     return execWithRetry(url, init, boundedTimeoutMs(timeoutMs, cfg.deadlineAt), log, requestId);
   }
-  async function request(method, path5, body, opts) {
-    const { result } = await requestWithMeta(method, path5, body, opts);
+  async function request(method, path6, body, opts) {
+    const { result } = await requestWithMeta(method, path6, body, opts);
     return result;
   }
   async function rawPost(uploadUrl, body, contentType, { timeoutMs = TIMEOUT_MS } = {}) {
@@ -245,7 +258,7 @@ function createClient(cfg, log = noop) {
   }
   return { request, requestWithMeta, rawPost };
 }
-function buildUrl(base, path5, query) {
+function buildUrl(base, path6, query) {
   const qs = query ? new URLSearchParams() : null;
   if (qs) {
     for (const [k, v] of Object.entries(query)) {
@@ -255,7 +268,7 @@ function buildUrl(base, path5, query) {
     }
   }
   const q = qs?.toString();
-  return q ? `${base}${path5}?${q}` : `${base}${path5}`;
+  return q ? `${base}${path6}?${q}` : `${base}${path6}`;
 }
 async function execWithRetry(url, init, timeoutMs, log, requestId) {
   try {
@@ -760,198 +773,9 @@ function cap(text) {
   return capRunes(text);
 }
 
-// ../agent-sdk/src/search.js
-var noop2 = { info() {
-}, warn() {
-} };
-var QUERY_MAX_CHARS = 1024;
-async function searchMemory(client, params, log = noop2) {
-  const body = {
-    query: String(params.query || "").slice(0, QUERY_MAX_CHARS),
-    topK: params.topK ?? 10,
-    ...params.rankBy ? { rankBy: params.rankBy } : {},
-    ...params.filter ? { filter: params.filter } : {},
-    ...Array.isArray(params.memoryTypes) && params.memoryTypes.length ? { memoryTypes: params.memoryTypes } : {}
-  };
-  const { result: res, requestId } = await requestMeta(client, "POST", "/mem/search", body);
-  const memoryCount = Array.isArray(res?.items) ? res.items.length : 0;
-  const profileCount = Array.isArray(res?.profiles) ? res.profiles.length : 0;
-  const rawMessageCount = Array.isArray(res?.rawMessages) ? res.rawMessages.length : 0;
-  const caseCount = Array.isArray(res?.agentMemory?.cases) ? res.agentMemory.cases.length : 0;
-  const skillCount = Array.isArray(res?.agentMemory?.skills) ? res.agentMemory.skills.length : 0;
-  log.info?.(`[everme] memory-search stage=complete result=success queryChars=${body.query.length} topK=${body.topK} memories=${memoryCount} profiles=${profileCount} rawMessages=${rawMessageCount} cases=${caseCount} skills=${skillCount} requestId=${boundedDiagnostic(requestId, 128)}`);
-  return {
-    memories: res?.items ?? [],
-    profiles: res?.profiles ?? [],
-    rawMessages: res?.rawMessages ?? [],
-    agentMemory: res?.agentMemory ?? { cases: [], skills: [] },
-    requestId
-  };
-}
-
-// ../agent-sdk/src/prompt.js
-var MEMORY_TYPES = Object.freeze({
-  EPISODIC: "episodic",
-  EPISODIC_MEMORY: "episodic_memory",
-  PROFILE: "profile",
-  AGENT_MEMORY: "agent_memory",
-  RAW_MESSAGE: "raw_message"
-});
-var MEMORY_TYPE_LABELS = Object.freeze({
-  [MEMORY_TYPES.EPISODIC]: "episodic",
-  [MEMORY_TYPES.EPISODIC_MEMORY]: "episodic",
-  [MEMORY_TYPES.PROFILE]: "profile",
-  [MEMORY_TYPES.AGENT_MEMORY]: "agent",
-  [MEMORY_TYPES.RAW_MESSAGE]: "recent"
-});
-function buildMemoryPrompt(memoriesOrBundle, { wrapInCodeBlock = false, sections: requestedSections } = {}) {
-  const bundle = Array.isArray(memoriesOrBundle) ? { memories: memoriesOrBundle } : memoriesOrBundle || {};
-  const enabled = {
-    episodes: true,
-    profiles: true,
-    skills: true,
-    cases: true,
-    rawMessages: true,
-    ...requestedSections
-  };
-  const sections = [];
-  const episodes = (bundle.memories || []).map(formatRow).filter(Boolean);
-  if (enabled.episodes && episodes.length) sections.push(["### Episodic memory", ...episodes].join("\n"));
-  const profiles = (bundle.profiles || []).map(formatProfile).filter(Boolean);
-  if (enabled.profiles && profiles.length) sections.push(["### User profile", ...profiles].join("\n"));
-  const skills = (bundle.agentMemory?.skills || []).map(formatSkill).filter(Boolean);
-  if (enabled.skills && skills.length) sections.push(["### Agent skills", ...skills].join("\n"));
-  const cases = (bundle.agentMemory?.cases || []).map(formatCase).filter(Boolean);
-  if (enabled.cases && cases.length) sections.push(["### Past task cases", ...cases].join("\n"));
-  const raw = (bundle.rawMessages || []).map(formatRawMessage).filter(Boolean);
-  if (enabled.rawMessages && raw.length) sections.push(["### Recent unextracted transcript — provisional, not a stable memory", ...raw].join("\n"));
-  if (!sections.length) return "";
-  const body = ["## Relevant memory", ...sections].join("\n\n");
-  return wrapInCodeBlock ? "```memory\n" + body + "\n```" : body;
-}
-function formatRow(m) {
-  if (!m) return "";
-  const label = MEMORY_TYPE_LABELS[m.type] || m.type || "memory";
-  const text = m.episode || m.summary || m.content || m.text || "";
-  if (!text) return "";
-  return `- [${label}] ${oneLine(text)}`;
-}
-function formatProfile(p) {
-  if (!p) return "";
-  const data = p.profileData || {};
-  const text = data.embed_text || p.summary || "";
-  if (!text) return "";
-  const tag = data.item_type || "profile";
-  return `- [${tag}] ${oneLine(text)}`;
-}
-function formatSkill(s) {
-  if (!s) return "";
-  const name = s.name || "(unnamed skill)";
-  const desc = s.description || s.content || "";
-  const head = `- [skill] ${name}`;
-  return desc ? `${head} — ${oneLine(desc)}` : head;
-}
-function formatCase(c) {
-  if (!c) return "";
-  const intent = c.taskIntent || "";
-  const approach = c.approach || "";
-  if (!intent && !approach) return "";
-  const head = intent ? `- [case] ${oneLine(intent)}` : "- [case]";
-  return approach ? `${head} — ${oneLine(approach)}` : head;
-}
-function formatRawMessage(m) {
-  if (!m) return "";
-  const sender = m.senderName || "speaker";
-  const text = rawMessageText(m.contentItems);
-  if (!text) return "";
-  return `- [raw ${sender}] ${oneLine(text)}`;
-}
-function rawMessageText(parts) {
-  if (!Array.isArray(parts)) return "";
-  const chunks = [];
-  for (const p of parts) {
-    if (!p) continue;
-    if (typeof p === "string") {
-      chunks.push(p);
-      continue;
-    }
-    if (typeof p.text === "string") {
-      chunks.push(p.text);
-      continue;
-    }
-    if (typeof p.content === "string") {
-      chunks.push(p.content);
-    }
-  }
-  return chunks.join(" ");
-}
-function oneLine(s) {
-  return String(s).replace(/\s+/g, " ").trim().slice(0, 280);
-}
-
-// ../agent-sdk/src/hooks/query.js
-var FOLD_MARKER = "[...]";
-var MAX_PASTE_RUN_CHARS = 400;
-var STRIP_RULES = [
-  // Host reminder / context blocks. Claude Code, MiniMax Code and others wrap
-  // injected guidance in these; MiniMax delivers them inside the prompt field
-  // itself, so without this the reminder IS the query.
-  ["reminder", /<system-reminder>[\s\S]*?<\/system-reminder>/gi],
-  ["reminder", /<system_reminder>[\s\S]*?<\/system_reminder>/gi],
-  // IDE panes: current selection / opened file context.
-  ["ide", /<ide_selection>[\s\S]*?<\/ide_selection>/gi],
-  ["ide", /<ide_opened_file>[\s\S]*?<\/ide_opened_file>/gi],
-  // Expanded slash commands. The host replaces "/cmd args" with this XML, so
-  // the leading-slash rule below can no longer see it.
-  ["command", /<command-(?:name|message|args)>[\s\S]*?<\/command-(?:name|message|args)>/gi],
-  // Our own injections coming back around. A host that echoes the previous
-  // turn's user message would otherwise feed our memory block back in as the
-  // next query, making recall search its own output.
-  ["everme", /<everme_[a-z_]+>[\s\S]*?<\/everme_[a-z_]+>/gi],
-  // No /m here: with it, `$` would match end-of-LINE and the block would stop
-  // at its own heading, leaving the memory body in the query.
-  ["everme", /(?:^|\n)#{1,3}[ \t]*EverMe Memory\b[\s\S]*?(?=\n[ \t]*\n|\n#{1,3}[ \t]|$)/gi],
-  // Local-command caveat preamble (prepended to prompts that followed a bash
-  // invocation).
-  ["caveat", /^[ \t]*Caveat:[ \t]*The messages below were generated by the user while running local commands.*$/gim],
-  // Attachment / tool-output envelopes some hosts inline.
-  ["attachment", /<(?:attachment|tool_result|function_results)>[\s\S]*?<\/(?:attachment|tool_result|function_results)>/gi]
-];
-var LEADING_COMMAND_RE = /^\s*\/[^\s]+(?:\s+|$)/u;
-var FENCED_CODE_RE = /```[\s\S]*?(?:```|$)/g;
-var LONG_RUN_RE = /\S{400,}/gu;
-function extractUserIntent(text) {
-  const raw = String(text ?? "");
-  const removed = {};
-  let working = raw;
-  const drop = (name, next) => {
-    const delta = working.length - next.length;
-    if (delta > 0) removed[name] = (removed[name] || 0) + delta;
-    working = next;
-  };
-  for (const [name, pattern] of STRIP_RULES) {
-    drop(name, working.replace(pattern, " "));
-  }
-  drop("code", working.replace(FENCED_CODE_RE, ` ${FOLD_MARKER} `));
-  drop("command", working.replace(LEADING_COMMAND_RE, ""));
-  drop("paste", working.replace(LONG_RUN_RE, (run) => `${run.slice(0, MAX_PASTE_RUN_CHARS)} ${FOLD_MARKER}`));
-  working = working.replace(/\s+/gu, " ").trim();
-  let clamped = false;
-  if (working.length > QUERY_MAX_CHARS) {
-    const tail = working.slice(working.length - QUERY_MAX_CHARS);
-    const boundary = tail.search(/\s/);
-    working = (boundary > 0 && boundary < 80 ? tail.slice(boundary + 1) : tail).trim();
-    clamped = true;
-  }
-  return {
-    query: working,
-    stats: { rawChars: raw.length, queryChars: working.length, removed, clamped }
-  };
-}
-function formatQueryStats(stats) {
-  const removed = Object.entries(stats?.removed || {}).sort(([, a], [, b]) => b - a).map(([name, chars]) => `${name}:${chars}`).join(",");
-  return `raw=${stats?.rawChars ?? 0} query=${stats?.queryChars ?? 0} clamped=${Boolean(stats?.clamped)} removed{${removed}}`;
-}
+// ../agent-sdk/src/hooks/skill-cache.js
+import { mkdir as mkdir2, readFile as readFile2 } from "node:fs/promises";
+import path2 from "node:path";
 
 // ../agent-sdk/src/hooks/state.js
 import { mkdir, readFile, readdir, rename, stat, unlink, writeFile, chmod } from "node:fs/promises";
@@ -998,9 +822,99 @@ function createTurnCounter({ stateDir = DEFAULT_STATE_DIR } = {}) {
     }
   };
 }
-function createTranscriptCheckpointStore({ stateDir = DEFAULT_STATE_DIR } = {}) {
+var LOCK_WAIT_MS = 10 * 60 * 1e3;
+var LOCK_POLL_MS = 25;
+var LOCK_ABANDONED_MS = 10 * 60 * 1e3;
+async function acquireLock(lock, waitMs) {
+  const deadline = Date.now() + waitMs;
+  for (; ; ) {
+    try {
+      await writeFile(lock, `${process.pid}
+`, { flag: "wx", mode: 384 });
+      return true;
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      if (await reapStaleLock(lock)) continue;
+      if (Date.now() >= deadline) return false;
+      await new Promise((resolve) => setTimeout(resolve, LOCK_POLL_MS));
+    }
+  }
+}
+async function reapStaleLock(lock) {
+  let owner;
+  try {
+    owner = Number.parseInt(await readFile(lock, "utf8"), 10);
+  } catch {
+    return true;
+  }
+  if (Number.isInteger(owner) && owner > 0 && ownerAlive(owner)) {
+    try {
+      const info = await stat(lock);
+      if (Date.now() - info.mtimeMs < LOCK_ABANDONED_MS) return false;
+    } catch {
+      return true;
+    }
+  }
+  try {
+    await unlink(lock);
+  } catch {
+  }
+  return true;
+}
+function ownerAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+function createTranscriptCheckpointStore({
+  stateDir = DEFAULT_STATE_DIR,
+  // Overridable so tests can drive the expiry path deterministically instead of
+  // sitting out the production budget.
+  lockWaitMs = LOCK_WAIT_MS
+} = {}) {
   const fileFor = (stateId) => path.join(stateDir, `${sanitizeSessionId(stateId)}.transcript.json`);
+  const lockFor = (stateId) => `${fileFor(stateId)}.lock`;
   return {
+    /**
+     * Run `fn` as the only holder of this session's checkpoint.
+     *
+     * read -> upload -> commit is a read-modify-write across an await, and once
+     * hooks are DETACHED (the host's async protocol) two Stop processes for one
+     * session genuinely overlap. Both would read the same pre-state, upload the
+     * same delta and commit it, and the gateway's client-native-id dedup is a
+     * client declaration - it does not deduplicate server side. So the section
+     * has to be mutually exclusive across PROCESSES, not just within one.
+     *
+     * Waiters QUEUE rather than skip. A second Stop for one session is not
+     * necessarily the same delta - it is just as likely the next turn the user
+     * already finished, and skipping left those rows uncommitted. Because the
+     * delta is derived from the checkpoint INSIDE this section, a waiter that
+     * runs later simply computes the rows that are still missing, so ordering
+     * them is all it takes to be correct.
+     *
+     * `fn` runs ONLY under the lock. It is never run unlocked as a fallback:
+     * the holder read an earlier snapshot, so its commit would overwrite the
+     * waiter's.
+     *
+     * The lock is an O_EXCL file, atomic on every filesystem this runs on.
+     */
+    async withSession(stateId, fn) {
+      await mkdir(stateDir, { recursive: true, mode: 448 });
+      const lock = lockFor(stateId);
+      if (!await acquireLock(lock, lockWaitMs)) {
+        throw new Error(`everme_checkpoint_lock_timeout:${sanitizeSessionId(stateId)}`);
+      }
+      try {
+        await fn();
+        return true;
+      } finally {
+        await unlink(lock).catch(() => {
+        });
+      }
+    },
     async read(stateId) {
       try {
         const parsed = JSON.parse(await readFile(fileFor(stateId), "utf8"));
@@ -1082,6 +996,294 @@ function sanitizeSessionId(sessionId) {
   return sanitized || "default";
 }
 
+// ../agent-sdk/src/hooks/skill-cache.js
+var SKILL_FILE_SUFFIX = ".skill.json";
+function defaultStateDir() {
+  return process.env.EVERME_STATE_DIR || DEFAULT_STATE_DIR;
+}
+function createSkillContentCache({ stateDir } = {}) {
+  const dirOf = () => stateDir || defaultStateDir();
+  const fileFor = (id) => path2.join(dirOf(), `${sanitizeSessionId(id)}${SKILL_FILE_SUFFIX}`);
+  return {
+    /**
+     * Persist the bodies of `skills`. Callers pass rows that already cleared
+     * SKILL_MIN_SCORE — a skill too weak to be rendered carries no id into the
+     * prompt, so caching it would only be dead weight.
+     *
+     * @returns {Promise<number>} how many bodies were written
+     */
+    async write(skills) {
+      const rows = (skills || []).filter((skill) => skill?.id && skill?.content);
+      if (!rows.length) return 0;
+      const dir = dirOf();
+      await mkdir2(dir, { recursive: true, mode: 448 });
+      let written = 0;
+      let lastFile = "";
+      for (const skill of rows) {
+        const file = fileFor(skill.id);
+        try {
+          await writeState(file, {
+            id: String(skill.id),
+            name: String(skill.name || ""),
+            description: String(skill.description || ""),
+            content: String(skill.content),
+            cachedAt: (/* @__PURE__ */ new Date()).toISOString()
+          });
+          written += 1;
+          lastFile = file;
+        } catch {
+        }
+      }
+      await pruneStaleStateFiles(dir, lastFile);
+      return written;
+    },
+    /**
+     * @returns {Promise<{id, name, description, content, cachedAt}|null>}
+     *          null when this id was never cached or the file is unreadable.
+     *          A miss is reported as a miss; there is no substitute body to
+     *          serve in its place.
+     */
+    async read(id) {
+      const key = String(id || "").trim();
+      if (!key) return null;
+      try {
+        const parsed = JSON.parse(await readFile2(fileFor(key), "utf8"));
+        if (typeof parsed?.content !== "string" || !parsed.content) return null;
+        return {
+          id: typeof parsed.id === "string" ? parsed.id : key,
+          name: typeof parsed.name === "string" ? parsed.name : "",
+          description: typeof parsed.description === "string" ? parsed.description : "",
+          content: parsed.content,
+          cachedAt: typeof parsed.cachedAt === "string" ? parsed.cachedAt : ""
+        };
+      } catch (error) {
+        if (error?.code !== "ENOENT" && !(error instanceof SyntaxError)) throw error;
+        return null;
+      }
+    }
+  };
+}
+async function cacheSkillContent(skills, options) {
+  try {
+    return await createSkillContentCache(options).write(skills);
+  } catch {
+    return 0;
+  }
+}
+
+// ../agent-sdk/src/prompt.js
+var ONE_LINE_MAX_CHARS = 280;
+var EPISODE_MAX_CHARS = 1500;
+var PROFILE_MAX_CHARS = 500;
+var PROFILE_MAX_ITEMS = 60;
+var SKILL_MIN_SCORE = 0.1;
+var SKILLS_HEADER_FETCH = "### Agent skills — summary only; call mem_skill with a skill id for the full text";
+var SKILLS_FOOTER = "If the task at hand matches a skill above, call mem_skill with its id before starting: those lines are summaries, the body holds the actual steps.";
+var MEMORY_TYPES = Object.freeze({
+  EPISODIC: "episodic",
+  EPISODIC_MEMORY: "episodic_memory",
+  PROFILE: "profile",
+  AGENT_MEMORY: "agent_memory",
+  RAW_MESSAGE: "raw_message"
+});
+var MEMORY_TYPE_LABELS = Object.freeze({
+  [MEMORY_TYPES.EPISODIC]: "episodic",
+  [MEMORY_TYPES.EPISODIC_MEMORY]: "episodic",
+  [MEMORY_TYPES.PROFILE]: "profile",
+  [MEMORY_TYPES.AGENT_MEMORY]: "agent",
+  [MEMORY_TYPES.RAW_MESSAGE]: "recent"
+});
+function buildMemoryPrompt(memoriesOrBundle, { wrapInCodeBlock = false, sections: requestedSections, skillFetch = false } = {}) {
+  const bundle = Array.isArray(memoriesOrBundle) ? { memories: memoriesOrBundle } : memoriesOrBundle || {};
+  const enabled = {
+    episodes: true,
+    profiles: true,
+    skills: true,
+    rawMessages: true,
+    ...requestedSections
+  };
+  const sections = [];
+  const episodes = (bundle.memories || []).map(formatRow).filter(Boolean);
+  if (enabled.episodes && episodes.length) sections.push(["### Episodic memory", ...episodes].join("\n"));
+  const profiles = (bundle.profiles || []).map(formatProfile).filter(Boolean);
+  if (enabled.profiles && profiles.length) sections.push(["### User profile", ...profiles].join("\n"));
+  const canFetchSkill = skillFetch === true;
+  const skills = canFetchSkill ? filterSkillsByScore(bundle.agentMemory?.skills).map(formatSkill).filter(Boolean) : [];
+  if (enabled.skills && skills.length) {
+    sections.push([SKILLS_HEADER_FETCH, ...skills].join("\n"));
+  }
+  const raw = (bundle.rawMessages || []).map(formatRawMessage).filter(Boolean);
+  if (enabled.rawMessages && raw.length) sections.push(["### Recent unextracted transcript — provisional, not a stable memory", ...raw].join("\n"));
+  if (!sections.length) return "";
+  const trailer = enabled.skills && skills.length ? [SKILLS_FOOTER] : [];
+  const body = ["## Relevant memory", ...sections, ...trailer].join("\n\n");
+  return wrapInCodeBlock ? "```memory\n" + body + "\n```" : body;
+}
+function formatRow(m) {
+  if (!m) return "";
+  const label = MEMORY_TYPE_LABELS[m.type] || m.type || "memory";
+  const text = m.episode || m.summary || m.content || m.text || "";
+  if (!text) return "";
+  return `- [${label}] ${oneLine(text, EPISODE_MAX_CHARS)}`;
+}
+function formatProfile(p) {
+  if (!p) return "";
+  const data = p.profileData || {};
+  const text = data.embed_text || p.summary || "";
+  if (!text) return "";
+  const tag = data.item_type || "profile";
+  return `- [${tag}] ${oneLine(text)}`;
+}
+function filterSkillsByScore(skills, minScore = SKILL_MIN_SCORE) {
+  return (skills || []).filter((skill) => {
+    const score = skill?.relevanceScore ?? skill?.score;
+    return score == null || score >= minScore;
+  });
+}
+function formatSkill(s) {
+  if (!s) return "";
+  const id = String(s.id || "").trim();
+  const name = s.name || "(unnamed skill)";
+  const desc = s.description || "";
+  const head = id ? `- [skill ${id}] ${name}` : `- [skill] ${name}`;
+  return desc ? `${head} — ${oneLine(desc)}` : head;
+}
+function formatRawMessage(m) {
+  if (!m) return "";
+  const sender = m.senderName || "speaker";
+  const text = rawMessageText(m.contentItems);
+  if (!text) return "";
+  return `- [raw ${sender}] ${oneLine(text)}`;
+}
+function rawMessageText(parts) {
+  if (!Array.isArray(parts)) return "";
+  const chunks = [];
+  for (const p of parts) {
+    if (!p) continue;
+    if (typeof p === "string") {
+      chunks.push(p);
+      continue;
+    }
+    if (typeof p.text === "string") {
+      chunks.push(p.text);
+      continue;
+    }
+    if (typeof p.content === "string") {
+      chunks.push(p.content);
+    }
+  }
+  return chunks.join(" ");
+}
+function oneLine(s, max = ONE_LINE_MAX_CHARS) {
+  return String(s).replace(/\s+/g, " ").trim().slice(0, max);
+}
+
+// ../agent-sdk/src/search.js
+var noop2 = { info() {
+}, warn() {
+} };
+var QUERY_MAX_CHARS = 1024;
+var DEFAULT_SEARCH_TOPK = 10;
+async function searchMemory(client, params, log = noop2) {
+  const body = {
+    query: String(params.query || "").slice(0, QUERY_MAX_CHARS),
+    topK: params.topK ?? DEFAULT_SEARCH_TOPK,
+    ...params.rankBy ? { rankBy: params.rankBy } : {},
+    // The gateway reads `filters` (plural). This used to say `filter`, which
+    // Go dropped silently as an unknown field — no caller narrowing has ever
+    // reached /mem/search until now.
+    ...params.filters ? { filters: params.filters } : {},
+    ...Array.isArray(params.memoryTypes) && params.memoryTypes.length ? { memoryTypes: params.memoryTypes } : {}
+  };
+  const { result: res, requestId } = await requestMeta(client, "POST", "/mem/search", body);
+  const memoryCount = Array.isArray(res?.items) ? res.items.length : 0;
+  const profileCount = Array.isArray(res?.profiles) ? res.profiles.length : 0;
+  const rawMessageCount = Array.isArray(res?.rawMessages) ? res.rawMessages.length : 0;
+  const caseCount = Array.isArray(res?.agentMemory?.cases) ? res.agentMemory.cases.length : 0;
+  const skillCount = Array.isArray(res?.agentMemory?.skills) ? res.agentMemory.skills.length : 0;
+  log.info?.(`[everme] memory-search stage=complete result=success queryChars=${body.query.length} topK=${body.topK} memories=${memoryCount} profiles=${profileCount} rawMessages=${rawMessageCount} cases=${caseCount} skills=${skillCount} requestId=${boundedDiagnostic(requestId, 128)}`);
+  if (params.skillFetch === true) {
+    await cacheSkillContent(filterSkillsByScore(res?.agentMemory?.skills));
+  }
+  return {
+    memories: res?.items ?? [],
+    profiles: res?.profiles ?? [],
+    rawMessages: res?.rawMessages ?? [],
+    agentMemory: res?.agentMemory ?? { cases: [], skills: [] },
+    requestId
+  };
+}
+function filterEpisodesByScore(memories, minScore) {
+  return (memories || []).filter((memory) => {
+    const score = memory?.score ?? memory?.relevanceScore;
+    return score == null || score >= minScore;
+  });
+}
+
+// ../agent-sdk/src/hooks/query.js
+var FOLD_MARKER = "[...]";
+var MAX_PASTE_RUN_CHARS = 400;
+var STRIP_RULES = [
+  // Host reminder / context blocks. Claude Code, MiniMax Code and others wrap
+  // injected guidance in these; MiniMax delivers them inside the prompt field
+  // itself, so without this the reminder IS the query.
+  ["reminder", /<system-reminder>[\s\S]*?<\/system-reminder>/gi],
+  ["reminder", /<system_reminder>[\s\S]*?<\/system_reminder>/gi],
+  // IDE panes: current selection / opened file context.
+  ["ide", /<ide_selection>[\s\S]*?<\/ide_selection>/gi],
+  ["ide", /<ide_opened_file>[\s\S]*?<\/ide_opened_file>/gi],
+  // Expanded slash commands. The host replaces "/cmd args" with this XML, so
+  // the leading-slash rule below can no longer see it.
+  ["command", /<command-(?:name|message|args)>[\s\S]*?<\/command-(?:name|message|args)>/gi],
+  // Our own injections coming back around. A host that echoes the previous
+  // turn's user message would otherwise feed our memory block back in as the
+  // next query, making recall search its own output.
+  ["everme", /<everme_[a-z_]+>[\s\S]*?<\/everme_[a-z_]+>/gi],
+  // No /m here: with it, `$` would match end-of-LINE and the block would stop
+  // at its own heading, leaving the memory body in the query.
+  ["everme", /(?:^|\n)#{1,3}[ \t]*EverMe Memory\b[\s\S]*?(?=\n[ \t]*\n|\n#{1,3}[ \t]|$)/gi],
+  // Local-command caveat preamble (prepended to prompts that followed a bash
+  // invocation).
+  ["caveat", /^[ \t]*Caveat:[ \t]*The messages below were generated by the user while running local commands.*$/gim],
+  // Attachment / tool-output envelopes some hosts inline.
+  ["attachment", /<(?:attachment|tool_result|function_results)>[\s\S]*?<\/(?:attachment|tool_result|function_results)>/gi]
+];
+var LEADING_COMMAND_RE = /^\s*\/[^\s]+(?:\s+|$)/u;
+var FENCED_CODE_RE = /```[\s\S]*?(?:```|$)/g;
+var LONG_RUN_RE = /\S{400,}/gu;
+function extractUserIntent(text) {
+  const raw = String(text ?? "");
+  const removed = {};
+  let working = raw;
+  const drop = (name, next) => {
+    const delta = working.length - next.length;
+    if (delta > 0) removed[name] = (removed[name] || 0) + delta;
+    working = next;
+  };
+  for (const [name, pattern] of STRIP_RULES) {
+    drop(name, working.replace(pattern, " "));
+  }
+  drop("code", working.replace(FENCED_CODE_RE, ` ${FOLD_MARKER} `));
+  drop("command", working.replace(LEADING_COMMAND_RE, ""));
+  drop("paste", working.replace(LONG_RUN_RE, (run) => `${run.slice(0, MAX_PASTE_RUN_CHARS)} ${FOLD_MARKER}`));
+  working = working.replace(/\s+/gu, " ").trim();
+  let clamped = false;
+  if (working.length > QUERY_MAX_CHARS) {
+    const tail = working.slice(working.length - QUERY_MAX_CHARS);
+    const boundary = tail.search(/\s/);
+    working = (boundary > 0 && boundary < 80 ? tail.slice(boundary + 1) : tail).trim();
+    clamped = true;
+  }
+  return {
+    query: working,
+    stats: { rawChars: raw.length, queryChars: working.length, removed, clamped }
+  };
+}
+function formatQueryStats(stats) {
+  const removed = Object.entries(stats?.removed || {}).sort(([, a], [, b]) => b - a).map(([name, chars]) => `${name}:${chars}`).join(",");
+  return `raw=${stats?.rawChars ?? 0} query=${stats?.queryChars ?? 0} clamped=${Boolean(stats?.clamped)} removed{${removed}}`;
+}
+
 // ../agent-sdk/src/hooks/telemetry.js
 var TELEMETRY_PATH = "/mem/import-events";
 var TELEMETRY_TIMEOUT_MS = 2e3;
@@ -1123,7 +1325,7 @@ function createTelemetry({ client, config = {}, now = Date.now } = {}) {
 }
 
 // ../agent-sdk/src/hooks/runtime.js
-import { readFile as readFile2 } from "node:fs/promises";
+import { readFile as readFile3 } from "node:fs/promises";
 
 // ../agent-sdk/src/hooks/inject.js
 var MIN_PROMPT_TOKENS = 3;
@@ -1131,11 +1333,8 @@ async function runInject({ input, client, config, search = searchMemory, log }) 
   const { query, stats } = extractUserIntent(input?.prompt);
   writeQueryStats(log, stats);
   if (countTokens(query) < MIN_PROMPT_TOKENS) return { block: "", count: 0 };
-  const result = await search(client, { query, topK: config.injectTopK }, log);
-  const memories = (result?.memories || []).filter((memory) => {
-    const score = memory?.score ?? memory?.relevanceScore;
-    return score == null || score === 0 || score >= config.injectMinScore;
-  });
+  const result = await search(client, { query, topK: config.injectTopK, skillFetch: config.skillFetch }, log);
+  const memories = filterEpisodesByScore(result?.memories, config.injectMinScore);
   const bundle = {
     memories,
     profiles: result?.profiles || [],
@@ -1146,16 +1345,15 @@ async function runInject({ input, client, config, search = searchMemory, log }) 
     episodes: true,
     profiles: config.injectProfile,
     skills: true,
-    cases: true,
     rawMessages: true
   };
-  const inner = buildMemoryPrompt(bundle, { sections });
+  const inner = buildMemoryPrompt(bundle, { sections, skillFetch: config.skillFetch });
   if (!inner) return { block: "", count: 0 };
   return {
     block: `<everme_recall>
 ${inner}
 </everme_recall>`,
-    count: countBundle(bundle, sections)
+    count: countBundle(bundle, sections, config.skillFetch === true)
   };
 }
 function writeQueryStats(log, stats) {
@@ -1177,8 +1375,8 @@ function countTokens(text) {
   const otherCount = text.replace(cjkPattern, " ").split(/\s+/).filter(Boolean).length;
   return cjkCount + otherCount;
 }
-function countBundle(bundle, sections) {
-  return (sections.episodes ? bundle.memories.length : 0) + (sections.profiles ? bundle.profiles.length : 0) + (sections.skills ? bundle.agentMemory?.skills?.length || 0 : 0) + (sections.cases ? bundle.agentMemory?.cases?.length || 0 : 0) + (sections.rawMessages ? bundle.rawMessages.length : 0);
+function countBundle(bundle, sections, skillFetch) {
+  return (sections.episodes ? bundle.memories.length : 0) + (sections.profiles ? bundle.profiles.length : 0) + (sections.skills && skillFetch ? filterSkillsByScore(bundle.agentMemory?.skills).length : 0) + (sections.rawMessages ? bundle.rawMessages.length : 0);
 }
 
 // ../agent-sdk/src/hooks/session-start.js
@@ -1198,21 +1396,23 @@ function renderProfileBlock(profile) {
   const explicit = Array.isArray(profile.explicit_info) ? profile.explicit_info : [];
   const implicit = Array.isArray(profile.implicit_traits) ? profile.implicit_traits : [];
   if (!explicit.length && !implicit.length) return "";
+  const shownExplicit = explicit.slice(0, PROFILE_MAX_ITEMS);
+  const shownImplicit = implicit.slice(0, Math.max(0, PROFILE_MAX_ITEMS - shownExplicit.length));
   const lines = ["<everme_profile>"];
-  if (explicit.length) {
+  if (shownExplicit.length) {
     lines.push("Profile facts:");
-    for (const item of explicit.slice(0, 12)) {
+    for (const item of shownExplicit) {
       const description = item?.description || item?.evidence || "";
       if (!description) continue;
       const category = item.category ? `[${item.category}] ` : "";
-      lines.push(`- ${category}${truncate(description, 240)}`);
+      lines.push(`- ${category}${truncate(description, PROFILE_MAX_CHARS)}`);
     }
   }
-  if (implicit.length) {
+  if (shownImplicit.length) {
     lines.push("Implicit traits:");
-    for (const item of implicit.slice(0, 6)) {
+    for (const item of shownImplicit) {
       const name = item?.trait || item?.name || "trait";
-      lines.push(`- ${name}: ${truncate(item?.description || "", 200)}`);
+      lines.push(`- ${name}: ${truncate(item?.description || "", PROFILE_MAX_CHARS)}`);
     }
   }
   lines.push("</everme_profile>");
@@ -1282,23 +1482,26 @@ async function runStore({
     log.info?.("[everme] store stage=skip reason=missing_session_id");
     return { block: "", count: 0 };
   }
-  const previous = sessionState ? await sessionState.read(sessionId) : {};
+  const perTurn = adapter?.turnBoundary === "stop";
+  const previous = perTurn && sessionState ? await sessionState.read(sessionId) : {};
   const pending = previous.pendingTurn ?? null;
   const telemetryOn = Boolean(telemetry?.enabled);
   const carried = telemetryOn ? normalizeDebt(previous.lostTurns) : 0;
   const provisionalDebt = telemetryOn && pending ? carried + 1 : carried;
   const provisionalTurnId = input?.turnId || "";
-  await markInFlight(sessionState, sessionId, provisionalTurnId, provisionalDebt);
+  if (perTurn) await markInFlight(sessionState, sessionId, provisionalTurnId, provisionalDebt);
   const turnId = await resolveTurnId(adapter, input);
   const retryOfPending = Boolean(pending && pending.turnId && pending.turnId === turnId);
-  const owed = await payDownLosses(telemetry, retryOfPending ? provisionalDebt - 1 : provisionalDebt);
-  if (turnId !== provisionalTurnId || owed !== provisionalDebt) {
+  const owed = perTurn ? await payDownLosses(telemetry, retryOfPending ? provisionalDebt - 1 : provisionalDebt) : 0;
+  if (perTurn && (turnId !== provisionalTurnId || owed !== provisionalDebt)) {
     await markInFlight(sessionState, sessionId, turnId, owed);
   }
   if (typeof adapter.readStoreBatches === "function") {
-    const batches = await adapter.readStoreBatches(input, { checkpointStore, stateDir });
-    if (Array.isArray(batches)) {
-      return runStoreBatches({
+    let result;
+    const critical = async () => {
+      const batches = await adapter.readStoreBatches(input, { checkpointStore, stateDir });
+      if (!Array.isArray(batches)) return;
+      result = await runStoreBatches({
         batches,
         input,
         adapter,
@@ -1311,9 +1514,16 @@ async function runStore({
         diagnostic,
         telemetry,
         retryOfPending,
-        turnId
+        turnId,
+        perTurn
       });
+    };
+    if (typeof checkpointStore?.withSession === "function" && input?.sessionId) {
+      await checkpointStore.withSession(`${adapter.platform}:${input.sessionId}`, critical);
+    } else {
+      await critical();
     }
+    if (result !== void 0) return result;
   }
   const messages = await adapter.readLastTurn(input, { stateDir });
   if (!Array.isArray(messages) || !messages.length) {
@@ -1331,7 +1541,17 @@ async function runStore({
     // One Stop = one logical turn: claim the hook channel and declare it, so
     // the gateway's write counter (L1-2's denominator) stays in turns even
     // when a long turn is split into several requests.
-    enqueue: (turn) => saveAgentMemory(client, { ...turn, channel: "hook", turns: 1, taskBatching: adapter.taskBatching === true }, log),
+    //
+    // Only for a per-turn host. This path used to claim unconditionally,
+    // which counted one logical turn per INVOCATION — and minimaxcode is
+    // invoked once per tool call, so a five-tool turn declared five turns and
+    // pushed L1-2 toward 100%. Numerator inflation reads as health, so it is
+    // the more dangerous half of the same asymmetry.
+    //
+    // taskBatching rides on both branches: it selects how saveAgentMemory
+    // slices the payload, which is independent of whether this write claims
+    // the turn.
+    enqueue: (turn) => saveAgentMemory(client, perTurn ? { ...turn, channel: "hook", turns: 1, taskBatching: adapter.taskBatching === true } : { ...turn, taskBatching: adapter.taskBatching === true }, log),
     flush: (conversationId) => flushAgentMemory(client, { conversationId }, log),
     diagnostic,
     rethrowOnError: true
@@ -1342,7 +1562,11 @@ async function runStore({
     await reportRecovery(telemetry, retryOfPending);
     return { block: "", count: messages.length, flushed: true, status: saved2?.status, requestId: saved2?.requestId };
   }
-  const saved = await runtime.enqueueTurn({ conversationId: sessionId, messages });
+  const saved = await writeOrDropMarker(
+    () => runtime.enqueueTurn({ conversationId: sessionId, messages }),
+    sessionState,
+    sessionId
+  );
   const committed = await counter.commit(sessionId, turnId, { pendingTurn: null });
   await reportRecovery(telemetry, retryOfPending);
   const flushed = config.flushEveryTurns > 0 && committed.count % config.flushEveryTurns === 0;
@@ -1366,7 +1590,8 @@ async function runStoreBatches({
   diagnostic,
   telemetry,
   retryOfPending,
-  turnId
+  turnId,
+  perTurn
 }) {
   const ready = batches.filter((batch) => batch && typeof batch.conversationId === "string" && batch.conversationId && Array.isArray(batch.messages) && batch.messages.length);
   if (!ready.length) {
@@ -1384,10 +1609,13 @@ async function runStoreBatches({
   let requestId;
   let status;
   let count = 0;
-  const perTurn = adapter?.turnBoundary === "stop";
   for (const [index, batch] of ready.entries()) {
     const payload = perTurn ? { ...batch, channel: "hook", turns: Number.isInteger(batch.turns) ? batch.turns : index === ready.length - 1 ? 1 : 0 } : batch;
-    const saved = config.flushMode === "legacy" ? await runtime.flushSession(payload) : await runtime.enqueueTurn(payload);
+    const saved = await writeOrDropMarker(
+      () => config.flushMode === "legacy" ? runtime.flushSession(payload) : runtime.enqueueTurn(payload),
+      sessionState,
+      input?.sessionId
+    );
     requestId = saved?.requestId || requestId;
     status = saved?.status || status;
     count += batch.messages.length;
@@ -1432,6 +1660,14 @@ async function markInFlight(sessionState, sessionId, turnId, lostTurns) {
     pendingTurn: { startedAt: Date.now(), turnId },
     lostTurns: normalizeDebt(lostTurns)
   });
+}
+async function writeOrDropMarker(operation, sessionState, sessionId) {
+  try {
+    return await operation();
+  } catch (error) {
+    if (error?.type === "auth") await clearMarker(sessionState, sessionId);
+    throw error;
+  }
 }
 async function clearMarker(sessionState, sessionId) {
   if (!sessionState) return;
@@ -1507,6 +1743,17 @@ async function runBoundaryFlush({
 // ../agent-sdk/src/hooks/runtime.js
 var WRITE_EVENTS = /* @__PURE__ */ new Set(["Stop", "SubagentStop", "SessionEnd", "PreCompact", "PostToolUse"]);
 var ROTATED_KEYS = /* @__PURE__ */ new Set(["EVERME_AGENT_TOKEN", "EVERME_AGENT_ID"]);
+function withClientIdentity(config, adapter) {
+  return {
+    ...config,
+    clientKind: "hook",
+    clientVersion: adapter?.version || "",
+    // Normalised to a boolean here rather than trusted as written: an
+    // adapter that declares the capability as a string would otherwise be
+    // truthy everywhere downstream.
+    skillFetch: adapter?.skillFetch === true
+  };
+}
 async function runHook(event, rawInput, adapter, deps = {}) {
   const stopWatchdog = startHookWatchdog({
     event: adapter?.mapEvent?.(event) || event,
@@ -1567,7 +1814,10 @@ async function runHostHook(event, rawInput, adapter, deps = {}) {
       return formatOutput(adapter, hostEvent, result);
     }
     const budgetMs = deps.budgetMs === void 0 ? hookBudgetMs(canonicalEvent) : deps.budgetMs;
-    const config = budgetMs ? { ...baseConfig, deadlineAt: Date.now() + budgetMs } : baseConfig;
+    const config = withClientIdentity(
+      budgetMs ? { ...baseConfig, deadlineAt: Date.now() + budgetMs } : baseConfig,
+      adapter
+    );
     const log = deps.log || stderrLog;
     const client = deps.client || requireOperation(deps.createClient, "createClient")(config, log);
     telemetry = deps.telemetry || (typeof deps.createTelemetry === "function" ? deps.createTelemetry({ client, config }) : null);
@@ -1646,7 +1896,7 @@ async function loadRuntimeEnv(adapter, baseEnv) {
   if (!file) return merged;
   let raw;
   try {
-    raw = await readFile2(file, "utf8");
+    raw = await readFile3(file, "utf8");
   } catch (error) {
     if (error?.code === "ENOENT") return merged;
     throw error;
@@ -1690,11 +1940,11 @@ function formatOutput(adapter, event, result) {
 
 // src/adapter.js
 import os2 from "node:os";
-import path4 from "node:path";
+import path5 from "node:path";
 
 // src/store-batches.js
-import { readFile as readFile3, readdir as readdir2 } from "node:fs/promises";
-import path3 from "node:path";
+import { readFile as readFile4, readdir as readdir2 } from "node:fs/promises";
+import path4 from "node:path";
 
 // src/transcript.js
 import { createReadStream } from "node:fs";
@@ -2187,7 +2437,7 @@ function redactText(value) {
 
 // src/fragment.js
 import { createReadStream as createReadStream2 } from "node:fs";
-import path2 from "node:path";
+import path3 from "node:path";
 import { createInterface as createInterface2 } from "node:readline";
 var UUID = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}";
 var ROLLOUT = new RegExp(`^rollout-\\d{4}-\\d{2}-\\d{2}T\\d{2}-\\d{2}-\\d{2}-(${UUID})(?:_(${UUID}))?\\.jsonl$`);
@@ -2204,7 +2454,7 @@ async function readFragmentScope(transcriptPath) {
       }
       if (event?.type !== "session_meta") continue;
       if (event.payload?.history_mode !== "paginated") return "";
-      const match = path2.basename(transcriptPath).match(ROLLOUT);
+      const match = path3.basename(transcriptPath).match(ROLLOUT);
       if (!match) {
         if (event.payload?.history_base?.thread_id) {
           throw new Error("codex paginated fragment has no native rollout filename identity");
@@ -2270,14 +2520,14 @@ async function transcriptBatch({ checkpointStore, conversationId, initialTailOnl
 async function completedDescendants(rootPath, rootId) {
   let names;
   try {
-    names = await readdir2(path3.dirname(rootPath));
+    names = await readdir2(path4.dirname(rootPath));
   } catch {
     return [];
   }
   const candidates = [];
   for (const name of names) {
     if (!name.endsWith(".jsonl")) continue;
-    const candidatePath = path3.join(path3.dirname(rootPath), name);
+    const candidatePath = path4.join(path4.dirname(rootPath), name);
     if (candidatePath === rootPath) continue;
     const metadata = await rolloutMetadata(candidatePath);
     if (metadata?.isSubagent && metadata.complete) {
@@ -2302,7 +2552,7 @@ async function completedDescendants(rootPath, rootId) {
 async function rolloutMetadata(transcriptPath) {
   let raw;
   try {
-    raw = await readFile3(transcriptPath, "utf8");
+    raw = await readFile4(transcriptPath, "utf8");
   } catch {
     return null;
   }
@@ -2338,16 +2588,22 @@ function stringValue(value) {
 }
 
 // src/adapter.js
+var PKG_VERSION = true ? "0.7.0" : createRequire(import.meta.url)("../package.json").version;
 var CONTEXT_EVENTS = /* @__PURE__ */ new Set(["SessionStart", "UserPromptSubmit"]);
 var codexAdapter = {
   platform: "codex",
+  version: PKG_VERSION,
   // One hook invocation is one logical turn and the delivery marker runs on
   // every one of them, so the SDK claims channel="hook" for these writes and
   // they enter L1-2's denominator. Whole-session hosts leave this unset.
   turnBoundary: "stop",
   taskBatching: true,
+  // This host ships the mem_skill tool alongside the hook, so an injected
+  // skill id is resolvable. Hosts without it must leave this unset: an id
+  // the model cannot redeem is pure noise.
+  skillFetch: true,
   envFile() {
-    return process.env.EVERME_ENV_FILE_PATH || path4.join(os2.homedir(), ".codex", "everme.env");
+    return process.env.EVERME_ENV_FILE_PATH || path5.join(os2.homedir(), ".codex", "everme.env");
   },
   normalizeInput(rawInput) {
     return {
