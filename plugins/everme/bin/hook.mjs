@@ -600,6 +600,73 @@ function completedTurns(slices, i, baseTurn) {
   return n < 0 ? 0 : n;
 }
 
+// ../agent-sdk/src/everme-injection.js
+var EVERME_MEMORY_TOOLS = /* @__PURE__ */ new Set(["mem_context", "mem_search", "mem_skill", "mem_save_turn", "mem_save_fact"]);
+var MCP_RESOURCE_TOOLS = /* @__PURE__ */ new Set(["read_mcp_resource", "list_mcp_resources"]);
+function isEvermeMcpServer(value) {
+  const text = String(value || "").trim().toLowerCase();
+  if (!text) return false;
+  return text.split(/[_\-./:]+/).some((token) => token === "everme");
+}
+function splitMcpToolName(value) {
+  const name = String(value || "").trim().toLowerCase();
+  const sep = name.lastIndexOf("__");
+  return sep >= 0 ? [name.slice(0, sep), name.slice(sep + 2)] : ["", name];
+}
+function decodeArguments(value) {
+  if (value && typeof value === "object") return value;
+  if (typeof value !== "string" || !value.trim()) return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+function isEvermeMemoryTool(call) {
+  if (!call) return false;
+  const namespace = String(call.namespace || "").trim();
+  if (namespace) return isEvermeMcpServer(namespace);
+  const [server, base] = splitMcpToolName(call.name);
+  if (server) return isEvermeMcpServer(server);
+  if (!base) return false;
+  if (EVERME_MEMORY_TOOLS.has(base)) return true;
+  if (!MCP_RESOURCE_TOOLS.has(base)) return false;
+  const args = decodeArguments(call.arguments ?? call.input);
+  return isEvermeMcpServer(args.server) || String(args.uri || "").trim().startsWith("mem://");
+}
+function dropEvermeMemoryToolPairs(messages) {
+  if (!Array.isArray(messages) || !messages.length) return messages;
+  const dropped = /* @__PURE__ */ new Set();
+  for (const message of messages) {
+    for (const call of Array.isArray(message?.toolCalls) ? message.toolCalls : []) {
+      if (isEvermeMemoryTool(call)) dropped.add(call.id);
+    }
+    if ((message?.toolCallId || message?.tool_call_id) && isEvermeMemoryTool({ name: message?.toolName, namespace: message?.namespace })) {
+      dropped.add(message.toolCallId || message.tool_call_id);
+    }
+  }
+  if (!dropped.size) return messages;
+  const kept = [];
+  for (const message of messages) {
+    const resultId = message?.toolCallId || message?.tool_call_id;
+    if (resultId && dropped.has(resultId)) continue;
+    if (Array.isArray(message?.toolCalls) && message.toolCalls.length) {
+      const remaining = message.toolCalls.filter((call) => !dropped.has(call.id));
+      if (!remaining.length && !hasContent(message)) continue;
+      kept.push(remaining.length === message.toolCalls.length ? message : { ...message, toolCalls: remaining });
+      continue;
+    }
+    kept.push(message);
+  }
+  return kept;
+}
+function hasContent(message) {
+  const content = message?.content;
+  if (typeof content === "string") return content.trim() !== "";
+  return Array.isArray(content) ? content.length > 0 : content != null;
+}
+
 // ../agent-sdk/src/agent-memory.js
 var AGENT_MEMORY_ROLES = Object.freeze({
   USER: "user",
@@ -626,6 +693,7 @@ async function saveAgentMemory(client, { conversationId, messages = [], flush = 
   }
   const flushOnly = flush === true && messages.length === 0;
   const stamp2 = Date.now();
+  messages = dropEvermeMemoryToolPairs(messages);
   const entries = messages.map((source, i) => ({ source, message: convertAgentMessage(source, stamp2 + i) })).filter(({ message }) => message && (message.content != null || message.toolCalls?.length));
   const converted = entries.map(({ message }) => message);
   if (!converted.length && !flushOnly) {
@@ -1538,20 +1606,29 @@ async function runStore({
     return { block: "", count: 0, duplicate: true };
   }
   const runtime = createHookRuntime({
-    // One Stop = one logical turn: claim the hook channel and declare it, so
-    // the gateway's write counter (L1-2's denominator) stays in turns even
-    // when a long turn is split into several requests.
+    // Every write from this path claims the hook channel: the session gate
+    // gives a claimed write a ledger row and advances the watermark past its
+    // turns, which is what lets the importer's later scan of the same
+    // session be trimmed instead of stored a second time. An unclaimed write
+    // is anonymous to the gate and every one of its turns re-lands on
+    // import (observed on prod for the providers that predate the claim).
     //
-    // Only for a per-turn host. This path used to claim unconditionally,
-    // which counted one logical turn per INVOCATION — and minimaxcode is
-    // invoked once per tool call, so a five-tool turn declared five turns and
-    // pushed L1-2 toward 100%. Numerator inflation reads as health, so it is
-    // the more dangerous half of the same asymmetry.
+    // The declared count is what differs. One Stop = one logical turn on a
+    // per-turn host, so it declares 1 even when a long turn is split into
+    // several requests. A host whose write events are not 1:1 with turns
+    // (devin fires several per answer) declares the user messages the write
+    // actually carries: an event that adds no user message completes no
+    // turn. Counting per INVOCATION here once declared five turns for a
+    // five-tool minimaxcode turn and pushed L1-2 toward 100%.
     //
     // taskBatching rides on both branches: it selects how saveAgentMemory
-    // slices the payload, which is independent of whether this write claims
-    // the turn.
-    enqueue: (turn) => saveAgentMemory(client, perTurn ? { ...turn, channel: "hook", turns: 1, taskBatching: adapter.taskBatching === true } : { ...turn, taskBatching: adapter.taskBatching === true }, log),
+    // slices the payload, which is independent of the turn declaration.
+    enqueue: (turn) => saveAgentMemory(client, {
+      ...turn,
+      channel: "hook",
+      turns: perTurn ? 1 : completedUserTurns(turn.messages),
+      taskBatching: adapter.taskBatching === true
+    }, log),
     flush: (conversationId) => flushAgentMemory(client, { conversationId }, log),
     diagnostic,
     rethrowOnError: true
@@ -1697,7 +1774,12 @@ async function runBoundaryFlush({
     return { block: "", count: 0 };
   }
   const runtime = createHookRuntime({
-    enqueue: (turn) => saveAgentMemory(client, { ...turn, taskBatching: adapter.taskBatching === true }, log),
+    enqueue: (turn) => saveAgentMemory(client, {
+      ...turn,
+      channel: "hook",
+      ...Number.isInteger(turn.turns) ? {} : { turns: completedUserTurns(turn.messages) },
+      taskBatching: adapter.taskBatching === true
+    }, log),
     flush: (conversationId) => flushAgentMemory(client, { conversationId }, log),
     diagnostic,
     rethrowOnError: true
@@ -1726,7 +1808,9 @@ async function runBoundaryFlush({
     const uploadedCount = sessionState ? (await sessionState.read(input.sessionId)).uploadedCount : 0;
     const delta = uploadedCount > 0 ? messages.slice(uploadedCount) : messages;
     if (!delta.length) return { block: "", count: 0, skipped: true };
-    const saved = adapter?.boundaryFlush === false ? await runtime.enqueueTurn({ conversationId: input.sessionId, messages: delta }) : await runtime.flushSession({ conversationId: input.sessionId, messages: delta });
+    const baseTurn = uploadedCount > 0 ? turnOrdinals(messages)[uploadedCount] : 0;
+    const turns = completedTurns([delta], 0, baseTurn);
+    const saved = adapter?.boundaryFlush === false ? await runtime.enqueueTurn({ conversationId: input.sessionId, messages: delta, baseTurn, turns }) : await runtime.flushSession({ conversationId: input.sessionId, messages: delta, baseTurn, turns });
     if (sessionState) await sessionState.patch(input.sessionId, { uploadedCount: messages.length });
     return {
       block: "",
@@ -1738,6 +1822,10 @@ async function runBoundaryFlush({
   }
   const flushRes = await runtime.onSessionEnd(input.sessionId);
   return { block: "", count: 0, flushed: true, requestId: flushRes?.requestId };
+}
+function completedUserTurns(messages) {
+  if (!Array.isArray(messages)) return 0;
+  return messages.filter((message) => message?.role === "user").length;
 }
 
 // ../agent-sdk/src/hooks/runtime.js
@@ -2238,7 +2326,11 @@ function mapPayload(payload, timestampValue, fallbackTimestamp, lineNumber, stat
         id: callId,
         type: "function",
         name: payload.name || "unknown",
-        arguments: redactText(custom ? customToolArguments(payload.input) : argumentText(payload.arguments))
+        arguments: redactText(custom ? customToolArguments(payload.input) : argumentText(payload.arguments)),
+        // Source-local provenance for the shared write layer's EverMe filter;
+        // convertAgentMessage rebuilds the wire shape and never forwards it.
+        // Only present when the host recorded one, so golden shapes are unchanged.
+        ...payload.namespace ? { namespace: payload.namespace } : {}
       }]
     };
   }
@@ -2332,7 +2424,12 @@ function hasEnvelopePrefix(text, tag) {
   return [">", " ", "	", "\n", "\r"].includes(text.at(tag.length + 1));
 }
 function stripLeadingAgentsInstructions(text) {
-  if (!text.startsWith("# AGENTS.md instructions for ") || !text.includes("<INSTRUCTIONS>")) return null;
+  const lineEnd = text.indexOf("\n");
+  if (lineEnd < 0) return null;
+  const title = text.slice(0, lineEnd).replace(/\r$/, "");
+  const scopedTitlePrefix = "# AGENTS.md instructions for ";
+  const isAgentsInstructions = title === "# AGENTS.md instructions" || title.startsWith(scopedTitlePrefix) && title.slice(scopedTitlePrefix.length).trim().length > 0;
+  if (!isAgentsInstructions || !text.includes("<INSTRUCTIONS>")) return null;
   const close = "</INSTRUCTIONS>";
   const closeStart = text.indexOf(close);
   return closeStart < 0 ? "" : text.slice(closeStart + close.length).trim();
@@ -2588,7 +2685,7 @@ function stringValue(value) {
 }
 
 // src/adapter.js
-var PKG_VERSION = true ? "0.7.0" : createRequire(import.meta.url)("../package.json").version;
+var PKG_VERSION = true ? "0.7.2" : createRequire(import.meta.url)("../package.json").version;
 var CONTEXT_EVENTS = /* @__PURE__ */ new Set(["SessionStart", "UserPromptSubmit"]);
 var codexAdapter = {
   platform: "codex",
