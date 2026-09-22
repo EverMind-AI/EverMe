@@ -1,7 +1,9 @@
 package plugin
 
 import (
+	"bytes"
 	"encoding/json"
+	"image/png"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -94,8 +96,10 @@ func TestCodexMarketplaceStructure(t *testing.T) {
 		Skills    string `json:"skills"`
 		Hooks     string `json:"hooks"`
 		Interface struct {
-			DisplayName string `json:"displayName"`
-			Category    string `json:"category"`
+			DisplayName  string `json:"displayName"`
+			Category     string `json:"category"`
+			Logo         string `json:"logo"`
+			ComposerIcon string `json:"composerIcon"`
 		} `json:"interface"`
 	}
 	require.NoError(t, json.Unmarshal(pluginRaw, &plugin), "plugin.json must parse as JSON")
@@ -113,6 +117,17 @@ func TestCodexMarketplaceStructure(t *testing.T) {
 	assert.Equal(t, "./hooks/hooks.json", plugin.Hooks, "hooks must point at the bundled Codex lifecycle registration")
 	assert.NotEmpty(t, plugin.Interface.DisplayName)
 	assert.NotEmpty(t, plugin.Interface.Category)
+	assert.Equal(t, "./assets/everme-logo.png", plugin.Interface.Logo)
+	assert.Equal(t, "./assets/everme-logo.png", plugin.Interface.ComposerIcon)
+
+	logoPath := filepath.Join(pluginRoot, "assets", "everme-logo.png")
+	logoRaw, err := os.ReadFile(logoPath)
+	require.NoError(t, err, "plugin logo must exist at %s", logoPath)
+	logoConfig, err := png.DecodeConfig(bytes.NewReader(logoRaw))
+	require.NoError(t, err, "plugin logo must be a valid PNG")
+	assert.Equal(t, logoConfig.Width, logoConfig.Height, "plugin logo must be square")
+	assert.GreaterOrEqual(t, logoConfig.Width, 48, "plugin logo must meet OpenAI's minimum dimensions")
+	assert.LessOrEqual(t, logoConfig.Width, 4096, "plugin logo must meet OpenAI's maximum dimensions")
 
 	// Native lifecycle hooks now save completed turns independently of
 	// whether the LLM chooses an MCP tool, so the marketplace capability
