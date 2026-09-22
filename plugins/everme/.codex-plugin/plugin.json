@@ -1,6 +1,6 @@
 {
   "name": "everme",
-  "version": "0.7.2",
+  "version": "0.7.3",
   "description": "Persistent memory recall and lifecycle capture for Codex sessions via EverMe.",
   "author": {
     "name": "EverMind AI",
@@ -32,6 +32,8 @@
       "Load my EverMe memory for this Codex session.",
       "Recall what we decided about EverMe last time."
     ],
+    "logo": "./assets/everme-logo.png",
+    "composerIcon": "./assets/everme-logo.png",
     "websiteURL": "https://everme.evermind.ai"
   }
 }
