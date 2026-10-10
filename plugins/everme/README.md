@@ -8,8 +8,12 @@ Codex marketplace plugin that combines native lifecycle hooks with the
 - **MCP resources** — `mem://profile` and `mem://search?q={query}` exposed by
   the `everme` MCP server in `~/.codex/config.toml::mcp_servers.everme`.
   Codex bridges MCP Resources to the model, so reads work end-to-end.
-- **Skill** — `everme-memory`, tells Codex when to read those resources so
-  recall happens without explicit prompting.
+- **Skills** — `everme-memory` tells Codex when to read those resources so
+  recall happens without explicit prompting; `everme-agent-skill` tells it
+  when to read the full body of an agent skill a recall names. Keep at least
+  two skills here: Codex lists a single-skill plugin's path from the
+  marketplace root, which repeats `everme/everme` and models collapse it
+  into a path that does not exist.
 - **Native hooks** — SessionStart loads the profile, UserPromptSubmit recalls
   relevant memory, Stop saves the latest turn, and PreCompact flushes pending
   extraction. Hook failures are non-blocking and redact credentials.
