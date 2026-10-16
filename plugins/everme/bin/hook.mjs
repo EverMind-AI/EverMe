@@ -1567,7 +1567,7 @@ async function runStore({
   if (typeof adapter.readStoreBatches === "function") {
     let result;
     const critical = async () => {
-      const batches = await adapter.readStoreBatches(input, { checkpointStore, stateDir });
+      const batches = await adapter.readStoreBatches(input, { checkpointStore, stateDir, resumeFromStart: Boolean(pending) });
       if (!Array.isArray(batches)) return;
       result = await runStoreBatches({
         batches,
@@ -2685,7 +2685,7 @@ function stringValue(value) {
 }
 
 // src/adapter.js
-var PKG_VERSION = true ? "0.7.5" : createRequire(import.meta.url)("../package.json").version;
+var PKG_VERSION = true ? "0.7.6" : createRequire(import.meta.url)("../package.json").version;
 var CONTEXT_EVENTS = /* @__PURE__ */ new Set(["SessionStart", "UserPromptSubmit"]);
 var codexAdapter = {
   platform: "codex",
