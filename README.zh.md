@@ -87,13 +87,14 @@ evercli plugin install kimicode
 evercli plugin install opencode
 evercli plugin install openclaw
 evercli plugin install raven
+evercli plugin install seekmoon
 evercli plugin install workbuddy
 
 # 4. 自检
 evercli doctor
 ```
 
-Kimi Code 完成预配置后，还需要在 TUI 内运行 `/plugins install ~/.kimi-code/everme`；WorkBuddy 则需要在 MCP 管理界面信任新增的服务。
+Kimi Code 完成预配置后，还需要在 TUI 内运行 `/plugins install ~/.kimi-code/everme`；WorkBuddy 则需要在 MCP 管理界面信任新增的服务。SeekMoon 在会话启动时连接 MCP 服务，因此请新开一个会话（或重启应用）来启用 `everme-memory`。
 
 装好后打开你的 Agent，问它 "what do you remember about me?" —— 它会通过 MCP `mem://profile` 资源去召回你的记忆。
 
@@ -137,6 +138,7 @@ Kimi Code 完成预配置后，还需要在 TUI 内运行 `/plugins install ~/.k
 | **OpenCode** | `evercli plugin install opencode` | `~/.config/opencode/opencode.json` MCP 条目 |
 | **OpenClaw** | `evercli plugin install openclaw` | OpenClaw 插件注册 |
 | **Raven** | `evercli plugin install raven` | `~/.raven/config.json` + 内置 MemoryBackend |
+| **SeekMoon** | `evercli plugin install seekmoon` | 应用运行目录的 `host-mcp.json` MCP 条目 + 新会话步骤 |
 | **WorkBuddy** | `evercli plugin install workbuddy` | `~/.workbuddy/mcp.json` + 首次连接信任步骤 |
 
 所有 Agent 读写的记忆都落在**同一份记忆池**里，按你的账号隔离 —— 所以上下文跟着**你**走，而不是被锁在某个 App 里。

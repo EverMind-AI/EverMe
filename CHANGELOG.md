@@ -9,6 +9,12 @@ the open-source home for EverMe CLI and agent plugins.
 
 ### CLI
 
+- Add `evercli plugin install seekmoon`. SeekMoon (moonbitlang/openseek) reads
+  MCP servers from `mcpServers.<name>` in its runtime directory's
+  `host-mcp.json`, so the adapter reuses the shared MCP writer and preserves
+  the desktop's own `seekmoon` entry; uninstall removes only EverMe's. The
+  install reports a new-conversation next step: a desktop conversation's engine
+  connects its MCP servers once at startup.
 - Sync the `cli/` Go tree to the `evercli` v0.32.0 release. Earlier public
   snapshots trailed the published binaries; the tree now matches what
   `npm install -g @everme/cli` and the release archives ship.
