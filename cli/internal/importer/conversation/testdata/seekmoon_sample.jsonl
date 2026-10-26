@@ -1,0 +1,6 @@
+{"version":1,"id":"desktop-20260101-000000-000-000000001","system_prompt":"You are an agent focused on implementing user tasks."}
+{"sequence":1,"ts":1767225600000,"item":{"kind":"user","payload":{"content":"how do I ship a release?","submission_id":"desktop-20260101-000000-000-000000001-submission-1"}}}
+{"sequence":2,"ts":1767225601000,"item":{"kind":"assistant","payload":{"content":"Tag it, then push the tag.","tool_calls":[{"id":"call_00_tag","name":"shell","arguments":"{\"cmd\":\"git tag v1.0.0\"}"}],"reasoning_content":"the user wants the release flow","usage":{"prompt_tokens":10,"completion_tokens":5}}}}
+{"sequence":3,"ts":1767225601200,"item":{"kind":"tool_result","payload":{"tool_call_id":"call_00_tag","tool_name":"shell","content":"tagged","is_error":false,"brief":"tag v1.0.0"}}}
+{"sequence":4,"ts":1767225601500,"item":{"kind":"runtime_notice","payload":{"content":"background job finished (exit=0)"}}}
+{"sequence":5,"ts":1767225602000,"item":{"kind":"terminal","payload":{"kind":"finished","message":"done"}}}
