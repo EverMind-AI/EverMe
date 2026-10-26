@@ -28,7 +28,7 @@ evercli --version                   # build identity
 | Command   | Purpose                                              |
 |-----------|------------------------------------------------------|
 | `auth`    | login / logout / status / me                         |
-| `plugin`  | list / install / uninstall (Claude Code, OpenClaw, Cursor, Claude Desktop, Codex, DeepSeek Harness, Hermes, Devin, WorkBuddy, opencode, Kimi Code, Raven) |
+| `plugin`  | list / install / uninstall (Claude Code, OpenClaw, Cursor, Claude Desktop, Codex, DeepSeek Harness, Hermes, Devin, WorkBuddy, SeekMoon, opencode, Kimi Code, Raven) |
 | `import`  | conversations scan / run (cold-start session + markdown import) |
 | `doctor`  | minimal self-checks (connectivity + credential)      |
 | `skill`   | browse / install / manage EverMe skills              |

@@ -13,7 +13,7 @@ This file is self-contained and governs `cli/` only — it references no files o
 Five subcommands, intentionally minimal:
 
 - `auth`     — login / logout / status / me
-- `plugin`   — list / install / uninstall (Claude Code, OpenClaw, Cursor, Claude Desktop, Codex, Hermes, Devin, WorkBuddy, opencode, Kimi Code, Raven)
+- `plugin`   — list / install / uninstall (Claude Code, OpenClaw, Cursor, Claude Desktop, Codex, Hermes, Devin, WorkBuddy, SeekMoon, opencode, Kimi Code, Raven)
 - `import`   — conversations scan / run (cold-start session + markdown import)
 - `doctor`   — slim self-checks (network reachability + credential backend)
 - `skill`    — browse / install / manage EverMe skills
