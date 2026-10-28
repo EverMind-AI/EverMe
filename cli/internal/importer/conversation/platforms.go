@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -18,6 +19,19 @@ var knownPlatforms = map[PlatformID]struct{}{
 	PlatformKimicode:   {},
 	PlatformRaven:      {},
 	PlatformWorkBuddy:  {},
+	PlatformSeekMoon:   {},
+}
+
+// PlatformList renders the known platform names for CLI hints. Callers use it
+// instead of repeating the list, so a new platform cannot be accepted by
+// ParsePlatforms while the hint still tells the user it does not exist.
+func PlatformList() string {
+	names := make([]string, 0, len(knownPlatforms))
+	for p := range knownPlatforms {
+		names = append(names, string(p))
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
 }
 
 // IsKnownPlatform reports whether p is one of the supported platform names.
@@ -34,7 +48,7 @@ func ParsePlatforms(names []string) ([]PlatformID, error) {
 	for _, n := range names {
 		p := PlatformID(strings.TrimSpace(n))
 		if !IsKnownPlatform(p) {
-			return nil, fmt.Errorf("unknown platform %q (known: claude-code, codex, hermes, openclaw, markdown, kimicode, raven, workbuddy)", n)
+			return nil, fmt.Errorf("unknown platform %q (known: %s)", n, PlatformList())
 		}
 		ids = append(ids, p)
 	}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/pelletier/go-toml/v2"
@@ -192,6 +193,72 @@ func resolveWorkBuddyEvt() (string, error) {
 	return tok, nil
 }
 
+// seekMoonRuntimeDir returns SeekMoon's runtime directory, where the desktop
+// keeps both host-mcp.json and workspaces.json. Mirrors
+// cli/internal/plugin/seekmoon.go seekMoonConfigDir, env override included.
+func seekMoonRuntimeDir() (string, error) {
+	if dir := os.Getenv("EVERCLI_SEEKMOON_CONFIG_DIR"); dir != "" {
+		return dir, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	switch runtime.GOOS {
+	case "darwin":
+		return filepath.Join(home, "Library", "Application Support", "SeekMoon"), nil
+	case "windows":
+		if appdata, err := os.UserConfigDir(); err == nil && appdata != "" {
+			return filepath.Join(appdata, "SeekMoon"), nil
+		}
+		return filepath.Join(home, "AppData", "Roaming", "SeekMoon"), nil
+	default:
+		return filepath.Join(home, ".config", "SeekMoon"), nil
+	}
+}
+
+// seekMoonEvtHint is the actionable half of every seekmoon credential error.
+// The usual source of the token is `plugin install`, which needs the EverMe
+// backend to accept the platform, so say what to do when that is not available.
+func seekMoonEvtHint(path string) string {
+	return "run `evercli plugin install seekmoon` (it needs the EverMe backend to accept the " +
+		"seekmoon platform), or add EVERME_AGENT_TOKEN to mcpServers[\"everme-memory\"].env in " + path
+}
+
+// resolveSeekMoonEvt reads EVERME_AGENT_TOKEN from SeekMoon's host-mcp.json at
+// mcpServers["everme-memory"].env — the entry the seekmoon installer writes
+// through the shared mcpWriter (cli/internal/plugin/seekmoon.go buildEntry).
+// SeekMoon keeps its own `seekmoon` entry in that file too; only ours carries
+// the EverMe credential.
+func resolveSeekMoonEvt() (string, error) {
+	dir, err := seekMoonRuntimeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve seekmoon runtime dir: %w", err)
+	}
+	path := filepath.Join(dir, "host-mcp.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read seekmoon config %s: %w; %s", path, err, seekMoonEvtHint(path))
+	}
+	var cfg struct {
+		McpServers map[string]struct {
+			Env map[string]string `json:"env"`
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return "", fmt.Errorf("parse seekmoon config %s: %w", path, err)
+	}
+	entry, ok := cfg.McpServers["everme-memory"]
+	if !ok {
+		return "", fmt.Errorf(`seekmoon config %s has no mcpServers["everme-memory"] entry; %s`, path, seekMoonEvtHint(path))
+	}
+	tok := strings.TrimSpace(entry.Env["EVERME_AGENT_TOKEN"])
+	if tok == "" {
+		return "", fmt.Errorf(`EVERME_AGENT_TOKEN is empty in mcpServers["everme-memory"].env of %s; %s`, path, seekMoonEvtHint(path))
+	}
+	return tok, nil
+}
+
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -236,6 +303,8 @@ func ResolveEvt(p PlatformID) (string, error) {
 		return resolveRavenEvt()
 	case PlatformWorkBuddy:
 		return resolveWorkBuddyEvt()
+	case PlatformSeekMoon:
+		return resolveSeekMoonEvt()
 	}
 	path, ok := platformEnvFile(p)
 	if !ok {
