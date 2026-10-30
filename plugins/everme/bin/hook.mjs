@@ -94,6 +94,8 @@ var HOST_HOOK_TIMEOUT_S = Object.freeze({
 });
 var HOOK_SAFETY_MARGIN_MS = 3e3;
 var MIN_REQUEST_BUDGET_MS = 1e3;
+var DETACHED_WRITE_TIMEOUT_MS = 12e4;
+var DETACHED_HOOK_BUDGET_MS = 18e4;
 function hookBudgetMs(event) {
   const seconds = HOST_HOOK_TIMEOUT_S[event];
   if (!seconds) return null;
@@ -167,11 +169,11 @@ function describeError(err) {
   if (err instanceof EvermeError) return err.describe();
   return boundedDiagnostic(err?.message || String(err), 240);
 }
-async function requestMeta(client, method, path6, body, opts) {
+async function requestMeta(client, method, path7, body, opts) {
   if (typeof client?.requestWithMeta === "function") {
-    return client.requestWithMeta(method, path6, body, opts);
+    return client.requestWithMeta(method, path7, body, opts);
   }
-  return { result: await client.request(method, path6, body, opts), requestId: "" };
+  return { result: await client.request(method, path7, body, opts), requestId: "" };
 }
 function createClient(cfg, log = noop) {
   const identity = cfg.clientKind && cfg.clientVersion ? `${cfg.clientKind}/${cfg.clientVersion}` : "";
@@ -190,9 +192,9 @@ function createClient(cfg, log = noop) {
     // even when the request times out before any response arrives.
     requestId
   });
-  async function requestWithMeta(method, path6, body, { timeoutMs = TIMEOUT_MS, query } = {}) {
+  async function requestWithMeta(method, path7, body, { timeoutMs = TIMEOUT_MS, query } = {}) {
     const requestId = randomUUID();
-    const url = buildUrl(cfg.baseUrl, path6, query);
+    const url = buildUrl(cfg.baseUrl, path7, query);
     const init = {
       method,
       headers: headers(requestId),
@@ -200,8 +202,8 @@ function createClient(cfg, log = noop) {
     };
     return execWithRetry(url, init, boundedTimeoutMs(timeoutMs, cfg.deadlineAt), log, requestId);
   }
-  async function request(method, path6, body, opts) {
-    const { result } = await requestWithMeta(method, path6, body, opts);
+  async function request(method, path7, body, opts) {
+    const { result } = await requestWithMeta(method, path7, body, opts);
     return result;
   }
   async function rawPost(uploadUrl, body, contentType, { timeoutMs = TIMEOUT_MS } = {}) {
@@ -258,7 +260,7 @@ function createClient(cfg, log = noop) {
   }
   return { request, requestWithMeta, rawPost };
 }
-function buildUrl(base, path6, query) {
+function buildUrl(base, path7, query) {
   const qs = query ? new URLSearchParams() : null;
   if (qs) {
     for (const [k, v] of Object.entries(query)) {
@@ -268,7 +270,7 @@ function buildUrl(base, path6, query) {
     }
   }
   const q = qs?.toString();
-  return q ? `${base}${path6}?${q}` : `${base}${path6}`;
+  return q ? `${base}${path7}?${q}` : `${base}${path7}`;
 }
 async function execWithRetry(url, init, timeoutMs, log, requestId) {
   try {
@@ -667,182 +669,9 @@ function hasContent(message) {
   return Array.isArray(content) ? content.length > 0 : content != null;
 }
 
-// ../agent-sdk/src/agent-memory.js
-var AGENT_MEMORY_ROLES = Object.freeze({
-  USER: "user",
-  ASSISTANT: "assistant",
-  TOOL: "tool",
-  TOOL_RESULT: "toolResult"
-});
-var AGENT_MEMORY_TOOL_CALL_TYPES = Object.freeze({
-  FUNCTION: "function"
-});
-var MAX_MESSAGES_PER_REQUEST = 500;
-var LOG_ID_MAX_CHARS = 128;
-var LOG_ERROR_MAX_CHARS = 240;
-function logValue(value, maxChars = LOG_ID_MAX_CHARS) {
-  const text = String(value ?? "").replace(/\s+/g, " ").trim();
-  return text.length > maxChars ? `${text.slice(0, maxChars)}…` : text;
-}
-async function saveAgentMemory(client, { conversationId, messages = [], flush = true, sync = false, channel, turns, baseTurn, taskBatching = false, deduplication, syncScope } = {}, log = { info() {
-}, warn() {
-} }) {
-  if (!conversationId) {
-    log.info?.("[everme] agent-memory stage=skip reason=missing_conversation_id");
-    return null;
-  }
-  const flushOnly = flush === true && messages.length === 0;
-  const stamp2 = Date.now();
-  messages = dropEvermeMemoryToolPairs(messages);
-  const entries = messages.map((source, i) => ({ source, message: convertAgentMessage(source, stamp2 + i) })).filter(({ message }) => message && (message.content != null || message.toolCalls?.length));
-  const converted = entries.map(({ message }) => message);
-  if (!converted.length && !flushOnly) {
-    log.info?.(`[everme] agent-memory stage=skip reason=no_parseable_messages conversationId=${logValue(conversationId)} inputMessages=${messages.length}`);
-    return null;
-  }
-  if (syncScope) {
-    await requireSyncScopeSupport(client, conversationId, syncScope, channel);
-  }
-  const hasBase = Number.isInteger(baseTurn) && baseTurn >= 0;
-  const metadata = entries.map(({ source }) => source);
-  const slices = taskBatching ? batchUserTasks(converted, metadata, log) : batchAgentMessages(converted, MAX_MESSAGES_PER_REQUEST, metadata, hasBase);
-  if (flushOnly) slices.push([]);
-  const ordinals = hasBase ? turnOrdinals(converted) : null;
-  const batches = slices.length;
-  if (batches > 1) {
-    log.info?.(`[everme] agent-memory stage=start conversationId=${logValue(conversationId)} messages=${converted.length} batches=${batches} flush=${flush === true}`);
-  }
-  const declaredTurns = Number.isInteger(turns) && turns >= 0 ? turns : null;
-  let res = null;
-  const requestIds = [];
-  let offset = 0;
-  for (let batch = 0; batch < batches; batch += 1) {
-    const slice = slices[batch];
-    const isLast = batch === batches - 1;
-    const sliceBase = hasBase ? baseTurn + (ordinals[offset] ?? 0) : null;
-    const sliceTurns = hasBase ? completedTurns(slices, batch, baseTurn) : null;
-    offset += slice.length;
-    try {
-      const { result, requestId } = await requestMeta(client, "POST", "/mem/agent-memory", {
-        conversationId,
-        messages: slice,
-        flush: isLast ? flush : false,
-        // Leading batches of a flushing upload must keep the server's
-        // synchronous-add guarantee: an async leading batch can still be
-        // invisible to the final request's flush (first-flush data loss,
-        // one request boundary later). Servers without the field ignore it.
-        ...sync === true || !isLast && flush === true ? { sync: true } : {},
-        ...channel ? { channel } : {},
-        ...syncScope ? { syncScope } : {},
-        ...deduplication ? { deduplication } : {},
-        ...hasBase ? { baseTurn: sliceBase, turns: sliceTurns } : declaredTurns !== null && slice.length ? { turns: isLast ? declaredTurns : 0 } : {}
-      });
-      res = result;
-      requestIds.push(requestId);
-      if (batches > 1) {
-        log.info?.(`[everme] agent-memory stage=batch result=accepted conversationId=${logValue(conversationId)} batch=${batch + 1}/${batches} messages=${slice.length} requestId=${logValue(requestId)}`);
-      }
-    } catch (error) {
-      if (batches > 1) {
-        log.warn?.(`[everme] agent-memory stage=batch result=failed conversationId=${logValue(conversationId)} batch=${batch + 1}/${batches} messages=${slice.length} error=${boundedDiagnostic(error, LOG_ERROR_MAX_CHARS)}`);
-      }
-      throw error;
-    }
-  }
-  const lastRequestId = requestIds[requestIds.length - 1] || "";
-  log.info?.(`[everme] agent-memory stage=complete result=accepted conversationId=${logValue(conversationId)} messages=${converted.length} batches=${batches} flushed=${Boolean(res?.flushed)} status=${logValue(res?.status)} requestId=${logValue(lastRequestId)} requestIdCount=${requestIds.filter(Boolean).length}`);
-  return res == null ? res : { ...res, requestId: requestIds[requestIds.length - 1], requestIds };
-}
-async function requireSyncScopeSupport(client, conversationId, syncScope, channel) {
-  const { result } = await requestMeta(client, "POST", "/mem/agent-memory/state", {
-    sessions: [{ conversationId, syncScope }]
-  });
-  const supported = channel === "hook" ? result?.hookSyncScopeSupported === true : channel === "import" && result?.syncScopeSupported === true;
-  if (!supported) {
-    throw new Error("Agent memory sync scope is not supported for this channel; upgrade the EverMe server before retrying");
-  }
-}
-async function flushAgentMemory(client, { conversationId } = {}, log) {
-  return saveAgentMemory(client, { conversationId, messages: [], flush: true }, log);
-}
-function convertAgentMessage(msg, fallbackTimestamp) {
-  if (!msg || !msg.role) return null;
-  const timestamp = normalizeTimestamp(msg.timestamp, fallbackTimestamp);
-  if (msg.role === AGENT_MEMORY_ROLES.USER) {
-    const content = cap(extractText(msg.content).trim());
-    return content ? { role: AGENT_MEMORY_ROLES.USER, timestamp, content } : null;
-  }
-  if (msg.role === AGENT_MEMORY_ROLES.ASSISTANT) {
-    return convertAssistant(msg, timestamp);
-  }
-  if (msg.role === AGENT_MEMORY_ROLES.TOOL || msg.role === AGENT_MEMORY_ROLES.TOOL_RESULT) {
-    const toolCallId = msg.toolCallId || msg.tool_call_id;
-    if (!toolCallId) return null;
-    return {
-      role: AGENT_MEMORY_ROLES.TOOL,
-      timestamp,
-      toolCallId,
-      content: extractText(msg.content).trim()
-    };
-  }
-  return null;
-}
-function convertAssistant(msg, timestamp) {
-  const textParts = [];
-  const toolCalls = [];
-  if (typeof msg.content === "string") textParts.push(msg.content);
-  for (const block of Array.isArray(msg.content) ? msg.content : []) {
-    if (!block || !block.type) continue;
-    if (block.type === "text" && typeof block.text === "string") {
-      textParts.push(block.text);
-      continue;
-    }
-    if (block.type === "toolCall" || block.type === "tool_use") {
-      const args = block.arguments ?? block.input ?? {};
-      toolCalls.push({
-        id: block.id,
-        type: AGENT_MEMORY_TOOL_CALL_TYPES.FUNCTION,
-        name: block.name ?? "unknown",
-        arguments: typeof args === "string" ? args : JSON.stringify(args)
-      });
-    }
-  }
-  if (Array.isArray(msg.toolCalls)) {
-    for (const tc of msg.toolCalls) {
-      if (!tc || !tc.id) continue;
-      const args = tc.arguments ?? tc.input ?? "{}";
-      toolCalls.push({
-        id: tc.id,
-        type: tc.type || AGENT_MEMORY_TOOL_CALL_TYPES.FUNCTION,
-        name: tc.name ?? tc.function?.name ?? "unknown",
-        arguments: typeof args === "string" ? args : JSON.stringify(args)
-      });
-    }
-  }
-  const content = cap(textParts.join("\n").trim());
-  if (!content && !toolCalls.length) return null;
-  return {
-    role: AGENT_MEMORY_ROLES.ASSISTANT,
-    timestamp,
-    ...content ? { content } : {},
-    ...toolCalls.length ? { toolCalls } : {},
-    ...typeof msg.turnComplete === "boolean" ? { turnComplete: msg.turnComplete } : {}
-  };
-}
-function normalizeTimestamp(ts, fallback) {
-  if (typeof ts === "number" && Number.isFinite(ts)) {
-    return ts > 1e10 ? Math.trunc(ts) : Math.trunc(ts * 1e3);
-  }
-  const parsed = Date.parse(ts);
-  if (Number.isFinite(parsed)) return parsed;
-  return fallback;
-}
-function cap(text) {
-  return capRunes(text);
-}
-
-// ../agent-sdk/src/hooks/skill-cache.js
-import { mkdir as mkdir2, readFile as readFile2 } from "node:fs/promises";
+// ../agent-sdk/src/timestamps.js
+import { createHash } from "node:crypto";
+import { chmod as chmod2, mkdir as mkdir2, readFile as readFile2, readdir as readdir2, rename as rename2, stat as stat2, unlink as unlink2, writeFile as writeFile2 } from "node:fs/promises";
 import path2 from "node:path";
 
 // ../agent-sdk/src/hooks/state.js
@@ -1064,14 +893,364 @@ function sanitizeSessionId(sessionId) {
   return sanitized || "default";
 }
 
+// ../agent-sdk/src/timestamps.js
+var LEDGER_DIR = "timestamps";
+var LEDGER_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1e3;
+var LEDGER_MAX_ENTRIES = 4096;
+var LEDGER_LOCK_WAIT_MS = 2e3;
+var MEMORY_MAX_CONVERSATIONS = 256;
+function hostTimestamp(value) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value > 1e10 ? Math.trunc(value) : Math.trunc(value * 1e3);
+  }
+  if (value == null || value === "") return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+async function resolveFallbackTimestamps({ conversationId, messages, ledger, now = Date.now() }) {
+  const out = new Array(messages.length).fill(void 0);
+  const host = messages.map((message) => hostTimestamp(message?.timestamp));
+  if (host.every((value) => value !== null)) return out;
+  const keys = fallbackKeys(conversationId, messages);
+  await ledger.withConversation(conversationId, (entries) => {
+    let previous = null;
+    for (let i = 0; i < messages.length; i += 1) {
+      if (host[i] !== null) {
+        previous = host[i];
+        continue;
+      }
+      let value = entries.get(keys[i]);
+      if (!Number.isFinite(value)) {
+        value = previous === null ? now + i : Math.max(now + i, previous + 1);
+        entries.set(keys[i], value);
+      }
+      out[i] = value;
+      previous = value;
+    }
+  });
+  return out;
+}
+function fallbackKeys(conversationId, messages) {
+  const keys = new Array(messages.length);
+  let start = 0;
+  const close = (end) => {
+    if (end <= start) return;
+    const digest = createHash("sha256").update(String(conversationId ?? ""));
+    for (let i = start; i < end; i += 1) digest.update("\n").update(signature(messages[i]));
+    const segment = digest.digest("hex").slice(0, 32);
+    for (let i = start; i < end; i += 1) {
+      const nativeId = messages[i]?.nativeId;
+      keys[i] = typeof nativeId === "string" && nativeId ? `id:${nativeId}` : `${segment}:${i - start}`;
+    }
+  };
+  for (let i = 0; i < messages.length; i += 1) {
+    if (i > start && messages[i]?.role === "user") {
+      close(i);
+      start = i;
+    }
+  }
+  close(messages.length);
+  return keys;
+}
+function signature(message) {
+  if (!message || typeof message !== "object") return "";
+  try {
+    return JSON.stringify([
+      message.role ?? "",
+      message.content ?? null,
+      message.toolCallId ?? message.tool_call_id ?? "",
+      message.toolCalls ?? null
+    ]);
+  } catch {
+    return String(message.role ?? "");
+  }
+}
+function createMemoryTimestampLedger({
+  maxConversations = MEMORY_MAX_CONVERSATIONS,
+  maxEntries = LEDGER_MAX_ENTRIES
+} = {}) {
+  const conversations = /* @__PURE__ */ new Map();
+  return {
+    async withConversation(conversationId, fn) {
+      const id = String(conversationId ?? "");
+      const entries = conversations.get(id) ?? /* @__PURE__ */ new Map();
+      conversations.delete(id);
+      fn(entries);
+      while (entries.size > maxEntries) entries.delete(entries.keys().next().value);
+      conversations.set(id, entries);
+      while (conversations.size > maxConversations) conversations.delete(conversations.keys().next().value);
+    }
+  };
+}
+function createTimestampLedger({
+  stateDir = DEFAULT_STATE_DIR,
+  maxAgeMs = LEDGER_MAX_AGE_MS,
+  maxEntries = LEDGER_MAX_ENTRIES,
+  lockWaitMs = LEDGER_LOCK_WAIT_MS,
+  clock = Date.now
+} = {}) {
+  const dir = path2.join(stateDir || DEFAULT_STATE_DIR, LEDGER_DIR);
+  let swept = false;
+  return {
+    async withConversation(conversationId, fn) {
+      await mkdir2(dir, { recursive: true, mode: 448 });
+      const file = path2.join(dir, `${fileKey(conversationId)}.json`);
+      const lock = `${file}.lock`;
+      if (!await acquireLock(lock, lockWaitMs)) {
+        throw new Error("everme_timestamp_ledger_lock_timeout");
+      }
+      try {
+        const now = clock();
+        const stored = await readLedger(file);
+        const entries = new Map(stored.map(([key, value]) => [key, value]));
+        const before = new Set(entries.keys());
+        fn(entries);
+        const assignedAt = new Map(stored.map(([key, , at]) => [key, at]));
+        const rows = [];
+        for (const [key, value] of entries) {
+          const at = before.has(key) ? assignedAt.get(key) : now;
+          if (Number.isFinite(at) && now - at > maxAgeMs) continue;
+          rows.push([key, value, Number.isFinite(at) ? at : now]);
+        }
+        rows.sort((a, b) => a[2] - b[2]);
+        await writeLedger(file, rows.slice(Math.max(0, rows.length - maxEntries)));
+      } finally {
+        await unlink2(lock).catch(() => {
+        });
+      }
+      if (!swept) {
+        swept = true;
+        await sweep(dir, maxAgeMs, clock());
+      }
+    }
+  };
+}
+function fileKey(conversationId) {
+  return createHash("sha256").update(String(conversationId ?? "")).digest("hex").slice(0, 40);
+}
+async function readLedger(file) {
+  try {
+    const parsed = JSON.parse(await readFile2(file, "utf8"));
+    return Array.isArray(parsed?.entries) ? parsed.entries.filter((row) => Array.isArray(row) && typeof row[0] === "string" && Number.isFinite(row[1])) : [];
+  } catch {
+    return [];
+  }
+}
+async function writeLedger(file, rows) {
+  const temp = `${file}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    await writeFile2(temp, JSON.stringify({ v: 1, entries: rows }), { encoding: "utf8", mode: 384, flag: "wx" });
+    await rename2(temp, file);
+    await chmod2(file, 384);
+  } catch (error) {
+    await unlink2(temp).catch(() => {
+    });
+    throw error;
+  }
+}
+async function sweep(dir, maxAgeMs, now) {
+  try {
+    for (const name of await readdir2(dir)) {
+      if (!name.endsWith(".json")) continue;
+      const file = path2.join(dir, name);
+      try {
+        if (now - (await stat2(file)).mtimeMs > maxAgeMs) await unlink2(file);
+      } catch {
+      }
+    }
+  } catch {
+  }
+}
+
+// ../agent-sdk/src/agent-memory.js
+var processTimestampLedger = createMemoryTimestampLedger();
+var AGENT_MEMORY_ROLES = Object.freeze({
+  USER: "user",
+  ASSISTANT: "assistant",
+  TOOL: "tool",
+  TOOL_RESULT: "toolResult"
+});
+var AGENT_MEMORY_TOOL_CALL_TYPES = Object.freeze({
+  FUNCTION: "function"
+});
+var MAX_MESSAGES_PER_REQUEST = 500;
+var LOG_ID_MAX_CHARS = 128;
+var LOG_ERROR_MAX_CHARS = 240;
+function logValue(value, maxChars = LOG_ID_MAX_CHARS) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  return text.length > maxChars ? `${text.slice(0, maxChars)}…` : text;
+}
+async function saveAgentMemory(client, { conversationId, messages = [], flush = true, sync = false, channel, turns, baseTurn, taskBatching = false, deduplication, syncScope, timestampLedger, timeoutMs } = {}, log = { info() {
+}, warn() {
+} }) {
+  if (!conversationId) {
+    log.info?.("[everme] agent-memory stage=skip reason=missing_conversation_id");
+    return null;
+  }
+  const flushOnly = flush === true && messages.length === 0;
+  const stamp2 = Date.now();
+  messages = dropEvermeMemoryToolPairs(messages);
+  let fallbacks;
+  try {
+    fallbacks = await resolveFallbackTimestamps({
+      conversationId,
+      messages,
+      ledger: timestampLedger || processTimestampLedger,
+      now: stamp2
+    });
+  } catch (error) {
+    log.warn?.(`[everme] agent-memory stage=timestamps result=degraded conversationId=${logValue(conversationId)} error=${boundedDiagnostic(error, LOG_ERROR_MAX_CHARS)}`);
+    fallbacks = messages.map((_, i) => stamp2 + i);
+  }
+  const entries = messages.map((source, i) => ({ source, message: convertAgentMessage(source, fallbacks[i] ?? stamp2 + i) })).filter(({ message }) => message && (message.content != null || message.toolCalls?.length));
+  const converted = entries.map(({ message }) => message);
+  if (!converted.length && !flushOnly) {
+    log.info?.(`[everme] agent-memory stage=skip reason=no_parseable_messages conversationId=${logValue(conversationId)} inputMessages=${messages.length}`);
+    return null;
+  }
+  if (syncScope) {
+    await requireSyncScopeSupport(client, conversationId, syncScope, channel);
+  }
+  const hasBase = Number.isInteger(baseTurn) && baseTurn >= 0;
+  const metadata = entries.map(({ source }) => source);
+  const slices = taskBatching ? batchUserTasks(converted, metadata, log) : batchAgentMessages(converted, MAX_MESSAGES_PER_REQUEST, metadata, hasBase);
+  if (flushOnly) slices.push([]);
+  const ordinals = hasBase ? turnOrdinals(converted) : null;
+  const batches = slices.length;
+  if (batches > 1) {
+    log.info?.(`[everme] agent-memory stage=start conversationId=${logValue(conversationId)} messages=${converted.length} batches=${batches} flush=${flush === true}`);
+  }
+  const declaredTurns = Number.isInteger(turns) && turns >= 0 ? turns : null;
+  let res = null;
+  const requestIds = [];
+  let offset = 0;
+  for (let batch = 0; batch < batches; batch += 1) {
+    const slice = slices[batch];
+    const isLast = batch === batches - 1;
+    const sliceBase = hasBase ? baseTurn + (ordinals[offset] ?? 0) : null;
+    const sliceTurns = hasBase ? completedTurns(slices, batch, baseTurn) : null;
+    offset += slice.length;
+    try {
+      const { result, requestId } = await requestMeta(client, "POST", "/mem/agent-memory", {
+        conversationId,
+        messages: slice,
+        flush: isLast ? flush : false,
+        // Leading batches of a flushing upload must keep the server's
+        // synchronous-add guarantee: an async leading batch can still be
+        // invisible to the final request's flush (first-flush data loss,
+        // one request boundary later). Servers without the field ignore it.
+        ...sync === true || !isLast && flush === true ? { sync: true } : {},
+        ...channel ? { channel } : {},
+        ...syncScope ? { syncScope } : {},
+        ...deduplication ? { deduplication } : {},
+        ...hasBase ? { baseTurn: sliceBase, turns: sliceTurns } : declaredTurns !== null && slice.length ? { turns: isLast ? declaredTurns : 0 } : {}
+      }, ...Number.isFinite(timeoutMs) && timeoutMs > 0 ? [{ timeoutMs }] : []);
+      res = result;
+      requestIds.push(requestId);
+      if (batches > 1) {
+        log.info?.(`[everme] agent-memory stage=batch result=accepted conversationId=${logValue(conversationId)} batch=${batch + 1}/${batches} messages=${slice.length} requestId=${logValue(requestId)}`);
+      }
+    } catch (error) {
+      if (batches > 1) {
+        log.warn?.(`[everme] agent-memory stage=batch result=failed conversationId=${logValue(conversationId)} batch=${batch + 1}/${batches} messages=${slice.length} error=${boundedDiagnostic(error, LOG_ERROR_MAX_CHARS)}`);
+      }
+      throw error;
+    }
+  }
+  const lastRequestId = requestIds[requestIds.length - 1] || "";
+  log.info?.(`[everme] agent-memory stage=complete result=accepted conversationId=${logValue(conversationId)} messages=${converted.length} batches=${batches} flushed=${Boolean(res?.flushed)} status=${logValue(res?.status)} requestId=${logValue(lastRequestId)} requestIdCount=${requestIds.filter(Boolean).length}`);
+  return res == null ? res : { ...res, requestId: requestIds[requestIds.length - 1], requestIds };
+}
+async function requireSyncScopeSupport(client, conversationId, syncScope, channel) {
+  const { result } = await requestMeta(client, "POST", "/mem/agent-memory/state", {
+    sessions: [{ conversationId, syncScope }]
+  });
+  const supported = channel === "hook" ? result?.hookSyncScopeSupported === true : channel === "import" && result?.syncScopeSupported === true;
+  if (!supported) {
+    throw new Error("Agent memory sync scope is not supported for this channel; upgrade the EverMe server before retrying");
+  }
+}
+async function flushAgentMemory(client, { conversationId, timeoutMs } = {}, log) {
+  return saveAgentMemory(client, { conversationId, messages: [], flush: true, timeoutMs }, log);
+}
+function convertAgentMessage(msg, fallbackTimestamp) {
+  if (!msg || !msg.role) return null;
+  const timestamp = hostTimestamp(msg.timestamp) ?? fallbackTimestamp;
+  if (msg.role === AGENT_MEMORY_ROLES.USER) {
+    const content = cap(extractText(msg.content).trim());
+    return content ? { role: AGENT_MEMORY_ROLES.USER, timestamp, content } : null;
+  }
+  if (msg.role === AGENT_MEMORY_ROLES.ASSISTANT) {
+    return convertAssistant(msg, timestamp);
+  }
+  if (msg.role === AGENT_MEMORY_ROLES.TOOL || msg.role === AGENT_MEMORY_ROLES.TOOL_RESULT) {
+    const toolCallId = msg.toolCallId || msg.tool_call_id;
+    if (!toolCallId) return null;
+    return {
+      role: AGENT_MEMORY_ROLES.TOOL,
+      timestamp,
+      toolCallId,
+      content: extractText(msg.content).trim()
+    };
+  }
+  return null;
+}
+function convertAssistant(msg, timestamp) {
+  const textParts = [];
+  const toolCalls = [];
+  if (typeof msg.content === "string") textParts.push(msg.content);
+  for (const block of Array.isArray(msg.content) ? msg.content : []) {
+    if (!block || !block.type) continue;
+    if (block.type === "text" && typeof block.text === "string") {
+      textParts.push(block.text);
+      continue;
+    }
+    if (block.type === "toolCall" || block.type === "tool_use") {
+      const args = block.arguments ?? block.input ?? {};
+      toolCalls.push({
+        id: block.id,
+        type: AGENT_MEMORY_TOOL_CALL_TYPES.FUNCTION,
+        name: block.name ?? "unknown",
+        arguments: typeof args === "string" ? args : JSON.stringify(args)
+      });
+    }
+  }
+  if (Array.isArray(msg.toolCalls)) {
+    for (const tc of msg.toolCalls) {
+      if (!tc || !tc.id) continue;
+      const args = tc.arguments ?? tc.input ?? "{}";
+      toolCalls.push({
+        id: tc.id,
+        type: tc.type || AGENT_MEMORY_TOOL_CALL_TYPES.FUNCTION,
+        name: tc.name ?? tc.function?.name ?? "unknown",
+        arguments: typeof args === "string" ? args : JSON.stringify(args)
+      });
+    }
+  }
+  const content = cap(textParts.join("\n").trim());
+  if (!content && !toolCalls.length) return null;
+  return {
+    role: AGENT_MEMORY_ROLES.ASSISTANT,
+    timestamp,
+    ...content ? { content } : {},
+    ...toolCalls.length ? { toolCalls } : {},
+    ...typeof msg.turnComplete === "boolean" ? { turnComplete: msg.turnComplete } : {}
+  };
+}
+function cap(text) {
+  return capRunes(text);
+}
+
 // ../agent-sdk/src/hooks/skill-cache.js
+import { mkdir as mkdir3, readFile as readFile3 } from "node:fs/promises";
+import path3 from "node:path";
 var SKILL_FILE_SUFFIX = ".skill.json";
 function defaultStateDir() {
   return process.env.EVERME_STATE_DIR || DEFAULT_STATE_DIR;
 }
 function createSkillContentCache({ stateDir } = {}) {
   const dirOf = () => stateDir || defaultStateDir();
-  const fileFor = (id) => path2.join(dirOf(), `${sanitizeSessionId(id)}${SKILL_FILE_SUFFIX}`);
+  const fileFor = (id) => path3.join(dirOf(), `${sanitizeSessionId(id)}${SKILL_FILE_SUFFIX}`);
   return {
     /**
      * Persist the bodies of `skills`. Callers pass rows that already cleared
@@ -1084,7 +1263,7 @@ function createSkillContentCache({ stateDir } = {}) {
       const rows = (skills || []).filter((skill) => skill?.id && skill?.content);
       if (!rows.length) return 0;
       const dir = dirOf();
-      await mkdir2(dir, { recursive: true, mode: 448 });
+      await mkdir3(dir, { recursive: true, mode: 448 });
       let written = 0;
       let lastFile = "";
       for (const skill of rows) {
@@ -1115,7 +1294,7 @@ function createSkillContentCache({ stateDir } = {}) {
       const key = String(id || "").trim();
       if (!key) return null;
       try {
-        const parsed = JSON.parse(await readFile2(fileFor(key), "utf8"));
+        const parsed = JSON.parse(await readFile3(fileFor(key), "utf8"));
         if (typeof parsed?.content !== "string" || !parsed.content) return null;
         return {
           id: typeof parsed.id === "string" ? parsed.id : key,
@@ -1393,7 +1572,7 @@ function createTelemetry({ client, config = {}, now = Date.now } = {}) {
 }
 
 // ../agent-sdk/src/hooks/runtime.js
-import { readFile as readFile3 } from "node:fs/promises";
+import { readFile as readFile4 } from "node:fs/promises";
 
 // ../agent-sdk/src/hooks/inject.js
 var MIN_PROMPT_TOKENS = 3;
@@ -1543,7 +1722,9 @@ async function runStore({
   stateDir,
   log,
   diagnostic,
-  telemetry
+  telemetry,
+  timestampLedger,
+  writeTimeoutMs
 }) {
   const sessionId = input?.sessionId;
   if (!sessionId) {
@@ -1583,7 +1764,9 @@ async function runStore({
         telemetry,
         retryOfPending,
         turnId,
-        perTurn
+        perTurn,
+        timestampLedger,
+        writeTimeoutMs
       });
     };
     if (typeof checkpointStore?.withSession === "function" && input?.sessionId) {
@@ -1627,9 +1810,11 @@ async function runStore({
       ...turn,
       channel: "hook",
       turns: perTurn ? 1 : completedUserTurns(turn.messages),
-      taskBatching: adapter.taskBatching === true
+      taskBatching: adapter.taskBatching === true,
+      timestampLedger,
+      timeoutMs: writeTimeoutMs
     }, log),
-    flush: (conversationId) => flushAgentMemory(client, { conversationId }, log),
+    flush: (conversationId) => flushAgentMemory(client, { conversationId, timeoutMs: writeTimeoutMs }, log),
     diagnostic,
     rethrowOnError: true
   });
@@ -1668,7 +1853,9 @@ async function runStoreBatches({
   telemetry,
   retryOfPending,
   turnId,
-  perTurn
+  perTurn,
+  timestampLedger,
+  writeTimeoutMs
 }) {
   const ready = batches.filter((batch) => batch && typeof batch.conversationId === "string" && batch.conversationId && Array.isArray(batch.messages) && batch.messages.length);
   if (!ready.length) {
@@ -1678,8 +1865,13 @@ async function runStoreBatches({
   }
   const turn = await counter.peek(input.sessionId, turnId);
   const runtime = createHookRuntime({
-    enqueue: (batch) => saveAgentMemory(client, { ...batch, taskBatching: adapter.taskBatching === true }, log),
-    flush: (conversationId) => flushAgentMemory(client, { conversationId }, log),
+    enqueue: (batch) => saveAgentMemory(client, {
+      ...batch,
+      taskBatching: adapter.taskBatching === true,
+      timestampLedger,
+      timeoutMs: writeTimeoutMs
+    }, log),
+    flush: (conversationId) => flushAgentMemory(client, { conversationId, timeoutMs: writeTimeoutMs }, log),
     diagnostic,
     rethrowOnError: true
   });
@@ -1767,7 +1959,9 @@ async function runBoundaryFlush({
   checkpointStore,
   stateDir,
   log,
-  diagnostic
+  diagnostic,
+  timestampLedger,
+  writeTimeoutMs
 }) {
   if (!input?.sessionId) {
     log.info?.("[everme] boundary-flush stage=skip reason=missing_session_id");
@@ -1778,9 +1972,11 @@ async function runBoundaryFlush({
       ...turn,
       channel: "hook",
       ...Number.isInteger(turn.turns) ? {} : { turns: completedUserTurns(turn.messages) },
-      taskBatching: adapter.taskBatching === true
+      taskBatching: adapter.taskBatching === true,
+      timestampLedger,
+      timeoutMs: writeTimeoutMs
     }, log),
-    flush: (conversationId) => flushAgentMemory(client, { conversationId }, log),
+    flush: (conversationId) => flushAgentMemory(client, { conversationId, timeoutMs: writeTimeoutMs }, log),
     diagnostic,
     rethrowOnError: true
   });
@@ -1845,7 +2041,7 @@ function withClientIdentity(config, adapter) {
 async function runHook(event, rawInput, adapter, deps = {}) {
   const stopWatchdog = startHookWatchdog({
     event: adapter?.mapEvent?.(event) || event,
-    budgetMs: hookBudgetMs(adapter?.mapEvent?.(event) || event),
+    budgetMs: deps.detached === true ? DETACHED_HOOK_BUDGET_MS : hookBudgetMs(adapter?.mapEvent?.(event) || event),
     onExpire: (line) => {
       try {
         process.stderr.write(`${line}
@@ -1863,6 +2059,7 @@ async function runHook(event, rawInput, adapter, deps = {}) {
       createTurnCounter,
       createSessionState,
       createTranscriptCheckpointStore,
+      createTimestampLedger,
       createTelemetry,
       runSessionStart,
       runInject,
@@ -1873,6 +2070,11 @@ async function runHook(event, rawInput, adapter, deps = {}) {
   } finally {
     stopWatchdog();
   }
+}
+function timestampLedgerFor(deps, env) {
+  if (deps.timestampLedger) return deps.timestampLedger;
+  if (typeof deps.createTimestampLedger !== "function") return void 0;
+  return deps.createTimestampLedger({ stateDir: env.EVERME_STATE_DIR });
 }
 var stderrLog = {
   info(line) {
@@ -1901,11 +2103,13 @@ async function runHostHook(event, rawInput, adapter, deps = {}) {
     if (WRITE_EVENTS.has(canonicalEvent) && (baseConfig.authMode !== "evt" || !baseConfig.agentId)) {
       return formatOutput(adapter, hostEvent, result);
     }
-    const budgetMs = deps.budgetMs === void 0 ? hookBudgetMs(canonicalEvent) : deps.budgetMs;
+    const detached = deps.detached === true;
+    const budgetMs = deps.budgetMs !== void 0 ? deps.budgetMs : detached ? DETACHED_HOOK_BUDGET_MS : hookBudgetMs(canonicalEvent);
     const config = withClientIdentity(
       budgetMs ? { ...baseConfig, deadlineAt: Date.now() + budgetMs } : baseConfig,
       adapter
     );
+    const writeTimeoutMs = detached ? DETACHED_WRITE_TIMEOUT_MS : void 0;
     const log = deps.log || stderrLog;
     const client = deps.client || requireOperation(deps.createClient, "createClient")(config, log);
     telemetry = deps.telemetry || (typeof deps.createTelemetry === "function" ? deps.createTelemetry({ client, config }) : null);
@@ -1918,6 +2122,8 @@ async function runHostHook(event, rawInput, adapter, deps = {}) {
       const checkpointStore = deps.checkpointStore || (typeof deps.createTranscriptCheckpointStore === "function" ? deps.createTranscriptCheckpointStore({ stateDir: env.EVERME_STATE_DIR }) : void 0);
       const sessionState = deps.sessionState || (typeof deps.createSessionState === "function" ? deps.createSessionState({ stateDir: env.EVERME_STATE_DIR }) : void 0);
       result = await requireOperation(deps.runStore, "runStore")({
+        timestampLedger: timestampLedgerFor(deps, env),
+        writeTimeoutMs,
         input,
         adapter,
         client,
@@ -1940,6 +2146,8 @@ async function runHostHook(event, rawInput, adapter, deps = {}) {
       const sessionState = deps.sessionState || (typeof deps.createSessionState === "function" ? deps.createSessionState({ stateDir: env.EVERME_STATE_DIR }) : void 0);
       const checkpointStore = deps.checkpointStore || (typeof deps.createTranscriptCheckpointStore === "function" ? deps.createTranscriptCheckpointStore({ stateDir: env.EVERME_STATE_DIR }) : void 0);
       result = await requireOperation(deps.runBoundaryFlush, "runBoundaryFlush")({
+        timestampLedger: timestampLedgerFor(deps, env),
+        writeTimeoutMs,
         input,
         adapter,
         client,
@@ -1984,7 +2192,7 @@ async function loadRuntimeEnv(adapter, baseEnv) {
   if (!file) return merged;
   let raw;
   try {
-    raw = await readFile3(file, "utf8");
+    raw = await readFile4(file, "utf8");
   } catch (error) {
     if (error?.code === "ENOENT") return merged;
     throw error;
@@ -2028,15 +2236,15 @@ function formatOutput(adapter, event, result) {
 
 // src/adapter.js
 import os2 from "node:os";
-import path5 from "node:path";
+import path6 from "node:path";
 
 // src/store-batches.js
-import { readFile as readFile4, readdir as readdir2 } from "node:fs/promises";
-import path4 from "node:path";
+import { readFile as readFile5, readdir as readdir3 } from "node:fs/promises";
+import path5 from "node:path";
 
 // src/transcript.js
 import { createReadStream } from "node:fs";
-import { stat as stat2 } from "node:fs/promises";
+import { stat as stat3 } from "node:fs/promises";
 import { createInterface } from "node:readline";
 var INJECTED_CONTEXT_TAGS = [
   "app-context",
@@ -2273,7 +2481,7 @@ function sessionMetaIsSubagent(payload) {
   return Boolean(payload?.parent_thread_id);
 }
 function mapPayload(payload, timestampValue, fallbackTimestamp, lineNumber, state) {
-  const timestamp = normalizeTimestamp2(timestampValue, fallbackTimestamp);
+  const timestamp = normalizeTimestamp(timestampValue, fallbackTimestamp);
   if (payload.type === "message") {
     if (["developer", "system"].includes(payload.role)) {
       countDiagnostic(state, "system_message");
@@ -2511,7 +2719,7 @@ function customToolArguments(value) {
     return "{}";
   }
 }
-function normalizeTimestamp2(value, fallbackTimestamp) {
+function normalizeTimestamp(value, fallbackTimestamp) {
   if (typeof value === "number" && Number.isFinite(value)) {
     return value > 1e10 ? Math.trunc(value) : Math.trunc(value * 1e3);
   }
@@ -2520,7 +2728,7 @@ function normalizeTimestamp2(value, fallbackTimestamp) {
 }
 async function transcriptFallbackTimestampBase(transcriptPath) {
   try {
-    return Math.trunc((await stat2(transcriptPath)).mtimeMs);
+    return Math.trunc((await stat3(transcriptPath)).mtimeMs);
   } catch {
     return 0;
   }
@@ -2534,7 +2742,7 @@ function redactText(value) {
 
 // src/fragment.js
 import { createReadStream as createReadStream2 } from "node:fs";
-import path3 from "node:path";
+import path4 from "node:path";
 import { createInterface as createInterface2 } from "node:readline";
 var UUID = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}";
 var ROLLOUT = new RegExp(`^rollout-\\d{4}-\\d{2}-\\d{2}T\\d{2}-\\d{2}-\\d{2}-(${UUID})(?:_(${UUID}))?\\.jsonl$`);
@@ -2551,7 +2759,7 @@ async function readFragmentScope(transcriptPath) {
       }
       if (event?.type !== "session_meta") continue;
       if (event.payload?.history_mode !== "paginated") return "";
-      const match = path3.basename(transcriptPath).match(ROLLOUT);
+      const match = path4.basename(transcriptPath).match(ROLLOUT);
       if (!match) {
         if (event.payload?.history_base?.thread_id) {
           throw new Error("codex paginated fragment has no native rollout filename identity");
@@ -2617,14 +2825,14 @@ async function transcriptBatch({ checkpointStore, conversationId, initialTailOnl
 async function completedDescendants(rootPath, rootId) {
   let names;
   try {
-    names = await readdir2(path4.dirname(rootPath));
+    names = await readdir3(path5.dirname(rootPath));
   } catch {
     return [];
   }
   const candidates = [];
   for (const name of names) {
     if (!name.endsWith(".jsonl")) continue;
-    const candidatePath = path4.join(path4.dirname(rootPath), name);
+    const candidatePath = path5.join(path5.dirname(rootPath), name);
     if (candidatePath === rootPath) continue;
     const metadata = await rolloutMetadata(candidatePath);
     if (metadata?.isSubagent && metadata.complete) {
@@ -2649,7 +2857,7 @@ async function completedDescendants(rootPath, rootId) {
 async function rolloutMetadata(transcriptPath) {
   let raw;
   try {
-    raw = await readFile4(transcriptPath, "utf8");
+    raw = await readFile5(transcriptPath, "utf8");
   } catch {
     return null;
   }
@@ -2685,7 +2893,7 @@ function stringValue(value) {
 }
 
 // src/adapter.js
-var PKG_VERSION = true ? "0.7.6" : createRequire(import.meta.url)("../package.json").version;
+var PKG_VERSION = true ? "0.7.7" : createRequire(import.meta.url)("../package.json").version;
 var CONTEXT_EVENTS = /* @__PURE__ */ new Set(["SessionStart", "UserPromptSubmit"]);
 var codexAdapter = {
   platform: "codex",
@@ -2700,7 +2908,7 @@ var codexAdapter = {
   // the model cannot redeem is pure noise.
   skillFetch: true,
   envFile() {
-    return process.env.EVERME_ENV_FILE_PATH || path5.join(os2.homedir(), ".codex", "everme.env");
+    return process.env.EVERME_ENV_FILE_PATH || path6.join(os2.homedir(), ".codex", "everme.env");
   },
   normalizeInput(rawInput) {
     return {
