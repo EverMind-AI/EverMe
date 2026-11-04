@@ -1,0 +1,26 @@
+name: Publish EverMe to the MCP Registry
+
+on:
+  push:
+    branches: [main]
+    paths: [server.json]
+  workflow_dispatch:
+
+jobs:
+  publish:
+    if: github.repository == 'EverMind-AI/EverMe' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install verified publisher
+        run: |
+          curl -fsSL --retry 3 -o publisher.tar.gz https://github.com/modelcontextprotocol/registry/releases/download/v1.8.7/mcp-publisher_linux_amd64.tar.gz
+          echo '00b21004149a4ce66f0782508ae4a2bce67d1bea395a8da0bd8028159fb59579  publisher.tar.gz' | sha256sum -c -
+          tar xzf publisher.tar.gz mcp-publisher
+      - name: Publish remote server metadata
+        run: |
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish
