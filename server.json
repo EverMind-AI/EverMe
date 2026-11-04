@@ -1,0 +1,13 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.EverMind-AI/everme",
+  "title": "EverMe",
+  "description": "Search personal memories and retrieve context from EverMe.",
+  "version": "0.6.1",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://api.everme.evermind.ai/mcp"
+    }
+  ]
+}
