@@ -17043,6 +17043,11 @@ var Server = class extends Protocol {
 import { randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 
+// ../agent-sdk/src/config.js
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
 // ../agent-sdk/src/hooks/knobs.js
 var DEFAULT_INJECT_TOPK = 5;
 var MAX_INJECT_TOPK = 20;
@@ -17091,6 +17096,8 @@ function strictBoolean(value, fallback) {
 // ../agent-sdk/src/config.js
 var DEFAULT_API_BASE = "https://api.everme.evermind.ai";
 var API_PATH_PREFIX = "/api/v1";
+var DEFAULT_LOCAL_GATEWAY = "http://127.0.0.1:18790";
+var LOOPBACK_HOSTS = /* @__PURE__ */ new Set(["127.0.0.1", "localhost", "[::1]"]);
 var TIMEOUT_MS = 3e4;
 function resolveConfig(host = {}) {
   const apiBase = trimSlash(host.apiBase || process.env.EVERME_API_BASE || DEFAULT_API_BASE);
@@ -17130,6 +17137,36 @@ function assertConfigUsable(cfg, { requireAgentId = true } = {}) {
 }
 function trimSlash(s) {
   return String(s || "").replace(/\/+$/, "");
+}
+function readDeviceRoute(env = process.env) {
+  const home = env.EVERME_MEMORY_HOME || join(homedir(), ".everme", "memory");
+  let raw;
+  try {
+    raw = readFileSync(join(home, "route.json"), "utf8");
+  } catch (err) {
+    if (err?.code === "ENOENT" || err?.code === "ENOTDIR") return null;
+    return { baseUrl: DEFAULT_LOCAL_GATEWAY + API_PATH_PREFIX };
+  }
+  let route;
+  try {
+    route = JSON.parse(raw);
+  } catch {
+    return { baseUrl: DEFAULT_LOCAL_GATEWAY + API_PATH_PREFIX };
+  }
+  if (!route || typeof route !== "object" || Array.isArray(route)) {
+    return { baseUrl: DEFAULT_LOCAL_GATEWAY + API_PATH_PREFIX };
+  }
+  if (route.mode !== "local") return null;
+  const apiBase = isLoopbackBase(route.apiBase) ? trimSlash(route.apiBase) : DEFAULT_LOCAL_GATEWAY;
+  return { baseUrl: apiBase + API_PATH_PREFIX };
+}
+function isLoopbackBase(value) {
+  try {
+    const u = new URL(String(value));
+    return u.protocol === "http:" && LOOPBACK_HOSTS.has(u.hostname) && (u.pathname === "/" || u.pathname === "");
+  } catch {
+    return false;
+  }
 }
 
 // ../agent-sdk/src/hooks/deadline.js
@@ -17217,13 +17254,24 @@ function createClient(cfg, log = noop) {
   });
   async function requestWithMeta(method, path3, body, { timeoutMs = TIMEOUT_MS, query } = {}) {
     const requestId = randomUUID();
-    const url = buildUrl(cfg.baseUrl, path3, query);
+    const route = readDeviceRoute();
+    const url = buildUrl(route ? route.baseUrl : cfg.baseUrl, path3, query);
     const init = {
       method,
       headers: headers(requestId),
       body: body == null ? void 0 : JSON.stringify(body)
     };
-    return execWithRetry(url, init, boundedTimeoutMs(timeoutMs, cfg.deadlineAt), log, requestId);
+    try {
+      return await execWithRetry(url, init, boundedTimeoutMs(timeoutMs, cfg.deadlineAt), log, requestId);
+    } catch (err) {
+      if (route && err instanceof EvermeError && err.type === "upstream" && !err.httpStatus) {
+        err.message = boundedDiagnostic(
+          `local memory service is not reachable (${err.message}); open EverMe Desktop`,
+          240
+        );
+      }
+      throw err;
+    }
   }
   async function request(method, path3, body, opts) {
     const { result } = await requestWithMeta(method, path3, body, opts);
@@ -17862,7 +17910,7 @@ function formatQueryStats(stats) {
 }
 
 // ../memory-mcp/src/mcp.js
-var PKG_VERSION = true ? "0.7.7" : createRequire(import.meta.url)("../package.json").version;
+var PKG_VERSION = true ? "0.7.8" : createRequire(import.meta.url)("../package.json").version;
 var EVERME_MCP_INSTRUCTIONS = [
   "EverMe is the user's long-term memory across sessions.",
   "",
