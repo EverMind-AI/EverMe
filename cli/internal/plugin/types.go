@@ -36,6 +36,7 @@ const (
 	PlatformKimiCode      Platform = "kimicode"
 	PlatformRaven         Platform = "raven"
 	PlatformDSH           Platform = "dsh"
+	PlatformSeekMoon      Platform = "seekmoon"
 )
 
 // Detection is the result of inspecting the local filesystem for one
