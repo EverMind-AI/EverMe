@@ -1,7 +1,7 @@
 import { test, describe, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { createClient, EvermeError } from "../src/client.js";
+import { createClient, EvermeError, redactError } from "../src/client.js";
 
 /**
  * Helper: spin up a tiny HTTP server, return its base URL + a
@@ -108,6 +108,19 @@ describe("client", () => {
       assert.doesNotMatch(err.message, /evt_[a-f0-9]{32}/, "must not surface a full evt token");
       assert.match(err.message, /evt_aaaa_REDACTED/);
     }
+  });
+
+  test("redactError masks non-32-char and hyphenated evt_/emk_ tokens", async (t) => {
+    t.after(async () => s.close());
+    const hyphen = "evt_abcdefghij-klmnopqrs"; // 20+ with hyphen, used to leak
+    const shortish = "emk_" + "A".repeat(20);
+    const long = "evt_" + "b".repeat(40);
+    const got = redactError(`leaked ${hyphen} and ${shortish} and ${long}`);
+    assert.equal(got.includes(hyphen), false);
+    assert.equal(got.includes(shortish), false);
+    assert.equal(got.includes(long), false);
+    assert.match(got, /evt_abcd_REDACTED/);
+    assert.match(got, /emk_AAAA_REDACTED/);
   });
 
   test("query params are appended", async (t) => {
