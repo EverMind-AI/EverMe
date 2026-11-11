@@ -1,0 +1,19 @@
+{
+  "name": "evermind",
+  "description": "EverMind AI plugins for Claude Code.",
+  "owner": {
+    "name": "EverMind AI",
+    "email": "support@evermind.ai",
+    "url": "https://everme.evermind.ai"
+  },
+  "plugins": [
+    {
+      "name": "everme",
+      "source": "./plugins/claude-directory",
+      "description": "EverMe memory for Claude Code: recalls what matters before each prompt and saves each turn, with its tool calls, to your EverMe account.",
+      "version": "0.1.0",
+      "homepage": "https://everme.evermind.ai",
+      "license": "Apache-2.0"
+    }
+  ]
+}

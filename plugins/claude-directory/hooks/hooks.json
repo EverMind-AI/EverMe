@@ -1,0 +1,82 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "plugin:everme:everme",
+            "tool": "mem_search",
+            "input": { "query": "${prompt}", "format": "hook" }
+          },
+          {
+            "type": "mcp_tool",
+            "server": "plugin:everme:everme",
+            "tool": "mem_save_turn",
+            "input": { "role": "user", "text": "${prompt}", "sessionKey": "${session_id}", "flush": false }
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "^(?!mcp__plugin_everme_everme__).*",
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "plugin:everme:everme",
+            "tool": "mem_save_turn",
+            "input": {
+              "sessionKey": "${session_id}",
+              "flush": false,
+              "messages": [
+                {
+                  "role": "assistant",
+                  "content": "",
+                  "toolCalls": [{ "id": "${tool_use_id}", "name": "${tool_name}", "arguments": "${tool_input}" }]
+                },
+                { "role": "tool", "toolCallId": "${tool_use_id}", "content": "${tool_response}" }
+              ]
+            }
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "^(?!mcp__plugin_everme_everme__).*",
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "plugin:everme:everme",
+            "tool": "mem_save_turn",
+            "input": {
+              "sessionKey": "${session_id}",
+              "flush": false,
+              "messages": [
+                {
+                  "role": "assistant",
+                  "content": "",
+                  "toolCalls": [{ "id": "${tool_use_id}", "name": "${tool_name}", "arguments": "${tool_input}" }]
+                },
+                { "role": "tool", "toolCallId": "${tool_use_id}", "content": "${error}" }
+              ]
+            }
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "plugin:everme:everme",
+            "tool": "mem_save_turn",
+            "input": { "role": "assistant", "text": "${last_assistant_message}", "sessionKey": "${session_id}", "flush": true }
+          }
+        ]
+      }
+    ]
+  }
+}

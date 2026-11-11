@@ -1,0 +1,15 @@
+{
+  "name": "everme",
+  "version": "0.1.0",
+  "description": "EverMe memory for Claude Code: recalls what matters before each prompt and saves each turn, with its tool calls, to your EverMe account.",
+  "author": {
+    "name": "EverMind AI",
+    "email": "support@evermind.ai",
+    "url": "https://everme.evermind.ai"
+  },
+  "homepage": "https://everme.evermind.ai",
+  "repository": "https://github.com/EverMind-AI/EverMe",
+  "license": "Apache-2.0",
+  "privacyPolicyUrl": "https://everme.evermind.ai/legal/privacy",
+  "keywords": ["memory", "recall", "context", "persistence", "everme"]
+}
