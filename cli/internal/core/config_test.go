@@ -115,3 +115,43 @@ func TestXDGPath_IgnoresRelativeEnv(t *testing.T) {
 	assert.False(t, filepath.IsAbs("../etc"), "sanity")
 	assert.True(t, filepath.IsAbs(paths.ConfigDir), "relative XDG values must be ignored, falling back to absolute home path")
 }
+
+// The READMEs promise EVERME_API_BASE, and every host integration writes
+// that exact variable into its MCP entry — so a CLI that ignored it could
+// never reach a self-hosted EverOS endpoint (EverMe issue #3).
+func TestLoadConfig_EvermeAPIBaseEnvIsHonored(t *testing.T) {
+	withXDG(t)
+	t.Setenv("EVERCLI_API_BASE_URL", "")
+	t.Setenv("EVERME_API_BASE", "https://selfhosted.example.com")
+
+	cfg, err := LoadConfig("")
+	require.NoError(t, err)
+	assert.Equal(t, "https://selfhosted.example.com", cfg.APIBaseURL,
+		"EVERME_API_BASE must override the compiled-in managed gateway")
+}
+
+func TestLoadConfig_EvercliEnvBeatsEvermeAPIBase(t *testing.T) {
+	withXDG(t)
+	t.Setenv("EVERCLI_API_BASE_URL", "https://override.example.com")
+	t.Setenv("EVERME_API_BASE", "https://selfhosted.example.com")
+
+	cfg, err := LoadConfig("")
+	require.NoError(t, err)
+	assert.Equal(t, "https://override.example.com", cfg.APIBaseURL,
+		"EVERCLI_API_BASE_URL is an explicit escape hatch and must keep precedence")
+}
+
+func TestLoadConfig_EvermeAPIBaseEnvBeatsFile(t *testing.T) {
+	root := withXDG(t)
+	cfgPath := filepath.Join(root, "evercli.yaml")
+	require.NoError(t, os.WriteFile(cfgPath, []byte(`
+api_base_url: "https://staging.everme.evermind.ai"
+`), 0o600))
+	t.Setenv("EVERCLI_API_BASE_URL", "")
+	t.Setenv("EVERME_API_BASE", "https://selfhosted.example.com")
+
+	cfg, err := LoadConfig(cfgPath)
+	require.NoError(t, err)
+	assert.Equal(t, "https://selfhosted.example.com", cfg.APIBaseURL,
+		"env beats the config file, matching the documented priority list")
+}
