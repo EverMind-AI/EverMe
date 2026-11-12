@@ -83,6 +83,14 @@ type registry struct {
 //     a protected ~/.dsh/.env credential block because DSH scrubs inherited
 //     credential-shaped variables before spawning stdio MCP servers.
 //     Implements Preparer, Verifier and Remover. See dsh.go.
+//
+//   - PlatformSeekMoon → seekMoonWriter
+//     SeekMoon reads MCP servers from `mcpServers.<name>` in its runtime
+//     directory's host-mcp.json, so it reuses mcpWriter. The desktop keeps
+//     its own `seekmoon` entry (a per-launch localhost tool server) in the
+//     same file; the shared upsert preserves it. Commit adds a restart
+//     NextStep because a conversation fixes its server list at engine
+//     session start. See seekmoon.go.
 func DefaultRegistry() *registry {
 	return &registry{
 		detectors: map[Platform]Detector{
@@ -98,6 +106,7 @@ func DefaultRegistry() *registry {
 			PlatformKimiCode:      kimiCodeDetector{},
 			PlatformRaven:         ravenDetector{},
 			PlatformDSH:           dshDetector{},
+			PlatformSeekMoon:      seekMoonDetector{},
 		},
 		writers: map[Platform]Writer{
 			PlatformClaudeCode:    newClaudeCodeWriter(),
@@ -112,6 +121,7 @@ func DefaultRegistry() *registry {
 			PlatformKimiCode:      newKimiCodeWriter(),
 			PlatformRaven:         newRavenWriter(),
 			PlatformDSH:           newDSHWriter(),
+			PlatformSeekMoon:      newSeekMoonWriter(),
 		},
 	}
 }
