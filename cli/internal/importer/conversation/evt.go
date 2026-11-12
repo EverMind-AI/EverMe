@@ -18,8 +18,9 @@ const openClawPluginID = "@everme/openclaw"
 
 // platformEnvFile maps a platform to its plugin config env file (where
 // plugin install wrote EVERME_AGENT_TOKEN). Honors per-tool home env first.
-// Only Claude Code and Hermes write a dotenv-style everme.env; Codex and
-// OpenClaw write structured config (see ResolveEvt).
+// Claude Code, Hermes and Kimi Code write a dotenv-style everme.env; DeepSeek
+// Harness writes a dotenv-style .env. Codex, OpenClaw, Raven and WorkBuddy
+// write structured config (see ResolveEvt).
 func platformEnvFile(p PlatformID) (string, bool) {
 	home, _ := os.UserHomeDir()
 	switch p {
@@ -31,6 +32,11 @@ func platformEnvFile(p PlatformID) (string, bool) {
 	case PlatformKimicode:
 		base := envOr("KIMI_CODE_HOME", filepath.Join(home, ".kimi-code"))
 		return filepath.Join(base, "everme.env"), true
+	case PlatformDSH:
+		// `evercli plugin install dsh` writes all three EVERME_* values to
+		// <DSH_HOME>/.env - keep in sync with cli/internal/plugin/dsh.go.
+		base := envOr("DSH_HOME", filepath.Join(home, ".dsh"))
+		return filepath.Join(base, ".env"), true
 	default:
 		// Codex / OpenClaw resolve from structured config; markdown has no
 		// platform agent. Callers handle these in ResolveEvt.
