@@ -25,11 +25,12 @@ const noop = { info() {}, warn() {} };
  * accidentally lands in an error message (defense-in-depth, the same
  * shape evercli's output.redact uses).
  */
-// Token regex: case-insensitive on both alphabet AND prefix. Current
-// issuance is lowercase hex but defense-in-depth covers a future
-// alphabet change without us having to chase every log/error sink.
-const evtRe = /evt_[a-zA-Z0-9]{32}/g;
-const emkRe = /emk_[a-zA-Z0-9]{32}/g;
+// Token shape mirrors evercli's output.redact: a 20+ character payload
+// over [A-Za-z0-9_-], not only the current 32-char lowercase hex. A future
+// backend key format (Base32, base64url, longer payloads) must not turn
+// every error sink into a credential leak. Prefixes stay case-sensitive,
+// exactly like the Go side.
+const tokenRe = /(?:evt_|emk_)[A-Za-z0-9_-]{20,}/g;
 
 // AWS S3 presigned-POST / GET URLs carry short-lived but real
 // credentials. The query-string fields below are issued for ~15 min
@@ -61,8 +62,7 @@ export function redactError(msg) {
   // also scrub.
   const text = msg instanceof Error ? msg.message : String(msg);
   return text
-    .replace(evtRe, (m) => m.slice(0, 8) + "_REDACTED")
-    .replace(emkRe, (m) => m.slice(0, 8) + "_REDACTED")
+    .replace(tokenRe, (m) => m.slice(0, 8) + "_REDACTED")
     .replace(s3SigParamRe, (_, name) => name + "=[REDACTED]")
     .replace(awsKeyIDRe, "[REDACTED-AWSKEY]");
 }

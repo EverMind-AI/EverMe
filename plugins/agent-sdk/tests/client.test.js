@@ -1,7 +1,7 @@
 import { test, describe, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { createClient, EvermeError } from "../src/client.js";
+import { createClient, EvermeError, redactError } from "../src/client.js";
 
 /**
  * Helper: spin up a tiny HTTP server, return its base URL + a
@@ -168,5 +168,29 @@ describe("request id propagation", () => {
         return true;
       },
     );
+  });
+});
+
+describe("redactError", () => {
+  // The Go CLI masks evt_/emk_ with [A-Za-z0-9_-]{20,}; the SDK used to
+  // require exactly 32 alphanumerics, so a backend key-format change would
+  // leak a live credential into host logs and model context.
+  test("masks every token shape the Go side masks", () => {
+    const shapes = [
+      "emk_" + "a".repeat(24),
+      "emk_" + "a".repeat(18) + "-" + "b".repeat(17),
+      "emk_" + "a".repeat(36),
+      "evt_" + "b".repeat(24),
+      "evt_" + "b".repeat(18) + "_" + "c".repeat(17),
+    ];
+    for (const token of shapes) {
+      const out = redactError(`backend rejected ${token} (request req-1)`);
+      assert.ok(!out.includes(token), `full token must not survive redaction: ${out}`);
+      assert.match(
+        out,
+        /^backend rejected (?:emk|evt)_[A-Za-z0-9_-]{4}_REDACTED \(request req-1\)$/,
+        "prefix is kept and the payload is masked",
+      );
+    }
   });
 });
