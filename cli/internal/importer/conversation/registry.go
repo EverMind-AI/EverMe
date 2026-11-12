@@ -22,6 +22,7 @@ func DefaultRegistry() *Registry {
 			NewKimicodeScanner(),
 			NewRavenScanner(),
 			NewWorkBuddyScanner(),
+			NewDSHScanner(),
 		},
 	}
 }
@@ -75,6 +76,11 @@ func DefaultRoots(p PlatformID) []string {
 		// env var name, so the two doors into ~/.workbuddy agree.
 		base := envOr("EVERCLI_WORKBUDDY_CONFIG_DIR", filepath.Join(home, ".workbuddy"))
 		return []string{filepath.Join(base, "projects")}
+	case PlatformDSH:
+		// Mirrors cli/internal/plugin/dsh.go dshHomePath - same env var name,
+		// so the installer and the importer agree on where the harness lives.
+		base := envOr("DSH_HOME", filepath.Join(home, ".dsh"))
+		return []string{filepath.Join(base, "sessions")}
 	case PlatformMarkdown:
 		// A markdown file's owning agent is the agent whose local folder
 		// contains it; scan the agent home dirs (not generic doc dirs) so md
