@@ -5,13 +5,13 @@
         "hooks": [
           {
             "type": "mcp_tool",
-            "server": "plugin:everme:everme",
+            "server": "plugin:everme-memory:everme",
             "tool": "mem_search",
             "input": { "query": "${prompt}", "format": "hook" }
           },
           {
             "type": "mcp_tool",
-            "server": "plugin:everme:everme",
+            "server": "plugin:everme-memory:everme",
             "tool": "mem_save_turn",
             "input": { "role": "user", "text": "${prompt}", "sessionKey": "${session_id}", "flush": false }
           }
@@ -20,11 +20,11 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "^(?!mcp__plugin_everme_everme__).*",
+        "matcher": "^(?!mcp__plugin_everme-memory_everme__).*",
         "hooks": [
           {
             "type": "mcp_tool",
-            "server": "plugin:everme:everme",
+            "server": "plugin:everme-memory:everme",
             "tool": "mem_save_turn",
             "input": {
               "sessionKey": "${session_id}",
@@ -44,11 +44,11 @@
     ],
     "PostToolUseFailure": [
       {
-        "matcher": "^(?!mcp__plugin_everme_everme__).*",
+        "matcher": "^(?!mcp__plugin_everme-memory_everme__).*",
         "hooks": [
           {
             "type": "mcp_tool",
-            "server": "plugin:everme:everme",
+            "server": "plugin:everme-memory:everme",
             "tool": "mem_save_turn",
             "input": {
               "sessionKey": "${session_id}",
@@ -71,7 +71,7 @@
         "hooks": [
           {
             "type": "mcp_tool",
-            "server": "plugin:everme:everme",
+            "server": "plugin:everme-memory:everme",
             "tool": "mem_save_turn",
             "input": { "role": "assistant", "text": "${last_assistant_message}", "sessionKey": "${session_id}", "flush": true }
           }

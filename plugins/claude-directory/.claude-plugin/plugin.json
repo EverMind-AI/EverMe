@@ -1,5 +1,5 @@
 {
-  "name": "everme",
+  "name": "everme-memory",
   "version": "0.1.0",
   "description": "EverMe memory for Claude Code: recalls what matters before each prompt and saves each turn, with its tool calls, to your EverMe account.",
   "author": {
