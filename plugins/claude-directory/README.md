@@ -5,10 +5,11 @@ EverMe gives Claude Code a memory that lasts across sessions and machines. Befor
 ## Install
 
 ```
-/plugin install everme --marketplace EverMind-AI/EverMe
+/plugin marketplace add EverMind-AI/EverMe
+/plugin install everme-memory@evermind
 ```
 
-Then run `/mcp`, select `everme`, and sign in to your EverMe account in the browser. The hooks do not run until you sign in. To stop the plugin, disable it with `/plugin`.
+Then run `/mcp`, select `plugin:everme-memory:everme`, and sign in to your EverMe account in the browser. The hooks do not run until you sign in. To stop the plugin, disable it with `/plugin`.
 
 You need an EverMe account. Create one at https://everme.evermind.ai.
 
