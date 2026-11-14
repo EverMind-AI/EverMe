@@ -11,6 +11,10 @@ EverMe is the user's long-term memory across Claude Code sessions. This plugin s
 
 A short acknowledgement is enough ("Noted — I'll remember that."). The plugin saves the turn without a tool call from you.
 
+## When the user asks you to forget this conversation
+
+Call `mem_forget_session` only when the user explicitly asks to delete or forget this conversation from memory. Pass the `sessionKey` named in the `<everme_session>` block. The tool deletes the original messages saved so far and the memories extracted from them. The plugin keeps saving later turns; say so when you confirm.
+
 ## Read tools
 
 - `mem_search`: hybrid search over the user's memory (episodes, agent skills and cases, recent raw transcript). Rows under "Recent unextracted transcript" are provisional, not established facts.
