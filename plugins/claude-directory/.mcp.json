@@ -2,7 +2,10 @@
   "mcpServers": {
     "everme": {
       "type": "http",
-      "url": "https://api.everme.evermind.ai/mcp"
+      "url": "https://api.everme.evermind.ai/mcp",
+      "headers": {
+        "X-EverMe-Host-Sessions": "1"
+      }
     }
   }
 }

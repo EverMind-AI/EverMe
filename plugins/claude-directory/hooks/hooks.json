@@ -7,7 +7,7 @@
             "type": "mcp_tool",
             "server": "plugin:everme-memory:everme",
             "tool": "mem_search",
-            "input": { "query": "${prompt}", "format": "hook" }
+            "input": { "query": "${prompt}", "format": "hook", "sessionKey": "${session_id}" }
           },
           {
             "type": "mcp_tool",
