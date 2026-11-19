@@ -17052,7 +17052,7 @@ import { join } from "node:path";
 var DEFAULT_INJECT_TOPK = 5;
 var MAX_INJECT_TOPK = 20;
 var DEFAULT_INJECT_MIN_SCORE = 0.3;
-function resolveHookKnobs(env = process.env) {
+function resolveHookKnobs(env = process.env, defaults = {}) {
   const flushMode = String(env.EVERME_FLUSH_MODE ?? "").trim().toLowerCase();
   const configuredFlushEveryTurns = strictInteger(
     env.EVERME_FLUSH_EVERY_TURNS,
@@ -17065,7 +17065,7 @@ function resolveHookKnobs(env = process.env) {
     flushMode,
     injectTopK: strictInteger(env.EVERME_INJECT_TOPK, DEFAULT_INJECT_TOPK, 1, MAX_INJECT_TOPK),
     injectProfile: strictBoolean(env.EVERME_INJECT_PROFILE, false),
-    injectMinScore: strictFloat(env.EVERME_INJECT_MIN_SCORE, DEFAULT_INJECT_MIN_SCORE, 0, 1),
+    injectMinScore: strictFloat(env.EVERME_INJECT_MIN_SCORE, defaults.injectMinScore ?? DEFAULT_INJECT_MIN_SCORE, 0, 1),
     telemetry: strictBoolean(env.EVERME_TELEMETRY, true)
   };
 }
@@ -17093,6 +17093,24 @@ function strictBoolean(value, fallback) {
   return fallback;
 }
 
+// ../agent-sdk/src/brand.js
+var BRANDS = ["everme", "everos"];
+function brandOf(env = {}) {
+  return env.EVERME_BRAND === "everos" ? "everos" : "everme";
+}
+var INJECTED_TAGS = BRANDS.flatMap((b) => [`${b}_recall`, `${b}_profile`]);
+function brandStrings(value, brand) {
+  if (brand !== "everos") return value;
+  if (typeof value === "string") {
+    return value.replace(/everme_(recall|profile)/g, "everos_$1").replace(/EverMe/g, "EverOS");
+  }
+  if (Array.isArray(value)) return value.map((item) => brandStrings(item, brand));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, brandStrings(item, brand)]));
+  }
+  return value;
+}
+
 // ../agent-sdk/src/config.js
 var DEFAULT_API_BASE = "https://api.everme.evermind.ai";
 var API_PATH_PREFIX = "/api/v1";
@@ -17101,6 +17119,7 @@ var LOOPBACK_HOSTS = /* @__PURE__ */ new Set(["127.0.0.1", "localhost", "[::1]"]
 var TIMEOUT_MS = 3e4;
 function resolveConfig(host = {}) {
   const apiBase = trimSlash(host.apiBase || process.env.EVERME_API_BASE || DEFAULT_API_BASE);
+  const memoryHome = host.memoryHome || process.env.EVERME_MEMORY_HOME || "";
   const hookKnobs = resolveHookKnobs({
     ...process.env,
     ...host.flushEveryTurns === void 0 ? {} : { EVERME_FLUSH_EVERY_TURNS: host.flushEveryTurns },
@@ -17108,7 +17127,7 @@ function resolveConfig(host = {}) {
     ...host.injectTopK === void 0 ? {} : { EVERME_INJECT_TOPK: host.injectTopK },
     ...host.injectProfile === void 0 ? {} : { EVERME_INJECT_PROFILE: host.injectProfile },
     ...host.injectMinScore === void 0 ? {} : { EVERME_INJECT_MIN_SCORE: host.injectMinScore }
-  });
+  }, { injectMinScore: routeInjectMinScore(memoryHome ? { EVERME_MEMORY_HOME: memoryHome } : process.env) });
   return {
     // baseUrl always includes /api/v1 so callers don't have to think about it.
     // Idempotent — works whether the env var was set with or without the prefix.
@@ -17116,6 +17135,10 @@ function resolveConfig(host = {}) {
     agentId: host.agentId === void 0 ? process.env.EVERME_AGENT_ID || "" : host.agentId,
     agentToken: host.agentToken === void 0 ? process.env.EVERME_AGENT_TOKEN || "" : host.agentToken,
     topK: host.topK ?? 10,
+    // Memory home and brand of this plugin instance. Both come from its own
+    // credential file when two brands share one host process.
+    memoryHome,
+    brand: brandOf({ EVERME_BRAND: host.brand || process.env.EVERME_BRAND }),
     ...hookKnobs,
     // Deprecated: retained for the existing both-zero compatibility switch.
     flushMaxBytes: host.flushMaxBytes ?? 64 * 1024,
@@ -17131,7 +17154,7 @@ function assertConfigUsable(cfg, { requireAgentId = true } = {}) {
   if (!cfg.agentToken) missing.push("EVERME_AGENT_TOKEN");
   if (missing.length) {
     throw new Error(
-      `EverMe plugin: missing ${missing.join(", ")}. Run \`evercli plugin install <agent>\` to provision the MCP entry.`
+      `${cfg.brand === "everos" ? "EverOS" : "EverMe"} plugin: missing ${missing.join(", ")}. Run \`evercli plugin install <agent>\` to provision the MCP entry.`
     );
   }
 }
@@ -17158,7 +17181,14 @@ function readDeviceRoute(env = process.env) {
   }
   if (route.mode !== "local") return null;
   const apiBase = isLoopbackBase(route.apiBase) ? trimSlash(route.apiBase) : DEFAULT_LOCAL_GATEWAY;
-  return { baseUrl: apiBase + API_PATH_PREFIX };
+  const floor = route.injectMinScore;
+  return {
+    baseUrl: apiBase + API_PATH_PREFIX,
+    ...typeof floor === "number" && floor >= 0 && floor <= 1 ? { injectMinScore: floor } : {}
+  };
+}
+function routeInjectMinScore(env = process.env) {
+  return readDeviceRoute(env)?.injectMinScore;
 }
 function isLoopbackBase(value) {
   try {
@@ -17202,6 +17232,12 @@ function redactError(msg) {
 function boundedDiagnostic(value, maxChars = 240) {
   const text = redactError(value).replace(/\s+/g, " ").trim();
   return text.length > maxChars ? `${text.slice(0, maxChars)}…` : text;
+}
+var MEMORY_ROUTE_HEADER = "X-EverMe-Memory-Route";
+var MEMORY_STORED_ON_DEVICE = 42501;
+function storedOnDeviceMessage(deviceName) {
+  const name = typeof deviceName === "string" && deviceName.trim() ? deviceName.trim() : "another device";
+  return `This account keeps its memory on “${name}”, so EverMe refuses memory from this computer. Switch it back to the cloud on that Mac (or on the web, if that Mac is gone) to save memory from here.`;
 }
 var EvermeError = class extends Error {
   constructor({ message, status = 0, code = 0, requestId = "", type = "upstream" }) {
@@ -17247,6 +17283,10 @@ function createClient(cfg, log = noop) {
     // Structured attribution header (server: middleware.ClientAttribution).
     // No platform here: the server derives it from the evt agent row.
     ...identity ? { "X-EverMe-Client": identity } : {},
+    // This client follows the local memory route (config.js readDeviceRoute),
+    // so the cloud may refuse its writes while the account keeps its memory
+    // on another device (42501) instead of keeping a second copy.
+    [MEMORY_ROUTE_HEADER]: "device",
     // Client-generated trace id. The gateway reuses a valid inbound value,
     // so plugin logs, EverMe ELK, and the cloud platform all join on it —
     // even when the request times out before any response arrives.
@@ -17254,7 +17294,7 @@ function createClient(cfg, log = noop) {
   });
   async function requestWithMeta(method, path3, body, { timeoutMs = TIMEOUT_MS, query } = {}) {
     const requestId = randomUUID();
-    const route = readDeviceRoute();
+    const route = readDeviceRoute(cfg.memoryHome ? { EVERME_MEMORY_HOME: cfg.memoryHome } : process.env);
     const url = buildUrl(route ? route.baseUrl : cfg.baseUrl, path3, query);
     const init = {
       method,
@@ -17265,8 +17305,9 @@ function createClient(cfg, log = noop) {
       return await execWithRetry(url, init, boundedTimeoutMs(timeoutMs, cfg.deadlineAt), log, requestId);
     } catch (err) {
       if (route && err instanceof EvermeError && err.type === "upstream" && !err.httpStatus) {
+        const fix = cfg.brand === "everos" ? "run `evercli doctor`" : "open EverMe Desktop";
         err.message = boundedDiagnostic(
-          `local memory service is not reachable (${err.message}); open EverMe Desktop`,
+          `local memory service is not reachable (${err.message}); ${fix}`,
           240
         );
       }
@@ -17405,7 +17446,7 @@ async function execOnce(url, init, timeoutMs, requestId = "") {
   const code = Number(env?.status) || 0;
   const errType = code >= 3e4 && code < 30300 && code !== 30104 ? "auth" : "upstream";
   throw new EvermeError({
-    message: env?.error || `HTTP ${res.status}`,
+    message: code === MEMORY_STORED_ON_DEVICE ? storedOnDeviceMessage(env?.result?.deviceName) : env?.error || `HTTP ${res.status}`,
     status: res.status,
     code,
     requestId: env?.requestId || requestId,
@@ -17863,10 +17904,10 @@ var STRIP_RULES = [
   // Our own injections coming back around. A host that echoes the previous
   // turn's user message would otherwise feed our memory block back in as the
   // next query, making recall search its own output.
-  ["everme", /<everme_[a-z_]+>[\s\S]*?<\/everme_[a-z_]+>/gi],
+  ["everme", /<ever(?:me|os)_[a-z_]+>[\s\S]*?<\/ever(?:me|os)_[a-z_]+>/gi],
   // No /m here: with it, `$` would match end-of-LINE and the block would stop
   // at its own heading, leaving the memory body in the query.
-  ["everme", /(?:^|\n)#{1,3}[ \t]*EverMe Memory\b[\s\S]*?(?=\n[ \t]*\n|\n#{1,3}[ \t]|$)/gi],
+  ["everme", /(?:^|\n)#{1,3}[ \t]*Ever(?:Me|OS) Memory\b[\s\S]*?(?=\n[ \t]*\n|\n#{1,3}[ \t]|$)/gi],
   // Local-command caveat preamble (prepended to prompts that followed a bash
   // invocation).
   ["caveat", /^[ \t]*Caveat:[ \t]*The messages below were generated by the user while running local commands.*$/gim],
@@ -17910,7 +17951,7 @@ function formatQueryStats(stats) {
 }
 
 // ../memory-mcp/src/mcp.js
-var PKG_VERSION = true ? "0.7.10" : createRequire(import.meta.url)("../package.json").version;
+var PKG_VERSION = true ? "0.7.11" : createRequire(import.meta.url)("../package.json").version;
 var EVERME_MCP_INSTRUCTIONS = [
   "EverMe is the user's long-term memory across sessions.",
   "",
@@ -18058,10 +18099,10 @@ function createMcpServer({ logger: logger2, config: config2 } = {}) {
         // `subscribe` — push-based memory updates are out of V1.1 scope.
         resources: {}
       },
-      instructions: EVERME_MCP_INSTRUCTIONS
+      instructions: brandStrings(EVERME_MCP_INSTRUCTIONS, brandOf(process.env))
     }
   );
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
+  server.setRequestHandler(ListToolsRequestSchema, async () => brandStrings({
     tools: [
       {
         name: "mem_search",
@@ -18108,7 +18149,7 @@ function createMcpServer({ logger: logger2, config: config2 } = {}) {
         }
       }
     ]
-  }));
+  }, brandOf(process.env)));
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
     const name = req.params.name;
     const args = req.params.arguments || {};
@@ -18145,7 +18186,7 @@ function createMcpServer({ logger: logger2, config: config2 } = {}) {
         }
         case "mem_context": {
           const ctx = await getContext(client, "", { forceRefresh: args.forceRefresh === true }, log);
-          const rawText = ctx?.context || "_(no profile available — your EverMe account has no extracted memories yet)_";
+          const rawText = ctx?.context || `_(no profile available — your ${brandName()} account has no extracted memories yet)_`;
           return okMarkdown(appendRequestID(redactError(rawText), ctx?.requestId));
         }
         default:
@@ -18157,7 +18198,7 @@ function createMcpServer({ logger: logger2, config: config2 } = {}) {
       return errResp(safe);
     }
   });
-  server.setRequestHandler(ListResourcesRequestSchema, async () => ({
+  server.setRequestHandler(ListResourcesRequestSchema, async () => brandStrings({
     resources: [
       {
         uri: MEM_RESOURCE_PROFILE_URI,
@@ -18166,8 +18207,8 @@ function createMcpServer({ logger: logger2, config: config2 } = {}) {
         mimeType: "text/markdown"
       }
     ]
-  }));
-  server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({
+  }, brandOf(process.env)));
+  server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => brandStrings({
     resourceTemplates: [
       {
         uriTemplate: MEM_RESOURCE_SEARCH_TEMPLATE,
@@ -18182,7 +18223,7 @@ function createMcpServer({ logger: logger2, config: config2 } = {}) {
         mimeType: "text/markdown"
       }
     ]
-  }));
+  }, brandOf(process.env)));
   server.setRequestHandler(ReadResourceRequestSchema, async (req) => {
     const uri = req?.params?.uri || "";
     try {
@@ -18190,14 +18231,14 @@ function createMcpServer({ logger: logger2, config: config2 } = {}) {
       try {
         parsed = new URL(uri);
       } catch (parseErr) {
-        throw new Error(`malformed EverMe resource URI ${JSON.stringify(uri)}: ${parseErr.message}; expected mem://profile or mem://search?q=…`);
+        throw new Error(`malformed ${brandName()} resource URI ${JSON.stringify(uri)}: ${parseErr.message}; expected mem://profile or mem://search?q=…`);
       }
       if (parsed.protocol !== "mem:") {
-        throw new Error(`unknown EverMe resource URI: ${uri} (supported scheme: mem://)`);
+        throw new Error(`unknown ${brandName()} resource URI: ${uri} (supported scheme: mem://)`);
       }
       if (parsed.host === "profile") {
         const ctx = await getContext(client, "", {}, log);
-        const rawText = ctx?.context || "_(no profile available — your EverMe account has no extracted memories yet)_";
+        const rawText = ctx?.context || `_(no profile available — your ${brandName()} account has no extracted memories yet)_`;
         const text = redactError(rawText);
         return {
           contents: [{ uri, mimeType: "text/markdown", text }]
@@ -18230,7 +18271,7 @@ function createMcpServer({ logger: logger2, config: config2 } = {}) {
           contents: [{ uri, mimeType: "text/markdown", text: redactError(renderSkill(skill)) }]
         };
       }
-      throw new Error(`unknown EverMe resource URI: ${uri} (supported: mem://profile, mem://search?q=…, mem://skill?id=…)`);
+      throw new Error(`unknown ${brandName()} resource URI: ${uri} (supported: mem://profile, mem://search?q=…, mem://skill?id=…)`);
     } catch (err) {
       const safe = describeError(err);
       log.warn?.(`[everme-mcp] resources/read ${uri} failed: ${safe}`);
@@ -18262,9 +18303,12 @@ function parseMemSearchURI(uri, defaultTopK) {
   topK = Math.min(topK, MEM_RESOURCE_TOPK_MAX);
   return { query, topK };
 }
+function brandName() {
+  return brandStrings("EverMe", brandOf(process.env));
+}
 function renderSearchResultsAsMarkdown(query, res) {
   const body = buildMemoryPrompt(res, { wrapInCodeBlock: false, skillFetch: true });
-  const header = `## EverMe search results for "${query}"`;
+  const header = `## ${brandName()} search results for "${query}"`;
   if (!body) return `${header}
 
 _(no matching memories)_`;

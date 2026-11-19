@@ -13,7 +13,7 @@ import { join } from "node:path";
 var DEFAULT_INJECT_TOPK = 5;
 var MAX_INJECT_TOPK = 20;
 var DEFAULT_INJECT_MIN_SCORE = 0.3;
-function resolveHookKnobs(env = process.env) {
+function resolveHookKnobs(env = process.env, defaults = {}) {
   const flushMode = String(env.EVERME_FLUSH_MODE ?? "").trim().toLowerCase();
   const configuredFlushEveryTurns = strictInteger(
     env.EVERME_FLUSH_EVERY_TURNS,
@@ -26,7 +26,7 @@ function resolveHookKnobs(env = process.env) {
     flushMode,
     injectTopK: strictInteger(env.EVERME_INJECT_TOPK, DEFAULT_INJECT_TOPK, 1, MAX_INJECT_TOPK),
     injectProfile: strictBoolean(env.EVERME_INJECT_PROFILE, false),
-    injectMinScore: strictFloat(env.EVERME_INJECT_MIN_SCORE, DEFAULT_INJECT_MIN_SCORE, 0, 1),
+    injectMinScore: strictFloat(env.EVERME_INJECT_MIN_SCORE, defaults.injectMinScore ?? DEFAULT_INJECT_MIN_SCORE, 0, 1),
     telemetry: strictBoolean(env.EVERME_TELEMETRY, true)
   };
 }
@@ -54,6 +54,30 @@ function strictBoolean(value, fallback) {
   return fallback;
 }
 
+// ../agent-sdk/src/brand.js
+var BRANDS = ["everme", "everos"];
+function brandOf(env = {}) {
+  return env.EVERME_BRAND === "everos" ? "everos" : "everme";
+}
+function recallTag(brand) {
+  return `${brand === "everos" ? "everos" : "everme"}_recall`;
+}
+function profileTag(brand) {
+  return `${brand === "everos" ? "everos" : "everme"}_profile`;
+}
+var INJECTED_TAGS = BRANDS.flatMap((b) => [`${b}_recall`, `${b}_profile`]);
+function brandStrings(value, brand) {
+  if (brand !== "everos") return value;
+  if (typeof value === "string") {
+    return value.replace(/everme_(recall|profile)/g, "everos_$1").replace(/EverMe/g, "EverOS");
+  }
+  if (Array.isArray(value)) return value.map((item) => brandStrings(item, brand));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, brandStrings(item, brand)]));
+  }
+  return value;
+}
+
 // ../agent-sdk/src/config.js
 var DEFAULT_API_BASE = "https://api.everme.evermind.ai";
 var API_PATH_PREFIX = "/api/v1";
@@ -62,6 +86,7 @@ var LOOPBACK_HOSTS = /* @__PURE__ */ new Set(["127.0.0.1", "localhost", "[::1]"]
 var TIMEOUT_MS = 3e4;
 function resolveConfig(host = {}) {
   const apiBase = trimSlash(host.apiBase || process.env.EVERME_API_BASE || DEFAULT_API_BASE);
+  const memoryHome = host.memoryHome || process.env.EVERME_MEMORY_HOME || "";
   const hookKnobs = resolveHookKnobs({
     ...process.env,
     ...host.flushEveryTurns === void 0 ? {} : { EVERME_FLUSH_EVERY_TURNS: host.flushEveryTurns },
@@ -69,7 +94,7 @@ function resolveConfig(host = {}) {
     ...host.injectTopK === void 0 ? {} : { EVERME_INJECT_TOPK: host.injectTopK },
     ...host.injectProfile === void 0 ? {} : { EVERME_INJECT_PROFILE: host.injectProfile },
     ...host.injectMinScore === void 0 ? {} : { EVERME_INJECT_MIN_SCORE: host.injectMinScore }
-  });
+  }, { injectMinScore: routeInjectMinScore(memoryHome ? { EVERME_MEMORY_HOME: memoryHome } : process.env) });
   return {
     // baseUrl always includes /api/v1 so callers don't have to think about it.
     // Idempotent — works whether the env var was set with or without the prefix.
@@ -77,6 +102,10 @@ function resolveConfig(host = {}) {
     agentId: host.agentId === void 0 ? process.env.EVERME_AGENT_ID || "" : host.agentId,
     agentToken: host.agentToken === void 0 ? process.env.EVERME_AGENT_TOKEN || "" : host.agentToken,
     topK: host.topK ?? 10,
+    // Memory home and brand of this plugin instance. Both come from its own
+    // credential file when two brands share one host process.
+    memoryHome,
+    brand: brandOf({ EVERME_BRAND: host.brand || process.env.EVERME_BRAND }),
     ...hookKnobs,
     // Deprecated: retained for the existing both-zero compatibility switch.
     flushMaxBytes: host.flushMaxBytes ?? 64 * 1024,
@@ -109,7 +138,14 @@ function readDeviceRoute(env = process.env) {
   }
   if (route.mode !== "local") return null;
   const apiBase = isLoopbackBase(route.apiBase) ? trimSlash(route.apiBase) : DEFAULT_LOCAL_GATEWAY;
-  return { baseUrl: apiBase + API_PATH_PREFIX };
+  const floor = route.injectMinScore;
+  return {
+    baseUrl: apiBase + API_PATH_PREFIX,
+    ...typeof floor === "number" && floor >= 0 && floor <= 1 ? { injectMinScore: floor } : {}
+  };
+}
+function routeInjectMinScore(env = process.env) {
+  return readDeviceRoute(env)?.injectMinScore;
 }
 function isLoopbackBase(value) {
   try {
@@ -180,6 +216,12 @@ function boundedDiagnostic(value, maxChars = 240) {
   const text = redactError(value).replace(/\s+/g, " ").trim();
   return text.length > maxChars ? `${text.slice(0, maxChars)}…` : text;
 }
+var MEMORY_ROUTE_HEADER = "X-EverMe-Memory-Route";
+var MEMORY_STORED_ON_DEVICE = 42501;
+function storedOnDeviceMessage(deviceName) {
+  const name = typeof deviceName === "string" && deviceName.trim() ? deviceName.trim() : "another device";
+  return `This account keeps its memory on “${name}”, so EverMe refuses memory from this computer. Switch it back to the cloud on that Mac (or on the web, if that Mac is gone) to save memory from here.`;
+}
 var EvermeError = class extends Error {
   constructor({ message, status = 0, code = 0, requestId = "", type = "upstream" }) {
     super(boundedDiagnostic(message, 240));
@@ -224,6 +266,10 @@ function createClient(cfg, log = noop) {
     // Structured attribution header (server: middleware.ClientAttribution).
     // No platform here: the server derives it from the evt agent row.
     ...identity ? { "X-EverMe-Client": identity } : {},
+    // This client follows the local memory route (config.js readDeviceRoute),
+    // so the cloud may refuse its writes while the account keeps its memory
+    // on another device (42501) instead of keeping a second copy.
+    [MEMORY_ROUTE_HEADER]: "device",
     // Client-generated trace id. The gateway reuses a valid inbound value,
     // so plugin logs, EverMe ELK, and the cloud platform all join on it —
     // even when the request times out before any response arrives.
@@ -231,7 +277,7 @@ function createClient(cfg, log = noop) {
   });
   async function requestWithMeta(method, path7, body, { timeoutMs = TIMEOUT_MS, query } = {}) {
     const requestId = randomUUID();
-    const route = readDeviceRoute();
+    const route = readDeviceRoute(cfg.memoryHome ? { EVERME_MEMORY_HOME: cfg.memoryHome } : process.env);
     const url = buildUrl(route ? route.baseUrl : cfg.baseUrl, path7, query);
     const init = {
       method,
@@ -242,8 +288,9 @@ function createClient(cfg, log = noop) {
       return await execWithRetry(url, init, boundedTimeoutMs(timeoutMs, cfg.deadlineAt), log, requestId);
     } catch (err) {
       if (route && err instanceof EvermeError && err.type === "upstream" && !err.httpStatus) {
+        const fix = cfg.brand === "everos" ? "run `evercli doctor`" : "open EverMe Desktop";
         err.message = boundedDiagnostic(
-          `local memory service is not reachable (${err.message}); open EverMe Desktop`,
+          `local memory service is not reachable (${err.message}); ${fix}`,
           240
         );
       }
@@ -382,7 +429,7 @@ async function execOnce(url, init, timeoutMs, requestId = "") {
   const code = Number(env?.status) || 0;
   const errType = code >= 3e4 && code < 30300 && code !== 30104 ? "auth" : "upstream";
   throw new EvermeError({
-    message: env?.error || `HTTP ${res.status}`,
+    message: code === MEMORY_STORED_ON_DEVICE ? storedOnDeviceMessage(env?.result?.deviceName) : env?.error || `HTTP ${res.status}`,
     status: res.status,
     code,
     requestId: env?.requestId || requestId,
@@ -656,7 +703,7 @@ var MCP_RESOURCE_TOOLS = /* @__PURE__ */ new Set(["read_mcp_resource", "list_mcp
 function isEvermeMcpServer(value) {
   const text = String(value || "").trim().toLowerCase();
   if (!text) return false;
-  return text.split(/[_\-./:]+/).some((token) => token === "everme");
+  return text.split(/[_\-./:]+/).some((token) => token === "everme" || token === "everos");
 }
 function splitMcpToolName(value) {
   const name = String(value || "").trim().toLowerCase();
@@ -1226,7 +1273,8 @@ function convertAgentMessage(msg, fallbackTimestamp) {
   const timestamp = hostTimestamp(msg.timestamp) ?? fallbackTimestamp;
   if (msg.role === AGENT_MEMORY_ROLES.USER) {
     const content = cap(extractText(msg.content).trim());
-    return content ? { role: AGENT_MEMORY_ROLES.USER, timestamp, content } : null;
+    if (content) return { role: AGENT_MEMORY_ROLES.USER, timestamp, content };
+    return msg.placeholder === true ? { role: AGENT_MEMORY_ROLES.USER, timestamp, content: "" } : null;
   }
   if (msg.role === AGENT_MEMORY_ROLES.ASSISTANT) {
     return convertAssistant(msg, timestamp);
@@ -1287,6 +1335,24 @@ function convertAssistant(msg, timestamp) {
 }
 function cap(text) {
   return capRunes(text);
+}
+
+// ../agent-sdk/src/host-wrappers.js
+var CONDUCTOR_BLOCK = /^<system_instruction>[\s\S]*?<\/system_instruction>/;
+var OPENBOT_BLOCK = /^<(openbot_saved_memories|openbot_saved_memories_update|openbot_section_teammates|openbot_agent_instructions|openbot_saved_logins|openbot_turn_style|openbot_steer|openbot_background_wake)>\n[\s\S]*?\n<\/\1>/;
+var CURSOR_ENVELOPE = /^(?:<timestamp>[^<\n]*<\/timestamp>\n)?<user_query>\n?([\s\S]*?)\n?<\/user_query>$/;
+var HERDR_STATUS = /^<hc>\S+(?: [^\n]*)? (?:is blocked \(|hit an error|exited \()[\s\S]*(?:See|Read): hc read \S+<\/hc>$/;
+function humanTextFromWrappers(text) {
+  let rest = String(text ?? "").trim();
+  for (; ; ) {
+    const block = rest.match(CONDUCTOR_BLOCK) ?? rest.match(OPENBOT_BLOCK);
+    if (!block) break;
+    rest = rest.slice(block[0].length).trim();
+  }
+  const cursor = rest.match(CURSOR_ENVELOPE);
+  if (cursor) rest = cursor[1].trim();
+  if (HERDR_STATUS.test(rest)) return "";
+  return rest === String(text ?? "").trim() ? text : rest;
 }
 
 // ../agent-sdk/src/hooks/skill-cache.js
@@ -1533,10 +1599,10 @@ var STRIP_RULES = [
   // Our own injections coming back around. A host that echoes the previous
   // turn's user message would otherwise feed our memory block back in as the
   // next query, making recall search its own output.
-  ["everme", /<everme_[a-z_]+>[\s\S]*?<\/everme_[a-z_]+>/gi],
+  ["everme", /<ever(?:me|os)_[a-z_]+>[\s\S]*?<\/ever(?:me|os)_[a-z_]+>/gi],
   // No /m here: with it, `$` would match end-of-LINE and the block would stop
   // at its own heading, leaving the memory body in the query.
-  ["everme", /(?:^|\n)#{1,3}[ \t]*EverMe Memory\b[\s\S]*?(?=\n[ \t]*\n|\n#{1,3}[ \t]|$)/gi],
+  ["everme", /(?:^|\n)#{1,3}[ \t]*Ever(?:Me|OS) Memory\b[\s\S]*?(?=\n[ \t]*\n|\n#{1,3}[ \t]|$)/gi],
   // Local-command caveat preamble (prepended to prompts that followed a bash
   // invocation).
   ["caveat", /^[ \t]*Caveat:[ \t]*The messages below were generated by the user while running local commands.*$/gim],
@@ -1645,9 +1711,9 @@ async function runInject({ input, client, config, search = searchMemory, log }) 
   const inner = buildMemoryPrompt(bundle, { sections, skillFetch: config.skillFetch });
   if (!inner) return { block: "", count: 0 };
   return {
-    block: `<everme_recall>
+    block: `<${recallTag(config.brand)}>
 ${inner}
-</everme_recall>`,
+</${recallTag(config.brand)}>`,
     count: countBundle(bundle, sections, config.skillFetch === true)
   };
 }
@@ -1675,25 +1741,26 @@ function countBundle(bundle, sections, skillFetch) {
 }
 
 // ../agent-sdk/src/hooks/session-start.js
-async function runSessionStart({ client, log }) {
+async function runSessionStart({ client, config, log }) {
   const { result, requestId } = await requestMeta(client, "POST", "/mem/context", {});
   const profile = result?.profile;
   const count = profileItemCount(profile);
   log?.info?.(`[everme] memory-context stage=complete result=success items=${count} requestId=${boundedDiagnostic(requestId, 128)}`);
   return {
-    block: renderProfileBlock(profile),
+    block: renderProfileBlock(profile, config?.brand),
     count,
     requestId
   };
 }
-function renderProfileBlock(profile) {
+function renderProfileBlock(profile, brand) {
   if (!profile) return "";
   const explicit = Array.isArray(profile.explicit_info) ? profile.explicit_info : [];
   const implicit = Array.isArray(profile.implicit_traits) ? profile.implicit_traits : [];
   if (!explicit.length && !implicit.length) return "";
   const shownExplicit = explicit.slice(0, PROFILE_MAX_ITEMS);
   const shownImplicit = implicit.slice(0, Math.max(0, PROFILE_MAX_ITEMS - shownExplicit.length));
-  const lines = ["<everme_profile>"];
+  const tag = profileTag(brand);
+  const lines = [`<${tag}>`];
   if (shownExplicit.length) {
     lines.push("Profile facts:");
     for (const item of shownExplicit) {
@@ -1710,7 +1777,7 @@ function renderProfileBlock(profile) {
       lines.push(`- ${name}: ${truncate(item?.description || "", PROFILE_MAX_CHARS)}`);
     }
   }
-  lines.push("</everme_profile>");
+  lines.push(`</${tag}>`);
   return lines.join("\n");
 }
 function profileItemCount(profile) {
@@ -2141,15 +2208,18 @@ async function runHostHook(event, rawInput, adapter, deps = {}) {
   let result = { block: "", count: 0 };
   let telemetry = null;
   let degradedEvent = hostEvent;
+  let brand = brandOf(deps.baseEnv || process.env);
   try {
     const canonicalEvent = adapter.mapEvent?.(hostEvent) || hostEvent;
     degradedEvent = canonicalEvent;
     const input = await adapter.normalizeInput(rawInput || {}, hostEvent);
     const env = deps.env || await loadRuntimeEnv(adapter, deps.baseEnv || process.env);
+    brand = brandOf(env);
+    if (env.EVERME_STATE_DIR) process.env.EVERME_STATE_DIR = env.EVERME_STATE_DIR;
     const baseConfig = deps.config || requireOperation(deps.resolveConfig, "resolveConfig")(env);
-    if (!baseConfig.isConfigured) return formatOutput(adapter, hostEvent, result);
+    if (!baseConfig.isConfigured) return formatOutput(adapter, hostEvent, result, brand);
     if (WRITE_EVENTS.has(canonicalEvent) && (baseConfig.authMode !== "evt" || !baseConfig.agentId)) {
-      return formatOutput(adapter, hostEvent, result);
+      return formatOutput(adapter, hostEvent, result, brand);
     }
     const detached = deps.detached === true;
     const budgetMs = deps.budgetMs !== void 0 ? deps.budgetMs : detached ? DETACHED_HOOK_BUDGET_MS : hookBudgetMs(canonicalEvent);
@@ -2161,11 +2231,12 @@ async function runHostHook(event, rawInput, adapter, deps = {}) {
     const log = deps.log || stderrLog;
     const client = deps.client || requireOperation(deps.createClient, "createClient")(config, log);
     telemetry = deps.telemetry || (typeof deps.createTelemetry === "function" ? deps.createTelemetry({ client, config }) : null);
+    const storeAtEnd = canonicalEvent === "SessionEnd" && await noTurnStored(adapter, deps, env, input);
     if (canonicalEvent === "SessionStart") {
       result = await requireOperation(deps.runSessionStart, "runSessionStart")({ input, client, config, log });
     } else if (canonicalEvent === "UserPromptSubmit") {
       result = await requireOperation(deps.runInject, "runInject")({ input, client, config, search: deps.searchMemory, log });
-    } else if (canonicalEvent === "Stop" || canonicalEvent === "SubagentStop") {
+    } else if (canonicalEvent === "Stop" || canonicalEvent === "SubagentStop" || storeAtEnd) {
       const counter = deps.counter || requireOperation(deps.createTurnCounter, "createTurnCounter")({ stateDir: env.EVERME_STATE_DIR });
       const checkpointStore = deps.checkpointStore || (typeof deps.createTranscriptCheckpointStore === "function" ? deps.createTranscriptCheckpointStore({ stateDir: env.EVERME_STATE_DIR }) : void 0);
       const sessionState = deps.sessionState || (typeof deps.createSessionState === "function" ? deps.createSessionState({ stateDir: env.EVERME_STATE_DIR }) : void 0);
@@ -2190,7 +2261,8 @@ async function runHostHook(event, rawInput, adapter, deps = {}) {
       if (typeof adapter.bufferToolUse === "function") {
         result = await adapter.bufferToolUse(input, { stateDir: env.EVERME_STATE_DIR });
       }
-    } else if (canonicalEvent === "SessionEnd" || canonicalEvent === "PreCompact") {
+    }
+    if (canonicalEvent === "SessionEnd" || canonicalEvent === "PreCompact") {
       const sessionState = deps.sessionState || (typeof deps.createSessionState === "function" ? deps.createSessionState({ stateDir: env.EVERME_STATE_DIR }) : void 0);
       const checkpointStore = deps.checkpointStore || (typeof deps.createTranscriptCheckpointStore === "function" ? deps.createTranscriptCheckpointStore({ stateDir: env.EVERME_STATE_DIR }) : void 0);
       result = await requireOperation(deps.runBoundaryFlush, "runBoundaryFlush")({
@@ -2208,25 +2280,34 @@ async function runHostHook(event, rawInput, adapter, deps = {}) {
         }
       });
     }
-    return formatOutput(adapter, hostEvent, result);
+    return formatOutput(adapter, hostEvent, result, brand);
   } catch (error) {
-    writeDiagnostic(hostEvent, error, deps.redactError || redactError, deps.writeStderr);
+    writeDiagnostic(hostEvent, error, deps.redactError || redactError, deps.writeStderr, brand);
     try {
       await telemetry?.report(hookDegradedEvent({ hookEvent: degradedEvent, code: degradedCode(error) }));
     } catch {
     }
-    return formatOutput(adapter, hostEvent, { block: "", count: 0, degraded: true });
+    return formatOutput(adapter, hostEvent, { block: "", count: 0, degraded: true }, brand);
   }
+}
+async function noTurnStored(adapter, deps, env, input) {
+  if (adapter?.storeAtSessionEndWithoutStop !== true || !input?.sessionId) return false;
+  const sessionState = deps.sessionState || (typeof deps.createSessionState === "function" ? deps.createSessionState({ stateDir: env.EVERME_STATE_DIR }) : void 0);
+  if (!sessionState) return false;
+  const state = await sessionState.read(input.sessionId);
+  return !state?.count;
 }
 function resolveRuntimeConfig(env) {
   const agentToken = env.EVERME_AGENT_TOKEN || env.EVERME_API_KEY || "";
   const authMode = env.EVERME_AGENT_TOKEN ? "evt" : env.EVERME_API_KEY ? "emk" : "none";
-  const knobs = resolveHookKnobs(env);
+  const knobs = resolveHookKnobs(env, { injectMinScore: routeInjectMinScore(env) });
   return {
     ...resolveConfig({
       apiBase: env.EVERME_API_BASE,
       agentId: env.EVERME_AGENT_ID,
       agentToken,
+      memoryHome: env.EVERME_MEMORY_HOME,
+      brand: env.EVERME_BRAND,
       ...knobs
     }),
     ...knobs,
@@ -2245,6 +2326,7 @@ async function loadRuntimeEnv(adapter, baseEnv) {
     if (error?.code === "ENOENT") return merged;
     throw error;
   }
+  const fileEnv = {};
   for (const line of raw.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith("#")) continue;
@@ -2255,7 +2337,11 @@ async function loadRuntimeEnv(adapter, baseEnv) {
     if (value.startsWith('"') && value.endsWith('"') || value.startsWith("'") && value.endsWith("'")) {
       value = value.slice(1, -1);
     }
-    if (ROTATED_KEYS.has(key) || !merged[key]) merged[key] = value;
+    fileEnv[key] = value;
+  }
+  const ownsAll = Boolean(fileEnv.EVERME_BRAND);
+  for (const [key, value] of Object.entries(fileEnv)) {
+    if (ownsAll || ROTATED_KEYS.has(key) || !merged[key]) merged[key] = value;
   }
   return merged;
 }
@@ -2263,7 +2349,7 @@ function requireOperation(fn, name) {
   if (typeof fn !== "function") throw new TypeError(`hook-runtime requires ${name}`);
   return fn;
 }
-function writeDiagnostic(event, error, redact = redactError, writer = (line) => process.stderr.write(line)) {
+function writeDiagnostic(event, error, redact = redactError, writer = (line) => process.stderr.write(line), brand = "everme") {
   const redacted = error?.name === "EvermeError" ? describeError(error) : redact(error);
   const reason = String(redacted).replace(/\s+/g, " ").trim();
   const label = {
@@ -2274,12 +2360,14 @@ function writeDiagnostic(event, error, redact = redactError, writer = (line) => 
     SessionEnd: "summary",
     PreCompact: "compact"
   }[event] || event;
-  writer(`EverMe ${label} hook degraded: ${reason}
+  writer(`${brand === "everos" ? "EverOS" : "EverMe"} ${label} hook degraded: ${reason}
 `);
 }
-function formatOutput(adapter, event, result) {
+function formatOutput(adapter, event, result, brand) {
   if (typeof adapter?.formatOutput !== "function") return {};
-  return adapter.formatOutput(event, result) ?? {};
+  const out = adapter.formatOutput(event, result) ?? {};
+  if (typeof out.systemMessage === "string") out.systemMessage = brandStrings(out.systemMessage, brand);
+  return out;
 }
 
 // src/adapter.js
@@ -2545,10 +2633,15 @@ function mapPayload(payload, timestampValue, fallbackTimestamp, lineNumber, stat
         countDiagnostic(state, "subagent_user");
         return null;
       }
-      const content = normalizeUserMessage(state, rawText);
-      if (!content) {
+      const normalized = normalizeUserMessage(state, rawText);
+      if (!normalized) {
         countDiagnostic(state, "injected_user");
         return null;
+      }
+      const content = humanRequestText(normalized);
+      if (!content) {
+        countDiagnostic(state, "host_event_user");
+        return { role: "user", ...stamp(timestamp), content: "", placeholder: true };
       }
       if (content !== rawText) countDiagnostic(state, "stripped_user_wrapper");
       return { role: "user", ...stamp(timestamp), content: capText(content) };
@@ -2622,6 +2715,50 @@ function mapPayload(payload, timestampValue, fallbackTimestamp, lineNumber, stat
   }
   countDiagnostic(state, "unknown_payload");
   return null;
+}
+var WRAPPED_REQUEST_HEADERS = ["# Files mentioned by the user:", "# Response annotations:"];
+var REQUEST_MARKER = /## My request(?: for Codex)?:/g;
+var PAGE_COMMENT_OPEN = "<page-comment-context>\n";
+var PAGE_COMMENT_CLOSE = "\n</page-comment-context>\n";
+var BROWSER_STATE = /<in-app-browser-context source="ambient-ui-state">[\s\S]*?<\/in-app-browser-context>/g;
+var APPS_PAGE_STATE = /<external_codex_apps_open_page>[\s\S]*?<\/external_codex_apps_open_page>/g;
+var QUESTION_REPLY_OPEN = "<send_user_message_question_reply>";
+var QUESTION_REPLY_CLOSE = "</send_user_message_question_reply>";
+var AUTO_REVIEW_PROMPT = "The following is the Codex agent history whose request action you are assessing";
+function humanRequestText(text) {
+  const trimmed = text.trim();
+  if (trimmed.startsWith("<heartbeat>") && trimmed.endsWith("</heartbeat>")) return "";
+  if (trimmed.startsWith(AUTO_REVIEW_PROMPT)) return "";
+  const answers = questionReplyAnswers(trimmed);
+  if (answers !== null) return answers;
+  return visibleRequest(humanTextFromWrappers(text.replace(BROWSER_STATE, "").replace(APPS_PAGE_STATE, ""))).trim();
+}
+function visibleRequest(text) {
+  if (text.startsWith(PAGE_COMMENT_OPEN)) {
+    const close = text.indexOf(PAGE_COMMENT_CLOSE, PAGE_COMMENT_OPEN.length);
+    const rest = close < 0 ? "" : text.slice(close + PAGE_COMMENT_CLOSE.length);
+    if (rest.startsWith("## My request:\n")) return rest.slice("## My request:\n".length);
+    return text;
+  }
+  const header = WRAPPED_REQUEST_HEADERS.find((candidate) => text.trimStart().startsWith(candidate));
+  if (!header) return text;
+  const parts = text.split(REQUEST_MARKER);
+  if (parts.length < 2) return text;
+  const scaffolding = parts.slice(0, -1).join("").trimStart().slice(header.length);
+  if (/^# /m.test(scaffolding)) return text;
+  return parts[parts.length - 1];
+}
+function questionReplyAnswers(text) {
+  if (!text.startsWith(QUESTION_REPLY_OPEN) || !text.endsWith(QUESTION_REPLY_CLOSE)) return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(text.slice(QUESTION_REPLY_OPEN.length, -QUESTION_REPLY_CLOSE.length));
+  } catch {
+    return null;
+  }
+  const items = Array.isArray(parsed) ? parsed : [parsed];
+  if (!items.length || !items.every((item) => typeof item?.answer === "string")) return null;
+  return items.map((item) => item.answer.trim()).filter(Boolean).join("\n");
 }
 function normalizeUserMessage(state, text) {
   if (state.historyMode !== "paginated") {
@@ -2824,7 +2961,7 @@ async function readFragmentScope(transcriptPath) {
 }
 
 // src/store-batches.js
-async function readCodexStoreBatches(input, { checkpointStore, diagnostic = () => {
+async function readCodexStoreBatches(input, { checkpointStore, resumeFromStart = false, diagnostic = () => {
 } } = {}) {
   if (!input?.sessionId || !input?.transcriptPath) return [];
   const batches = [];
@@ -2832,7 +2969,9 @@ async function readCodexStoreBatches(input, { checkpointStore, diagnostic = () =
     checkpointStore,
     diagnostic,
     conversationId: input.sessionId,
-    initialTailOnly: true,
+    // A failed earlier Stop of this session (resumeFromStart) means the
+    // older turns are this hook's own, not history from before the install.
+    initialTailOnly: !resumeFromStart,
     transcriptPath: input.transcriptPath
   });
   if (root) batches.push(root);
@@ -2941,7 +3080,7 @@ function stringValue(value) {
 }
 
 // src/adapter.js
-var PKG_VERSION = true ? "0.7.10" : createRequire(import.meta.url)("../package.json").version;
+var PKG_VERSION = true ? "0.7.11" : createRequire(import.meta.url)("../package.json").version;
 var CONTEXT_EVENTS = /* @__PURE__ */ new Set(["SessionStart", "UserPromptSubmit"]);
 var codexAdapter = {
   platform: "codex",
