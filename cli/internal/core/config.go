@@ -77,6 +77,17 @@ func LoadConfig(configPath string) (*Config, error) {
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_", "-", "_"))
 	v.AutomaticEnv()
 
+	// EVERME_API_BASE is the variable both READMEs promise ("Self-hosting
+	// EverOS? Set EVERME_API_BASE=... before auth login") and the one every
+	// host integration writes into its MCP entry, so the CLI has to honour
+	// it too. AutomaticEnv alone only ever looks at EVERCLI_*, which is why
+	// the documented override used to be ignored and the CLI always talked
+	// to the managed gateway. Bind explicitly: the first name wins, so the
+	// undocumented EVERCLI_API_BASE_URL escape hatch keeps precedence.
+	if err := v.BindEnv("api_base_url", "EVERCLI_API_BASE_URL", "EVERME_API_BASE"); err != nil {
+		return nil, fmt.Errorf("bind api_base_url env: %w", err)
+	}
+
 	v.SetDefault("api_base_url", "https://api.everme.evermind.ai")
 	v.SetDefault("timeout", "60s")
 	v.SetDefault("skill.hub_base_url", "https://skillhub.evermind.ai")
