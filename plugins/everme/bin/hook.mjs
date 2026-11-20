@@ -939,7 +939,8 @@ async function readState(file) {
       lastTurnId: typeof parsed.lastTurnId === "string" ? parsed.lastTurnId : "",
       uploadedCount: nonNegativeInteger(parsed.uploadedCount),
       pendingTurn: pendingTurn(parsed.pendingTurn),
-      lostTurns: nonNegativeInteger(parsed.lostTurns)
+      lostTurns: nonNegativeInteger(parsed.lostTurns),
+      ...typeof parsed.stopStored === "boolean" ? { stopStored: parsed.stopStored } : {}
     };
   } catch (error) {
     if (error?.code !== "ENOENT" && !(error instanceof SyntaxError)) throw error;
@@ -2257,6 +2258,9 @@ async function runHostHook(event, rawInput, adapter, deps = {}) {
         },
         telemetry
       });
+      if (adapter?.storeAtSessionEndWithoutStop === true && sessionState && input?.sessionId && result?.count > 0) {
+        await sessionState.patch(input.sessionId, { stopStored: !storeAtEnd });
+      }
     } else if (canonicalEvent === "PostToolUse") {
       if (typeof adapter.bufferToolUse === "function") {
         result = await adapter.bufferToolUse(input, { stateDir: env.EVERME_STATE_DIR });
@@ -2295,7 +2299,7 @@ async function noTurnStored(adapter, deps, env, input) {
   const sessionState = deps.sessionState || (typeof deps.createSessionState === "function" ? deps.createSessionState({ stateDir: env.EVERME_STATE_DIR }) : void 0);
   if (!sessionState) return false;
   const state = await sessionState.read(input.sessionId);
-  return !state?.count;
+  return typeof state?.stopStored === "boolean" ? !state.stopStored : !state?.count;
 }
 function resolveRuntimeConfig(env) {
   const agentToken = env.EVERME_AGENT_TOKEN || env.EVERME_API_KEY || "";
@@ -3080,7 +3084,7 @@ function stringValue(value) {
 }
 
 // src/adapter.js
-var PKG_VERSION = true ? "0.7.11" : createRequire(import.meta.url)("../package.json").version;
+var PKG_VERSION = true ? "0.7.12" : createRequire(import.meta.url)("../package.json").version;
 var CONTEXT_EVENTS = /* @__PURE__ */ new Set(["SessionStart", "UserPromptSubmit"]);
 var codexAdapter = {
   platform: "codex",

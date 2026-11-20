@@ -17951,7 +17951,7 @@ function formatQueryStats(stats) {
 }
 
 // ../memory-mcp/src/mcp.js
-var PKG_VERSION = true ? "0.7.11" : createRequire(import.meta.url)("../package.json").version;
+var PKG_VERSION = true ? "0.7.12" : createRequire(import.meta.url)("../package.json").version;
 var EVERME_MCP_INSTRUCTIONS = [
   "EverMe is the user's long-term memory across sessions.",
   "",
