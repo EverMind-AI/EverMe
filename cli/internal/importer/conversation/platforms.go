@@ -18,6 +18,7 @@ var knownPlatforms = map[PlatformID]struct{}{
 	PlatformKimicode:   {},
 	PlatformRaven:      {},
 	PlatformWorkBuddy:  {},
+	PlatformDSH:        {},
 }
 
 // IsKnownPlatform reports whether p is one of the supported platform names.
@@ -34,7 +35,7 @@ func ParsePlatforms(names []string) ([]PlatformID, error) {
 	for _, n := range names {
 		p := PlatformID(strings.TrimSpace(n))
 		if !IsKnownPlatform(p) {
-			return nil, fmt.Errorf("unknown platform %q (known: claude-code, codex, hermes, openclaw, markdown, kimicode, raven, workbuddy)", n)
+			return nil, fmt.Errorf("unknown platform %q (known: claude-code, codex, hermes, openclaw, markdown, kimicode, raven, workbuddy, dsh)", n)
 		}
 		ids = append(ids, p)
 	}

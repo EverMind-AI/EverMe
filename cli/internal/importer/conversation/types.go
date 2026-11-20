@@ -13,6 +13,7 @@ const (
 	PlatformKimicode   PlatformID = "kimicode"
 	PlatformRaven      PlatformID = "raven"
 	PlatformWorkBuddy  PlatformID = "workbuddy"
+	PlatformDSH        PlatformID = "dsh"
 )
 
 // AgentMemoryToolCall mirrors the BFF /mem/agent-memory camelCase DTO.

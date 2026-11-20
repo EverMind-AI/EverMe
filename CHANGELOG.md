@@ -25,6 +25,11 @@ the open-source home for EverMe CLI and agent plugins.
   opencode, Raven, and WorkBuddy.
 - Force `0600` on host config files that store an EverMe agent token.
 - Stop dropping Codex tool families and non-main OpenClaw agents during import.
+- Import DeepSeek Harness history: `evercli import conversations scan --platform
+  dsh` reads `<DSH_HOME>/sessions/*/session-*/session.v*.jsonl.zstd` (zstd
+  compressed JSONL) and maps its user / assistant / tool-result records, so a
+  `dsh` user can seed EverMe memory with sessions the native plugin never
+  captured.
 - Bump the `@everme/cli` npm wrapper to 0.32.0 so wrapper and binary versions
   match, and print a per-host install hint from its postinstall refresh.
 - Format the tree with `gofmt` and tidy `go.mod` / `go.sum`.
