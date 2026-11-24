@@ -1,6 +1,5 @@
 import { appendFile, mkdir, readFile, stat, unlink } from "node:fs/promises";
 import path from "node:path";
-import { capRunes } from "../truncate.js";
 import { DEFAULT_STATE_DIR, sanitizeSessionId } from "./state.js";
 
 const DEFAULT_MAX_BUFFER_BYTES = 2_000_000;
@@ -31,9 +30,9 @@ export function createToolEventBuffer({ stateDir = DEFAULT_STATE_DIR, maxBytes =
         ts: Date.now(),
         generationId: textField(event?.generationId),
         id: textField(event?.id),
-        name: textField(event?.name) || "unknown",
-        input: capField(event?.input),
-        output: capField(event?.output),
+        name: textField(event?.name),
+        input: serializeField(event?.input),
+        output: serializeField(event?.output),
       });
       await appendFile(file, `${line}\n`, { encoding: "utf8", mode: 0o600 });
       return { dropped: false };
@@ -73,11 +72,11 @@ function textField(value) {
   return typeof value === "string" ? value : "";
 }
 
-function capField(value) {
+function serializeField(value) {
   if (value === undefined || value === null) return "";
-  if (typeof value === "string") return capRunes(value);
+  if (typeof value === "string") return value;
   try {
-    return capRunes(JSON.stringify(value));
+    return JSON.stringify(value);
   } catch {
     return "";
   }

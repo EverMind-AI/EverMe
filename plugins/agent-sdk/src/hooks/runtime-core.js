@@ -25,7 +25,7 @@ export function createHookRuntime({ enqueue, flush, diagnostic = () => {}, rethr
 
   return {
     enqueueTurn(turn) {
-      return safe("turn enqueue", () => enqueue({ ...turn, flush: false }));
+      return safe("turn enqueue", () => enqueue({ ...turn, flush: false, sync: true }));
     },
     onStop(conversationId) {
       return safe("Stop flush", () => flush(conversationId));

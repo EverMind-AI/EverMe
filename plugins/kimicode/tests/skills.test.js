@@ -20,12 +20,16 @@ describe("memory-tools skill copy", () => {
     assert.match(frontmatter, /preferences|habits|decisions/i);
   });
 
-  test("body keeps the <everme_recall> dedupe protocol and honesty rules", () => {
+  test("body keeps the <everme_recall> dedupe protocol", () => {
     assert.match(TOOLS_SKILL, /<everme_recall>/);
     assert.match(TOOLS_SKILL, /missing, empty, or clearly unrelated/i);
-    assert.match(TOOLS_SKILL, /no_extraction/);
-    assert.match(TOOLS_SKILL, /profileUpdated/);
-    assert.match(TOOLS_SKILL, /chat-dual-write/i);
+  });
+
+  test("published guidance uses only the read MCP tool names", () => {
+    assert.doesNotMatch(TOOLS_SKILL, /mem_save_fact|mem_save_turn/);
+    for (const tool of ["mem_search", "mem_context"]) {
+      assert.match(TOOLS_SKILL, new RegExp(`\\b${tool}\\b`));
+    }
   });
 
   test("no unconditional suppression copy", () => {

@@ -1,0 +1,10 @@
+{"timestamp":1749004000000,"type":"session_meta","ordinal":0,"payload":{"history_mode":"paginated","thread_source":"subagent","parent_thread_id":"parent","subagent_history_start_ordinal":4}}
+{"timestamp":1749004000500,"type":"session_meta","ordinal":1,"payload":{"history_mode":"paginated","thread_source":"user","parent_thread_id":null}}
+{"timestamp":1749004001000,"type":"response_item","ordinal":2,"payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"forked parent context"}]}}
+{"timestamp":1749004002000,"type":"response_item","ordinal":3,"payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"forked parent answer"}]}}
+{"timestamp":1749004002500,"type":"response_item","ordinal":4,"payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"child task"}]}}
+{"timestamp":1749004002600,"type":"response_item","ordinal":5,"payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"internal instructions"}]}}
+{"timestamp":1749004003000,"type":"response_item","ordinal":6,"payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"inspect the file"}]}}
+{"timestamp":1749004004000,"type":"response_item","ordinal":7,"payload":{"type":"function_call","name":"read_file","call_id":"child_call","arguments":"{\"path\":\"config.json\"}"}}
+{"timestamp":1749004005000,"type":"response_item","ordinal":8,"payload":{"type":"function_call_output","call_id":"child_call","output":"enabled=true"}}
+{"timestamp":1749004006000,"type":"response_item","ordinal":9,"payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"subagent answer"}]}}

@@ -14,7 +14,7 @@ describe("Devin turn assembly", () => {
     const messages = messagesForEvent(
       "post_cascade_response",
       { toolInfo: { response: "42" } },
-      "how many lines",
+      { prompt: "how many lines" },
     );
     assert.deepEqual(messages, [
       { role: "user", content: "how many lines" },
@@ -29,25 +29,17 @@ describe("Devin turn assembly", () => {
     );
   });
 
-  test("an empty response produces nothing to upload", () => {
-    assert.deepEqual(messagesForEvent("post_cascade_response", { toolInfo: { response: "  " } }, "p"), []);
-    assert.deepEqual(messagesForEvent("post_cascade_response", { toolInfo: {} }, "p"), []);
+  test("an empty response preserves the real prompt", () => {
+    assert.deepEqual(messagesForEvent("post_cascade_response", { toolInfo: { response: "  " } }, { prompt: "p" }), [{ role: "user", content: "p" }]);
+    assert.deepEqual(messagesForEvent("post_cascade_response", { toolInfo: {} }, { prompt: "p" }), [{ role: "user", content: "p" }]);
   });
 
-  test("a run_command becomes a tool call, which is the whole point", () => {
+  test("a turn execution id is not fabricated into a command call id", () => {
     const messages = messagesForEvent("post_run_command", {
       turnId: "exec-1",
       toolInfo: { command_line: "wc -l /etc/paths", cwd: "/Users/admin" },
     });
-    assert.equal(messages.length, 1);
-    const [msg] = messages;
-    assert.equal(msg.role, "assistant");
-    assert.equal(msg.toolCalls.length, 1);
-    assert.equal(msg.toolCalls[0].name, "run_command");
-    assert.equal(msg.toolCalls[0].id, "devin_exec-1");
-    const args = JSON.parse(msg.toolCalls[0].arguments);
-    assert.equal(args.command_line, "wc -l /etc/paths");
-    assert.equal(args.cwd, "/Users/admin");
+    assert.deepEqual(messages, []);
   });
 
   test("a run_command with no command is not worth a tool call", () => {
@@ -66,14 +58,12 @@ describe("Devin turn assembly", () => {
   });
 
   // Observed on a real read: post_read_code carries only { file_path }.
-  test("a read becomes a tool call naming the file", () => {
+  test("a read without native call identity is not fabricated into a call", () => {
     const messages = messagesForEvent("post_read_code", {
       turnId: "exec-2",
       toolInfo: { file_path: "/etc/paths" },
     });
-    assert.equal(messages.length, 1);
-    assert.equal(messages[0].toolCalls[0].name, "read_code");
-    assert.equal(JSON.parse(messages[0].toolCalls[0].arguments).file_path, "/etc/paths");
+    assert.deepEqual(messages, []);
   });
 
   test("a read with no path is not worth a tool call", () => {

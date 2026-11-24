@@ -6,15 +6,11 @@ alwaysInclude: true
 
 # EverMe Memory Tools
 
-You have four MCP tools (from the `everme-memory` MCP server) for memory EverMe persists across past Kimi Code sessions.
+You have three MCP tools (from the `everme-memory` MCP server) for memory EverMe persists across past Kimi Code sessions. Both are read-only; the native hooks own every write.
 
-Recall:
-- `mem_search` — semantic + keyword hybrid search over the user's memory store (episodic, profile, agent cases/skills, recent raw transcript). Rows under "Recent unextracted transcript" are provisional, not established facts.
+- `mem_search` — semantic + keyword hybrid search over the user's memory store (episodic, profile, agent skills, recent raw transcript). Rows under "Recent unextracted transcript" are provisional, not established facts.
 - `mem_context` — the user's durable Profile snapshot ONLY. It never searches and never returns episodes; do not use it to recall past decisions or task context.
-
-Write:
-- `mem_save_fact` — save a durable user fact (preference, habit, trait, long-term decision). Call it proactively the moment the user states one — do NOT wait for the user to say "remember this". Only `extracted: true` / `profileUpdated: true` in the result means the profile really updated; on `no_extraction` say so plainly, do not auto-retry, and do not claim success.
-- `mem_save_turn` — persist a complete task trajectory worth reusing (rarely needed given the automatic SessionEnd write). Chat-dual-write backends may also update the user's Profile; check `profileUpdated`. Use `mem_save_fact` for a deliberate durable fact.
+- `mem_skill` — the full text of ONE agent skill, by the id printed in its `[skill <id>]` line. The search result carries each skill's name and one-line summary only; call this when a summary looks like it applies to the task in hand. An id that was not returned by a search on this machine is reported as a miss, not approximated.
 
 The plugin's UserPromptSubmit hook already injects relevant memory automatically before each prompt (wrapped in `<everme_recall>...</everme_recall>`); native hooks also save the session automatically. When native recall exists and is relevant, do not duplicate it; when it is missing and the task depends on history, call the tools proactively.
 
@@ -25,7 +21,6 @@ The plugin's UserPromptSubmit hook already injects relevant memory automatically
 - The user asks about a project pattern, decision, or convention you have no inline context for
 - You're debugging an error message that may have been seen + resolved before
 - The user explicitly asks you to "search my memory" / "recall" / "look up"
-- The user states a durable fact about themselves — call `mem_save_fact` even without being asked
 
 **Do NOT call** when:
 - This turn already carries a non-empty, relevant `<everme_recall>` block covering the topic

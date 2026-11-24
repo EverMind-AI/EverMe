@@ -1,20 +1,9 @@
 /**
- * Shared content truncation for the agent / personal memory write paths.
- *
- * The EverMe gateway rejects any message whose plain-text content exceeds
- * MAX_CONTENT_RUNES *code points* (rune count, not UTF-16 length). Clients
- * MUST truncate to fit so a long message is captured (lossy) rather than
- * hard-rejected (whole message/turn dropped — and the write path swallows
- * the error, so it would be a silent loss).
- *
- * Truncation keeps the HEAD and TAIL with a middle marker (head_ratio 0.7),
- * mirroring the server's case/skill extractor: it mines tool results and
- * final responses for findings that often live at the END of a long message
- * (final result, exit status, root-cause line), so the tail must survive.
+ * Opt-in content truncation for callers with a local text budget.
+ * This is not an EverOS V2 per-message limit. Agent-memory tool results
+ * bypass it to retain one complete result per call.
  */
 
-// The server's gate is rune-based (utf8.RuneCountInString > 8000 → reject),
-// chosen to match the search-query rune limit. Keep this in sync.
 export const MAX_CONTENT_RUNES = 8000;
 
 const HEAD_RATIO = 0.7;

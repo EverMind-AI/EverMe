@@ -5,8 +5,10 @@
  * Tools:
  *   mem_search           — full-text + vector hybrid query
  *   mem_context          — server-assembled context block for a prompt
- *   mem_save_fact        — durable profile fact write
- *   mem_save_turn        — realtime write to /mem/agent-memory
+ *   mem_skill            — full text of one agent skill, by id
+ *
+ * Read-only surface: saving is fully automatic via host hooks; the MCP
+ * write tools (mem_save_turn / mem_save_fact) were retired.
  *
  * Build separately from bin/mcp-server.js so this file can be unit-tested
  * without binding stdio.
@@ -27,21 +29,42 @@ import {
 // bump.sh flows through to what we advertise on the MCP wire. The
 // previous hard-coded "0.1.0" drifted from package.json on every
 // publish.
-const { version: PKG_VERSION } = createRequire(import.meta.url)("../package.json");
+export const PKG_VERSION =
+  typeof __EVERME_MCP_VERSION__ === "string"
+    ? __EVERME_MCP_VERSION__
+    : createRequire(import.meta.url)("../package.json").version;
 
 // Instructions surfaced via MCP `initialize.instructions`. Hosts that
 // honour the field (Claude Desktop, Cursor, Codex at time of writing)
-// splice this into their system prompt, so it doubles as the autonomy
-// nudge that makes all four memory tools get
-// called without the user having to ask.
+// splice this into their system prompt. One string serves every MCP host,
+// and only some of them keep memory on their own (their hook runtime
+// injects the <everme_profile> / <everme_recall> blocks); the copy keys
+// its saving claim off that signal so a host with no writer behind this
+// connection is never told to promise the user something was kept.
 export const EVERME_MCP_INSTRUCTIONS = [
-  "EverMe memory is connected. Act on this protocol AUTONOMOUSLY: call these",
-  "tools yourself the moment a trigger below fires — never wait for the user to",
-  "ask you to \"remember\" or \"recall\".",
-  "1. START of a session — if the host has NOT already injected a non-empty <everme_profile> block, call `mem_context` once. It returns the user's durable Profile ONLY (no semantic search, no episodes, no raw transcript). Never re-fetch it later in the session unless the user asks to refresh the profile.",
-  "2. The user states a durable fact about themselves (a preference, habit, trait, long-term goal, or decision) — call `mem_save_fact` immediately, without being asked. Only `extracted:true` / `profileUpdated:true` in the result means the profile really updated; on `no_extraction` do NOT tell the user the fact was remembered, and do not auto-retry.",
-  "3. A task was solved in a way worth reusing — call `mem_save_turn` with the COMPLETE trajectory (user → assistant tool calls → tool results → final answer). It feeds episodic / case / skill extraction; chat-dual-write backends may also update the Profile, reported by profileUpdated.",
-  "4. The user references earlier conversations, decisions, conventions, or previously solved problems — call `mem_search` with a SHORT query. Skip it when the host already injected a non-empty, relevant <everme_recall> block this turn, and do not repeat an identical query in the same turn. Rows under the provisional unextracted-transcript header are not yet extracted — treat them as a provisional transcript, never as established facts.",
+  "EverMe is the user's long-term memory across sessions.",
+  "",
+  "When a <everme_profile> or <everme_recall> block appears in your context,",
+  "this host keeps that memory on its own: what matters in the conversation —",
+  "preferences, decisions, the work you do together — is retained without",
+  "anyone saving it by hand. If the user asks you to remember something, a",
+  "short acknowledgement is enough (\"Noted — I'll remember that.\"); there is",
+  "nothing to call and nothing to set up. If they ask how it works, \"EverMe",
+  "keeps a memory of our conversations\" is the whole story from their side —",
+  "the mechanics are not something to narrate.",
+  "",
+  "When neither block appears, this connection only reads EverMe memory.",
+  "Whether the conversation is being kept is up to the host, so do not tell",
+  "the user something has been saved through you.",
+  "",
+  "Three read tools bring memory into the conversation. Use them on your own",
+  "judgment rather than waiting to be asked to \"recall\":",
+  "1. START of a session — if no non-empty <everme_profile> block was injected, call `mem_context` once. It returns the user's durable Profile ONLY (no semantic search, no episodes, no raw transcript). Do not re-fetch it later in the session unless the user asks to refresh the profile.",
+  "2. The user leans on earlier conversations, decisions, conventions, or previously solved problems — call `mem_search` with a SHORT query. Skip it when a non-empty, relevant <everme_recall> block is already in this turn, and never repeat an identical query in one turn. Rows under the provisional unextracted-transcript header are not yet extracted — treat them as a provisional transcript, never as established facts.",
+  "",
+  "3. A skill line in a recall block names an id and a one-line summary, not",
+  "   the skill body. Call `mem_skill` with that id when the summary looks",
+  "   like it applies to the task at hand; skip it when it does not.",
   "",
   "Keep the `mem_search` query short: a few keywords, NOT the whole",
   "conversation or the full user message pasted in — a long query searches",
@@ -52,9 +75,7 @@ export const EVERME_MCP_INSTRUCTIONS = [
   "read data is available at these URIs — read them via `resources/read`:",
   "  mem://profile             → durable user Profile only (equivalent to mem_context)",
   "  mem://search?q={query}    → search results (equivalent to mem_search)",
-  "Saving (mem_save_fact / mem_save_turn) has no Resource equivalent (MCP",
-  "Resources are read-only); hosts that only expose Resources can recall but",
-  "cannot auto-save.",
+  "  mem://skill?id={id}       → one agent skill's full text (equivalent to mem_skill)",
 ].join("\n");
 
 // Resource URI constants. The static `mem://profile` URI is enumerated in
@@ -67,6 +88,7 @@ export const EVERME_MCP_INSTRUCTIONS = [
 // every host that follows the skill's guidance.
 const MEM_RESOURCE_PROFILE_URI = "mem://profile";
 const MEM_RESOURCE_SEARCH_TEMPLATE = "mem://search?q={query}&topK={topK}";
+const MEM_RESOURCE_SKILL_TEMPLATE = "mem://skill?id={id}";
 const MEM_RESOURCE_DEFAULT_TOPK = 10;
 
 import {
@@ -75,15 +97,133 @@ import {
   createClient,
   redactError,
   describeError,
-  saveAgentMemory,
-  savePersonalMemory,
   searchMemory,
   getContext,
-  AGENT_MEMORY_ROLES,
   buildMemoryPrompt,
+  buildTimestampFilter,
+  createSkillContentCache,
   extractUserIntent,
   formatQueryStats,
+  brandOf,
+  brandStrings,
 } from "@everme/agent-sdk";
+
+// Time-bound copy for mem_search. This wording is frozen public ABI: the same
+// bytes live in plugins/claude-code/hooks/scripts/mcp-server.js and in
+// server/internal/controller/mcphost/tools.go (memSearchSchema). Edit all
+// three together, or the three surfaces stop agreeing on when a bound is
+// warranted.
+const START_TIME_DESCRIPTION = [
+  "ISO 8601 lower bound on WHEN THE CONVERSATION HAPPENED — not when the thing",
+  "being discussed happened. Example: 2026-09-09T00:00:00+08:00.",
+  "",
+  "Omit by default. Omitting costs you a few extra results you can ignore.",
+  "Setting it wrongly costs you everything: a wrong bound returns zero rows,",
+  "and zero rows is indistinguishable from a topic that was never discussed.",
+  "When a bound is arguable, choose the wider window. If in doubt, leave it out.",
+  "",
+  "SET IT ONLY when the user named a window of conversation you can put exact",
+  "dates on:",
+  "  - an explicit date or range: \"Sep 3\", \"before Aug 20\", \"2026-09-08\",",
+  "    \"late August to early September\"",
+  "  - a calendar-relative word that resolves to exact dates against today:",
+  "    \"yesterday\", \"the day before yesterday\", \"today\", \"last week\",",
+  "    \"this month\", \"the last three days\", \"the past two weeks\"",
+  "Resolve those against the current date and pass absolute values. Never pass",
+  "the word \"yesterday\" itself.",
+  "",
+  "DO NOT SET IT in these three cases:",
+  "",
+  "1. Vague recency with no agreed boundary — \"recently\", \"lately\", \"a while",
+  "   back\", \"earlier\", \"previously\", \"last time\", \"that other session\",",
+  "   \"just now\". A duration makes a phrase datable (\"the last three days\");",
+  "   a bare sense of recency does not (\"recently\"). Search unfiltered, and",
+  "   re-run with a bound only if the results actually come back too old.",
+  "",
+  "2. A date that belongs to the SUBJECT rather than to the conversation.",
+  "   \"Which year did I graduate\", \"which company was I at in 2020\", \"when did",
+  "   this project start\", \"is the stack I chose last year still valid\" — every",
+  "   one of these was discussed recently and must be searched unfiltered;",
+  "   filtering by the event's year returns nothing.",
+  "   This still holds when the user did discuss it at the time. \"The stack I",
+  "   chose last year\" was probably decided in a conversation last year, but",
+  "   the user is asking whether it still stands, and every later revision or",
+  "   reversal is dated after that window. Bounding to last year hides exactly",
+  "   the rows that answer the question.",
+  "   Rule of thumb: a past tense describing the EVENT is not a filter. Only a",
+  "   phrase describing WHEN YOU TWO TALKED is.",
+  "",
+  "3. A date-shaped string that is content, not a constraint — a version number",
+  "   (\"v2026.09\"), a timestamp quoted from a log or stack trace, a cron",
+  "   expression, a date format the user is asking how to parse. Put the string",
+  "   in `query` instead of in a bound.",
+].join("\n");
+
+const END_TIME_DESCRIPTION = [
+  "ISO 8601 upper bound. Same rules as startTime; must not be earlier than it.",
+  "Either bound may be given alone: \"since Sep 1\" is startTime only, \"before",
+  "Aug 20\" is endTime only. For a single day, span the whole day",
+  "(T00:00:00 -> T23:59:59). Never set an endTime in the future: for \"today\" or",
+  "\"this month\", pass startTime alone.",
+  "",
+  "Both bounds assume the user's local timezone when no offset is given; pass",
+  "the offset explicitly when you can.",
+].join("\n");
+
+// mem_skill copy. Duplicated verbatim in
+// plugins/claude-code/hooks/scripts/mcp-server.js — the two MCP surfaces are
+// one public ABI (plugins/AGENTS.md 2), so edit both together.
+const MEM_SKILL_DESCRIPTION = [
+  "Read the FULL TEXT of one agent skill, addressed by the id printed in an",
+  "\"Agent skills\" line of a recall block or of a mem_search result.",
+  "",
+  "Those lines carry the skill's name and a one-line summary only; the body —",
+  "the actual steps, checks and decision points — is what this returns. Call it",
+  "when a summary looks like it applies to the task in hand, and skip it when it",
+  "does not: the summaries exist so you can make that call without paying for",
+  "every body.",
+  "",
+  "The id must come from a search result seen in this session. Ids are not",
+  "guessable, and one that was never retrieved here is reported as a miss —",
+  "re-run mem_search rather than inventing an id.",
+].join("\n");
+
+const MEM_SKILL_ID_DESCRIPTION =
+  "The skill id exactly as printed in the \"[skill <id>]\" prefix of an Agent skills line.";
+
+const MEM_SKILL_MISSING_ID =
+  "mem_skill requires an `id`: the value printed in the \"[skill <id>]\" prefix of an Agent skills line.";
+
+// Honest miss. The body lives only in a /mem/search response — the gateway
+// exposes no get-by-id — so the only recovery is another search, and saying so
+// is more useful than any substitute text would be.
+function skillCacheMiss(id) {
+  return (
+    `skill ${id} is not in this machine's local skill cache. ` +
+    "Only skills returned by a recent search on this machine are cached, and entries expire. " +
+    "Run mem_search again and use an id from its Agent skills lines."
+  );
+}
+
+// The body is markdown already (EverOS writes it with its own headings), so it
+// is passed through untouched under a heading that names what it is.
+function renderSkill(skill) {
+  const head = `## Agent skill: ${skill.name || "(unnamed skill)"}`;
+  const meta = `_(id: ${skill.id}${skill.cachedAt ? `, cached ${skill.cachedAt}` : ""})_`;
+  const parts = [head, meta];
+  if (skill.description) parts.push(skill.description);
+  parts.push(skill.content);
+  return parts.join("\n\n");
+}
+
+// Appended to the `query` property: the two are coupled, and a time word left
+// in the query dilutes the vector match it was already filtered on.
+const QUERY_TIME_HYGIENE = [
+  "When you set a time bound, strip the time words out of `query`. For",
+  "\"what did we decide last Tuesday about the recall pipeline\", query is",
+  "\"recall pipeline decision\" — \"last Tuesday\" belongs in startTime/endTime,",
+  "and leaving it in the query dilutes the match.",
+].join("\n");
 
 /**
  * Build the MCP server. Returns the Server instance ready to connect to
@@ -91,10 +231,14 @@ import {
  */
 export function createMcpServer({ logger, config } = {}) {
   const log = logger || { info() {}, warn() {} };
-  const cfg = resolveConfig(config || {});
+  const cfg = resolveConfig({ ...(config || {}), clientKind: "mcp", clientVersion: PKG_VERSION });
   assertConfigUsable(cfg, { requireAgentId: config === undefined });
 
   const client = createClient(cfg, log);
+  // Same default directory the hook processes write to (~/.everme/state, or
+  // EVERME_STATE_DIR). That shared default is the whole mechanism: recall
+  // runs in the hook process, mem_skill runs here.
+  const skillCache = createSkillContentCache();
 
   const server = new Server(
     { name: "everme-memory-mcp", version: PKG_VERSION },
@@ -107,20 +251,20 @@ export function createMcpServer({ logger, config } = {}) {
         // `subscribe` — push-based memory updates are out of V1.1 scope.
         resources: {},
       },
-      instructions: EVERME_MCP_INSTRUCTIONS,
+      instructions: brandStrings(EVERME_MCP_INSTRUCTIONS, brandOf(process.env)),
     },
   );
 
   // ---- Tool catalogue ------------------------------------------------
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
+  server.setRequestHandler(ListToolsRequestSchema, async () => brandStrings({
     tools: [
       {
         name: "mem_search",
         description:
           "Search EverMe memory for entries relevant to a free-text query. " +
           "Returns the top-K matching entries (episodic, profile, agent " +
-          "cases/skills, recent raw transcript) rendered as markdown; rows " +
+          "skills, recent raw transcript) rendered as markdown; rows " +
           "under the provisional transcript header are not yet extracted and " +
           "must not be quoted as established facts.\n\n" +
           "Call this proactively — without being asked — whenever the user " +
@@ -147,11 +291,23 @@ export function createMcpServer({ logger, config } = {}) {
               description:
                 "Keywords naming the topic to recall — two to eight words, " +
                 "under ~100 characters. Not a sentence from the transcript, " +
-                "not the user's whole message, not a pasted file or log.",
+                "not the user's whole message, not a pasted file or log.\n\n" +
+                QUERY_TIME_HYGIENE,
             },
             topK: { type: "integer", description: "Max entries to return", default: 10 },
+            startTime: { type: "string", description: START_TIME_DESCRIPTION },
+            endTime: { type: "string", description: END_TIME_DESCRIPTION },
           },
           required: ["query"],
+        },
+      },
+      {
+        name: "mem_skill",
+        description: MEM_SKILL_DESCRIPTION,
+        inputSchema: {
+          type: "object",
+          properties: { id: { type: "string", description: MEM_SKILL_ID_DESCRIPTION } },
+          required: ["id"],
         },
       },
       {
@@ -183,194 +339,8 @@ export function createMcpServer({ logger, config } = {}) {
           },
         },
       },
-      {
-        name: "mem_save_turn",
-        description:
-          "Persist a conversation trajectory in realtime via /mem/agent-memory. " +
-          "Does not create /mem/sources. Use sessionKey as conversationId.\n\n" +
-          "Call this proactively — without being asked — when a task has been " +
-          "solved in a way worth reusing, so future sessions can learn the " +
-          "approach.\n\n" +
-          "Two input forms:\n" +
-          "  1. Single message — pass role + text (legacy); for assistant " +
-          "messages that invoked tools, ALSO pass toolCalls so the tool round-" +
-          "trip is preserved; for tool messages, pass toolCallId.\n" +
-          "  2. Trajectory — pass messages: [{role, content, timestamp, " +
-          "toolCalls?, toolCallId?}]. Use this when recording an end-to-end " +
-          "user → assistant{tool_use} → tool → assistant cycle in one call; " +
-          "EverOS only extracts agent_case / agent_skill from trajectories " +
-          "that carry the full tool round-trip, so single-message-per-call " +
-          "patterns silently produce zero case/skill upstream.\n\n" +
-          "By default flush=true: the write triggers EverOS extraction into " +
-          "episodic / agent_case / agent_skill right away. Pass flush=false " +
-          "for append-only accumulation (messages land as raw_messages, " +
-          "extraction deferred to a later flush) — e.g. when saving turn by " +
-          "turn with a single flush at session end. The primary trajectory " +
-          "path extracts episodic / case / skill memory; chat-dual-write " +
-          "backends may also update the user's Profile. Check profileUpdated " +
-          "for the derived profile verdict, and use mem_save_fact for " +
-          "deliberate durable user facts.",
-        inputSchema: {
-          type: "object",
-          properties: {
-            // --- single-message form ---
-            role: {
-              type: "string",
-              enum: [
-                AGENT_MEMORY_ROLES.USER,
-                AGENT_MEMORY_ROLES.ASSISTANT,
-                AGENT_MEMORY_ROLES.TOOL,
-              ],
-              description: "Role for the single-message form. Ignored when messages[] is set.",
-            },
-            text: { type: "string", description: "Content for the single-message form. Ignored when messages[] is set." },
-            timestamp: { type: "integer", description: "Unix milliseconds; defaults to now. Single-message form only." },
-            toolCallId: { type: "string", description: "Required when role=tool. Single-message form only." },
-            toolCalls: {
-              type: "array",
-              description:
-                "Tool invocations made by an assistant message. Required when the " +
-                "assistant called tools — without this the tool round-trip can never " +
-                "be reconstructed downstream and EverOS will not produce agent_case / " +
-                "agent_skill from the turn.",
-              items: {
-                type: "object",
-                properties: {
-                  id: { type: "string" },
-                  name: { type: "string" },
-                  arguments: {
-                    type: "string",
-                    description: "JSON-encoded tool arguments (stringified, not an object).",
-                  },
-                },
-                required: ["id", "name", "arguments"],
-              },
-            },
-
-            // --- trajectory form ---
-            messages: {
-              type: "array",
-              description:
-                "Multi-message trajectory. Preferred for recording a complete " +
-                "user → assistant{tool_use} → tool{tool_result} → assistant cycle.",
-              items: {
-                type: "object",
-                properties: {
-                  role: {
-                    type: "string",
-                    enum: [
-                      AGENT_MEMORY_ROLES.USER,
-                      AGENT_MEMORY_ROLES.ASSISTANT,
-                      AGENT_MEMORY_ROLES.TOOL,
-                    ],
-                  },
-                  content: {
-                    description: "String text, or array of content items (text / image / doc).",
-                  },
-                  timestamp: { type: "integer" },
-                  toolCallId: { type: "string", description: "Required when role=tool." },
-                  toolCalls: {
-                    type: "array",
-                    items: {
-                      type: "object",
-                      properties: {
-                        id: { type: "string" },
-                        name: { type: "string" },
-                        arguments: { type: "string" },
-                      },
-                      required: ["id", "name", "arguments"],
-                    },
-                  },
-                },
-                required: ["role"],
-              },
-            },
-
-            sessionKey: { type: "string", description: "Session id; defaults to 'default'." },
-            flush: {
-              type: "boolean",
-              default: true,
-              description:
-                "true (default) = trigger EverOS extraction into " +
-                "episodic_memory / agent_case / agent_skill after writing; " +
-                "false = append-only, messages are searchable as raw_messages " +
-                "only and extraction is deferred until a later flush. The " +
-                "default flipped from false to true because callers rarely " +
-                "issued an explicit follow-up flush, leaving trajectories " +
-                "permanently stuck as raw_messages with zero case/skill.",
-            },
-          },
-        },
-      },
-      {
-        name: "mem_save_fact",
-        description:
-          "Persist a durable fact about the USER (a preference, habit, " +
-          "trait, or decision) via the long-term PROFILE write path — the " +
-          "block loaded at the start of every session.\n\n" +
-          "Call this proactively, without being asked, the moment the user " +
-          "states something true about themselves that should outlive this " +
-          "conversation (\"I love summer\", \"I take my coffee iced\", " +
-          "\"sign my docs as Alice\").\n\n" +
-          "This is the direct profile-producing sibling of mem_save_turn. " +
-          "They are NOT interchangeable: mem_save_turn primarily records " +
-          "conversation trajectories (→ episodic / agent_case / agent_skill), " +
-          "though chat-dual-write backends may derive a profile update; " +
-          "mem_save_fact writes plain user/assistant " +
-          "turns to the personal-memory path (→ profile + episodic) and does " +
-          "NOT carry tool calls. For a stated user fact, prefer this tool.\n\n" +
-          "Pass either `fact` (a single statement) OR `messages` " +
-          "[{role:'user'|'assistant', content, timestamp?}]. With flush=true " +
-          "(default) the call runs the synchronous materialise path and " +
-          "returns the real EverOS verdict: `status:\"no_extraction\"` and " +
-          "`extracted:false` / `profileUpdated:false` mean the profile did " +
-          "NOT update even though the tool call itself succeeded — never " +
-          "tell the user the fact was remembered in that case, and do not " +
-          "auto-retry. Only `extracted:true` / `profileUpdated:true` " +
-          "confirms the fact reached the profile. (flush:false skips " +
-          "extraction entirely — rarely what you want.)",
-        inputSchema: {
-          type: "object",
-          properties: {
-            fact: {
-              type: "string",
-              description:
-                "A single user-stated fact, recorded as one user-role " +
-                "message. Ignored when messages[] is set.",
-            },
-            messages: {
-              type: "array",
-              description:
-                "Explicit user/assistant turns. Tool roles are not accepted " +
-                "on this path. Preferred when you want to capture both the " +
-                "user's statement and your acknowledgement.",
-              items: {
-                type: "object",
-                properties: {
-                  role: {
-                    type: "string",
-                    enum: [AGENT_MEMORY_ROLES.USER, AGENT_MEMORY_ROLES.ASSISTANT],
-                  },
-                  content: { description: "String text, or array of content items." },
-                  timestamp: { type: "integer", description: "Unix milliseconds; defaults to now." },
-                },
-                required: ["role"],
-              },
-            },
-            sessionKey: { type: "string", description: "Session id; defaults to 'default'." },
-            flush: {
-              type: "boolean",
-              default: true,
-              description:
-                "true (default) = issue EverOS flush and return its verdict; " +
-                "false = skip extraction entirely (fact accepted but not in " +
-                "the profile block).",
-            },
-          },
-        },
-      },
     ],
-  }));
+  }, brandOf(process.env)));
 
   // ---- Tool dispatch -------------------------------------------------
 
@@ -393,14 +363,39 @@ export function createMcpServer({ logger, config } = {}) {
           // visible instead of silently tanking recall relevance.
           const { query, stats } = extractUserIntent(args.query);
           log.info?.(`[everme] mem_search query: ${formatQueryStats(stats)}`);
+          // A malformed or reversed bound is a model mistake, not a server
+          // fault: answer it as a tool error carrying the right shape so the
+          // model can retry, instead of letting the RangeError kill the call.
+          let filters;
+          try {
+            filters = buildTimestampFilter(args);
+          } catch (err) {
+            if (!(err instanceof RangeError)) throw err;
+            return errResp(timeBoundHelp(err));
+          }
           const res = await searchMemory(
             client,
-            { query, topK: normalizeTopK(args.topK, cfg.topK || 10) },
+            { query, topK: normalizeTopK(args.topK, cfg.topK || 10), filters, skillFetch: true },
             log,
           );
           return okMarkdown(
-            appendRequestID(redactError(renderSearchResultsAsMarkdown(query, res)), res?.requestId),
+            appendRequestID(
+              redactError(renderSearchResultsAsMarkdown(query, res) + appliedWindow(filters)),
+              res?.requestId,
+            ),
           );
+        }
+
+        case "mem_skill": {
+          const id = String(args.id || "").trim();
+          if (!id) return errResp(MEM_SKILL_MISSING_ID);
+          const skill = await skillCache.read(id);
+          // A miss is reported as a miss. There is no second source for a
+          // skill body — the gateway has no get-by-id — so inventing one, or
+          // answering with the summary as if it were the body, would hand the
+          // model something that never existed.
+          if (!skill) return errResp(skillCacheMiss(id));
+          return okMarkdown(redactError(renderSkill(skill)));
         }
 
         case "mem_context": {
@@ -412,106 +407,8 @@ export function createMcpServer({ logger, config } = {}) {
           // earlier JSON.stringify({context, memoryCount, ...}) wrapping
           // was pure noise the LLM had to unwrap.
           const ctx = await getContext(client, "", { forceRefresh: args.forceRefresh === true }, log);
-          const rawText = ctx?.context || "_(no profile available — your EverMe account has no extracted memories yet)_";
+          const rawText = ctx?.context || `_(no profile available — your ${brandName()} account has no extracted memories yet)_`;
           return okMarkdown(appendRequestID(redactError(rawText), ctx?.requestId));
-        }
-
-        case "mem_save_turn": {
-          // Trajectory form takes precedence over single-message form
-          // when both are supplied — explicit messages[] is always the
-          // richer signal, and a host that builds both probably wants
-          // the trajectory.
-          let messages;
-          if (Array.isArray(args.messages) && args.messages.length) {
-            messages = args.messages.map((m) => normaliseMemMessage(m));
-          } else {
-            messages = [
-              normaliseMemMessage({
-                role: args.role || AGENT_MEMORY_ROLES.USER,
-                content: args.text,
-                timestamp: args.timestamp,
-                toolCallId: args.toolCallId,
-                toolCalls: args.toolCalls,
-              }),
-            ];
-          }
-          const res = await saveAgentMemory(
-            client,
-            {
-              conversationId: args.sessionKey || "default",
-              messages,
-              // Default-true: only an EXPLICIT `flush: false` keeps writes
-              // append-only. Matches the schema default above and the
-              // historical-bug rationale (callers forget to follow up
-              // with a flush, data sits as raw_message forever).
-              flush: args.flush !== false,
-            },
-            log,
-          );
-          return ok({
-            saved: !!res,
-            accepted: !!res,
-            status: res?.status || null,
-            messageCount: res?.messageCount || 0,
-            flushed: !!res?.flushed,
-            profileStatus: res?.personalStatus || null,
-            profileUpdated: !!res?.personalExtracted,
-            requestId: res?.requestId || null,
-          });
-        }
-
-        case "mem_save_fact": {
-          // messages[] takes precedence over the single `fact` shorthand —
-          // a caller that built both probably wants the richer turn pair.
-          let messages;
-          if (Array.isArray(args.messages) && args.messages.length) {
-            // Reject unexpected roles loudly rather than coercing them: a
-            // tool turn (or a typo'd role) silently rewritten into a
-            // user-attributed profile fact is a correctness bug. The
-            // personal-memory path is user/assistant only.
-            const bad = args.messages.find(
-              (m) => m?.role !== AGENT_MEMORY_ROLES.USER && m?.role !== AGENT_MEMORY_ROLES.ASSISTANT,
-            );
-            if (bad) {
-              return errResp(
-                `mem_save_fact accepts only 'user' or 'assistant' roles; got ${JSON.stringify(bad?.role)}. ` +
-                  "The personal-memory path does not record tool turns — use mem_save_turn for trajectories.",
-              );
-            }
-            messages = args.messages.map((m) => normalisePersonalMessage(m));
-          } else if (typeof args.fact === "string" && args.fact.trim()) {
-            messages = [{ role: AGENT_MEMORY_ROLES.USER, content: args.fact, timestamp: Date.now() }];
-          } else {
-            return errResp("mem_save_fact requires either `fact` or a non-empty `messages` array");
-          }
-          const res = await savePersonalMemory(
-            client,
-            {
-              conversationId: args.sessionKey || "default",
-              messages,
-              // Default-true so the profile materialises now — see schema.
-              flush: args.flush !== false,
-            },
-            log,
-          );
-          // savePersonalMemory returns null when every message had empty
-          // content (nothing reached the backend). Surface that as an error,
-          // not a saved:false "success" the LLM might report as done.
-          if (!res) {
-            return errResp("mem_save_fact wrote nothing — every message had empty content after normalization");
-          }
-          return ok({
-            saved: true,
-            accepted: true,
-            status: res?.status || null,
-            messageCount: res?.messageCount || 0,
-            flushed: !!res?.flushed,
-            extracted: !!res?.extracted,
-            // profileUpdated aliases extracted — the only signal that the
-            // fact really materialised into the profile.
-            profileUpdated: !!res?.extracted,
-            requestId: res?.requestId || null,
-          });
         }
 
         default:
@@ -540,13 +437,12 @@ export function createMcpServer({ logger, config } = {}) {
   // LLM can't invoke them. The Resources surface below gives the same
   // read-side data via URIs Codex's bridge can actually carry.
   //
-  // Trade-off vs Tools: Resources are read-only by protocol, so there's
-  // no Resource equivalent for mem_save_turn. Codex users get auto-
-  // recall but not auto-save in this iteration; saving stays a Tool.
-  // Other hosts (Claude Code, Cursor, Claude Desktop) continue using
-  // Tools as before — Resources are additive, not a replacement.
+  // Both the Tools and the Resources surface are now read-only (search +
+  // context); saving is automatic via the host's hooks, so there is no
+  // write tool to lack a Resource equivalent. Resources stay additive for
+  // hosts (like Codex) whose bridge carries Resources but not Tools.
 
-  server.setRequestHandler(ListResourcesRequestSchema, async () => ({
+  server.setRequestHandler(ListResourcesRequestSchema, async () => brandStrings({
     resources: [
       {
         uri: MEM_RESOURCE_PROFILE_URI,
@@ -561,9 +457,9 @@ export function createMcpServer({ logger, config } = {}) {
         mimeType: "text/markdown",
       },
     ],
-  }));
+  }, brandOf(process.env)));
 
-  server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({
+  server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => brandStrings({
     resourceTemplates: [
       {
         uriTemplate: MEM_RESOURCE_SEARCH_TEMPLATE,
@@ -575,8 +471,19 @@ export function createMcpServer({ logger, config } = {}) {
           "topK defaults to 10; omit to use the default.",
         mimeType: "text/markdown",
       },
+      {
+        uriTemplate: MEM_RESOURCE_SKILL_TEMPLATE,
+        name: "EverMe agent skill",
+        description:
+          "The full text of one agent skill, addressed by the id printed in " +
+          "an \"Agent skills\" line. Read it when that line's summary looks " +
+          "relevant to the task in hand. The id must come from a search " +
+          "result in this session — ids are not guessable and an unknown one " +
+          "is reported as a miss rather than approximated.",
+        mimeType: "text/markdown",
+      },
     ],
-  }));
+  }, brandOf(process.env)));
 
   server.setRequestHandler(ReadResourceRequestSchema, async (req) => {
     const uri = req?.params?.uri || "";
@@ -591,17 +498,17 @@ export function createMcpServer({ logger, config } = {}) {
       try {
         parsed = new URL(uri);
       } catch (parseErr) {
-        throw new Error(`malformed EverMe resource URI ${JSON.stringify(uri)}: ${parseErr.message}; expected mem://profile or mem://search?q=…`);
+        throw new Error(`malformed ${brandName()} resource URI ${JSON.stringify(uri)}: ${parseErr.message}; expected mem://profile or mem://search?q=…`);
       }
       if (parsed.protocol !== "mem:") {
-        throw new Error(`unknown EverMe resource URI: ${uri} (supported scheme: mem://)`);
+        throw new Error(`unknown ${brandName()} resource URI: ${uri} (supported scheme: mem://)`);
       }
 
       if (parsed.host === "profile") {
         // `query` is ignored by /mem/context — auth binds the agent.
         // Pass empty string to satisfy the SDK signature.
         const ctx = await getContext(client, "", {}, log);
-        const rawText = ctx?.context || "_(no profile available — your EverMe account has no extracted memories yet)_";
+        const rawText = ctx?.context || `_(no profile available — your ${brandName()} account has no extracted memories yet)_`;
         // Defense-in-depth: backend may have leaked an evt_/emk_ secret
         // into profile text if the user once pasted one in chat.
         // redactError() (agent-sdk/src/client.js) scrubs both patterns
@@ -626,7 +533,7 @@ export function createMcpServer({ logger, config } = {}) {
           // nothing useful.
           throw new Error(`mem://search requires non-empty 'q' parameter; got URI: ${uri}`);
         }
-        const res = await searchMemory(client, { query, topK }, log);
+        const res = await searchMemory(client, { query, topK, skillFetch: true }, log);
         return {
           contents: [{
             uri,
@@ -639,7 +546,18 @@ export function createMcpServer({ logger, config } = {}) {
           }],
         };
       }
-      throw new Error(`unknown EverMe resource URI: ${uri} (supported: mem://profile, mem://search?q=…)`);
+      if (parsed.host === "skill") {
+        const id = String(parsed.searchParams.get("id") || "").trim();
+        if (!id) throw new Error(`mem://skill requires a non-empty 'id' parameter; got URI: ${uri}`);
+        const skill = await skillCache.read(id);
+        // Throwing (rather than returning placeholder text) keeps a miss a
+        // miss on this surface too — see the mem_skill dispatch.
+        if (!skill) throw new Error(skillCacheMiss(id));
+        return {
+          contents: [{ uri, mimeType: "text/markdown", text: redactError(renderSkill(skill)) }],
+        };
+      }
+      throw new Error(`unknown ${brandName()} resource URI: ${uri} (supported: mem://profile, mem://search?q=…, mem://skill?id=…)`);
     } catch (err) {
       // Same redaction policy as tools/call: presigned URL signing
       // params and evt tokens can leak into upstream error messages,
@@ -656,47 +574,12 @@ export function createMcpServer({ logger, config } = {}) {
   });
 
   async function dispose() {
-    // No buffered runtime writes: mem_save_turn is synchronous.
+    // Read-only server: nothing buffered to flush.
   }
 
   return { server, cfg, dispose };
 }
 
-// normaliseMemMessage coerces an LLM-provided message into the SDK
-// agent-memory shape. Accepts both legacy {role, text} and the
-// canonical {role, content, toolCalls, toolCallId} forms so a host
-// LLM can call either way without trial-and-error. content is left
-// as-is (string OR array of content items) so the SDK's
-// convertAssistant can re-flatten when needed.
-function normaliseMemMessage(m) {
-  const role = m?.role || AGENT_MEMORY_ROLES.USER;
-  const out = {
-    role,
-    timestamp: Number(m?.timestamp) || Date.now(),
-  };
-  if (m?.content !== undefined) out.content = m.content;
-  else if (m?.text !== undefined) out.content = String(m.text);
-  if (Array.isArray(m?.toolCalls) && m.toolCalls.length) out.toolCalls = m.toolCalls;
-  if (role === AGENT_MEMORY_ROLES.TOOL && (m?.toolCallId || m?.tool_call_id)) {
-    out.toolCallId = String(m.toolCallId || m.tool_call_id);
-  }
-  return out;
-}
-
-// normalisePersonalMessage coerces an LLM-provided message into the shape
-// savePersonalMemory expects (accepting legacy {role, text} alongside
-// {role, content}). It deliberately does NOT carry tool roles / toolCalls /
-// toolCallId — the personal-memory path is user/assistant only. The role is
-// passed through verbatim rather than coerced: the SDK's
-// convertPersonalMessage drops any non-{user,assistant} role, so a stray
-// tool message is filtered out instead of being silently rewritten into a
-// user-attributed profile fact.
-function normalisePersonalMessage(m) {
-  const out = { role: m?.role, timestamp: Number(m?.timestamp) || Date.now() };
-  if (m?.content !== undefined) out.content = m.content;
-  else if (m?.text !== undefined) out.content = String(m.text);
-  return out;
-}
 
 // Exported for unit tests. Production callers use these via the
 // resources/read handler — the export only exists so tests can pin URI
@@ -773,9 +656,17 @@ function parseMemSearchURI(uri, defaultTopK) {
 // which matched no real searchMemory response and produced wall-of-JSON
 // output in production. buildMemoryPrompt is the source of truth for
 // search-result markdown rendering across OpenClaw + MCP and now here.
+// brandName is the product name in fixed text this server writes. Memory
+// content is never rebranded.
+function brandName() {
+  return brandStrings("EverMe", brandOf(process.env));
+}
+
 function renderSearchResultsAsMarkdown(query, res) {
-  const body = buildMemoryPrompt(res, { wrapInCodeBlock: false });
-  const header = `## EverMe search results for "${query}"`;
+  // Rendering happens inside the MCP server process, so mem_skill is
+  // necessarily reachable and a skill id is always redeemable.
+  const body = buildMemoryPrompt(res, { wrapInCodeBlock: false, skillFetch: true });
+  const header = `## ${brandName()} search results for "${query}"`;
   if (!body) return `${header}\n\n_(no matching memories)_`;
   // buildMemoryPrompt emits its own "## Relevant memory" header. Strip
   // it so we don't double-render headers; keep the section subheadings
@@ -807,6 +698,21 @@ function okMarkdown(text) {
 function appendRequestID(text, requestId) {
   if (!requestId) return text;
   return `${text}\n\n_(requestId: ${requestId})_`;
+}
+
+// appliedWindow echoes the window that actually reached the gateway. When the
+// model miscomputed a date it sees the consequence in the same response,
+// instead of reading a silently emptied result set as "never discussed".
+function appliedWindow(filters) {
+  if (!filters?.timestamp) return "";
+  const { gte, lte } = filters.timestamp;
+  return `\n\n_Time filter applied: ${gte ?? "…"} → ${lte ?? "…"}_`;
+}
+
+// timeBoundHelp turns a buildTimestampFilter RangeError into copy the model
+// can act on — the message alone does not say what a good value looks like.
+function timeBoundHelp(err) {
+  return `${err.message}. Pass ISO 8601 instants, e.g. startTime "2026-09-09T00:00:00+08:00" and endTime "2026-09-09T23:59:59+08:00"; omit both to search unfiltered.`;
 }
 
 // errResp accepts pre-redacted text. Callers MUST run redactError on

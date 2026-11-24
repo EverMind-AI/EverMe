@@ -10,8 +10,9 @@ arguments:
 
 Use the canonical EverMe MCP tools:
 
-- `mem_search` — hybrid search across episodic memories, profile entries, agent cases/skills, and the recent raw transcript.
+- `mem_search` — hybrid search across episodic memories, profile entries, agent skills, and the recent raw transcript.
 - `mem_context` — durable Profile snapshot only; it does not search past conversations and is not needed for this command.
+- `mem_skill` — the full text of one agent skill, by the id printed in its `[skill <id>]` line.
 
 ## Query
 

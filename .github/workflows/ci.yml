@@ -63,7 +63,7 @@ jobs:
       - name: Validate package manifests
         working-directory: plugins
         run: |
-          node -e 'for (const f of ["package.json","agent-sdk/package.json","memory-mcp/package.json","openclaw/package.json","claude-code/package.json","kimicode/package.json","codex/package.json","cursor/package.json","devin/package.json","dsh/package.json","cli/package.json"]) JSON.parse(require("fs").readFileSync(f,"utf8"))'
+          node -e 'for (const f of ["package.json","agent-sdk/package.json","memory-mcp/package.json","openclaw/package.json","claude-code/package.json","kimicode/package.json","codex/package.json","cursor/package.json","devin/package.json","dsh/package.json","copilot/package.json","opencode/package.json","cli/package.json"]) JSON.parse(require("fs").readFileSync(f,"utf8"))'
           node -e 'JSON.parse(require("fs").readFileSync("everme/.codex-plugin/plugin.json","utf8"))'
           node -e 'JSON.parse(require("fs").readFileSync("everme/hooks/hooks.json","utf8"))'
 
@@ -187,7 +187,7 @@ jobs:
           # algorithm ("BEGIN RSA PRIVATE KEY"), so dropping the character-class
           # form keeps the check exact while letting the redactor pattern through.
           if grep -R --exclude-dir=.git --exclude-dir=node_modules --exclude=ci.yml \
-            --exclude=redact.go --exclude=redact_test.go -n "BEGIN .*PRIVATE KEY" . \
+            --exclude=redact.go --exclude=redact_test.go --exclude=package-codex-directory.mjs -n "BEGIN .*PRIVATE KEY" . \
             | grep -v 'BEGIN \[A-Z \]\*PRIVATE KEY'; then
             echo "::error::Private key material detected"
             exit 1

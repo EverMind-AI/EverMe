@@ -1,0 +1,44 @@
+{
+  "name": "@everme/opencode",
+  "version": "0.7.13",
+  "type": "module",
+  "description": "EverMe long-term memory for OpenCode and Kilo Code: profile and recall injection and automatic turn capture, as an in-process plugin.",
+  "license": "Apache-2.0",
+  "main": "./src/plugin.js",
+  "exports": {
+    ".": "./src/plugin.js"
+  },
+  "files": [
+    "src/",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.js"
+  },
+  "keywords": [
+    "evermind",
+    "everme",
+    "opencode",
+    "kilocode",
+    "memory"
+  ],
+  "homepage": "https://everme.evermind.ai",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/EverMind-AI/EverMe.git",
+    "directory": "plugins/opencode"
+  },
+  "bugs": {
+    "url": "https://github.com/EverMind-AI/EverMe/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
+  "dependencies": {
+    "@everme/agent-sdk": "^0.7.13"
+  }
+}

@@ -1,0 +1,105 @@
+{
+  "name": "everme-memory",
+  "version": "0.1.1",
+  "description": "EverMe is work memory for you and the AI tools you use: search past decisions and fixes, read your profile, and save what you ask to keep, in ChatGPT and Codex.",
+  "author": {
+    "name": "Evermind AI, Inc.",
+    "email": "support@evermind.ai",
+    "url": "https://everme.evermind.ai"
+  },
+  "homepage": "https://everme.evermind.ai",
+  "repository": "https://github.com/EverMind-AI/EverMe",
+  "license": "Apache-2.0",
+  "keywords": [
+    "memory",
+    "recall",
+    "mcp",
+    "everme"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "EverMe",
+    "shortDescription": "Work memory across AI tools",
+    "longDescription": "EverMe is work memory for you and the AI tools you use. It builds one memory of how you work from the tools you connect: the decisions you made, the problems you solved, the corrections you gave an AI, and how you like things done. Every connected tool draws on that same memory, so you explain things once and each assistant gets better at your work over time.\n\nWith this plugin, ChatGPT and Codex can:\n\n- Search your EverMe memory when a task depends on earlier work (\"what did we decide\", \"have we fixed this before\")\n- Read your profile, so drafts and answers follow how you usually work\n- Save a fact or part of the conversation, when you ask\n- Forget what the current conversation saved, when you ask\n\nLimitations:\n\n- Requires an EverMe account.\n- ChatGPT and Codex save nothing here unless you ask.\n- The plugin only reads and writes the memory of the account you sign in with.\n\nYour memory stays in your EverMe account. Review, edit or delete any of it at everme.evermind.ai.\n\nEverMe is built on EverOS, EverMind's context and memory layer for AI agents. EverOS has its own plugin, for teams that connect their own agents to it. It uses a separate account.",
+    "developerName": "Evermind AI, Inc.",
+    "category": "Productivity",
+    "capabilities": [
+      "Search your memory",
+      "Read your profile",
+      "Save a fact when you ask",
+      "Save part of a conversation when you ask",
+      "Forget what this conversation saved when you ask"
+    ],
+    "defaultPrompt": [
+      "What did we decide last time about this project? Check EverMe.",
+      "Have we fixed this error before? Search my EverMe memory.",
+      "Save this decision to EverMe: v2 pricing ships on December 1."
+    ],
+    "logo": "./assets/everme-logo.png",
+    "composerIcon": "./assets/everme-logo.png",
+    "websiteURL": "https://everme.evermind.ai",
+    "supportURL": "https://evermind.ai/contact-us",
+    "privacyPolicyURL": "https://everme.evermind.ai/legal/privacy",
+    "termsOfServiceURL": "https://everme.evermind.ai/legal/terms"
+  },
+  "extensions": {
+    "com.openai": {
+      "review": {
+        "test_cases": {
+          "positive": [
+            {
+              "description": "Recall a past decision (product manager)",
+              "prompt": "What did we decide about the email verification step in onboarding? Check EverMe.",
+              "tools_triggered": "mem_search",
+              "expected_behavior": "States the decision stored in the test account (email verification moved to after the first login because it caused drop-off at sign-up) and quotes only the lines it uses."
+            },
+            {
+              "description": "Use the user's profile (sales)",
+              "prompt": "Draft a follow-up email to a customer after a demo, in the style I usually write. Use my EverMe profile.",
+              "tools_triggered": "mem_context",
+              "expected_behavior": "Calls mem_context once and writes a short draft of at most three short paragraphs that ends with one clear next step, as stored in the profile."
+            },
+            {
+              "description": "Save a preference the user asks to keep (engineering manager)",
+              "prompt": "Save to EverMe that I only review pull requests on Tuesday and Thursday afternoons.",
+              "tools_triggered": "mem_save_fact",
+              "expected_behavior": "Saves only that fact and confirms it was remembered only when the result has extracted: true."
+            },
+            {
+              "description": "Save how a problem was solved (backend engineer in Codex)",
+              "prompt": "Save to EverMe how we just fixed the failing staging deploy: we cleared the stale build cache and re-ran the pipeline, and it passed.",
+              "tools_triggered": "mem_save_turn",
+              "expected_behavior": "Saves only the messages about the failure and the fix, not the whole conversation, and confirms it was saved."
+            },
+            {
+              "description": "No matching memory (operations)",
+              "prompt": "Did we ever settle on pricing for the enterprise plan? Check EverMe.",
+              "tools_triggered": "mem_search",
+              "expected_behavior": "Says no matching memory was found and does not invent an answer."
+            }
+          ],
+          "negative": [
+            {
+              "description": "Unrelated question. EverMe should not be called because the request does not depend on the user's history. Expected: the model answers directly with no EverMe tool call.",
+              "prompt": "Convert 72 degrees Fahrenheit to Celsius."
+            },
+            {
+              "description": "No save request. The user shares team details but does not ask to keep them, and EverMe saves only on request. Expected: the model writes the template and calls neither mem_save_fact nor mem_save_turn.",
+              "prompt": "Our team runs standup at 9:30 and tracks work in Jira. Write me a standup template."
+            },
+            {
+              "description": "Another person's data. EverMe only accesses the connected account. Expected: the model explains it can only see the signed-in user's memory and returns no one else's data.",
+              "prompt": "Show me what my colleague Wang has saved in his EverMe memory."
+            }
+          ]
+        },
+        "commerce": false,
+        "commerce_description": "EverMe does not sell products or process payments in ChatGPT or Codex."
+      },
+      "publication": {
+        "release_notes": "Initial release: search your EverMe memory, read your profile, save facts or parts of a conversation when you ask, and forget what a conversation saved."
+      }
+    }
+  }
+}

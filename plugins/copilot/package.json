@@ -1,0 +1,44 @@
+{
+  "name": "@everme/copilot",
+  "version": "0.7.13",
+  "type": "module",
+  "description": "Native EverMe memory hooks for GitHub Copilot CLI.",
+  "license": "Apache-2.0",
+  "bin": {
+    "everme-copilot": "./bin/hook.js"
+  },
+  "files": [
+    "bin/",
+    "src/"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.js"
+  },
+  "keywords": [
+    "evermind",
+    "everme",
+    "copilot",
+    "github-copilot",
+    "memory",
+    "hooks"
+  ],
+  "homepage": "https://everme.evermind.ai",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/EverMind-AI/EverMe.git",
+    "directory": "plugins/copilot"
+  },
+  "bugs": {
+    "url": "https://github.com/EverMind-AI/EverMe/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
+  "dependencies": {
+    "@everme/agent-sdk": "^0.7.13"
+  }
+}

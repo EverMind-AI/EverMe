@@ -339,7 +339,12 @@ describe("renderSearchResultsAsMarkdown", { skip: !sdkAvailable && "SDK not inst
       "array contentItems must be unwrapped, not String()-coerced — this is the original A.3 regression");
   });
 
-  test("renders agent cases using taskIntent field", async () => {
+  test("agent cases are not rendered at all", async () => {
+    // Behaviour change, not a regression: case scores overlap between
+    // relevant and irrelevant queries (an unrelated one still tops out near
+    // 0.29), so no threshold separates them and the section was pure noise.
+    // The upstream keeps returning them — EverOS hard-codes the agent-side
+    // kinds — so this asserts the render side drops them.
     const { renderSearchResultsAsMarkdown } = await import("../src/mcp.js");
     const md = renderSearchResultsAsMarkdown("install", {
       agentMemory: {
@@ -347,8 +352,30 @@ describe("renderSearchResultsAsMarkdown", { skip: !sdkAvailable && "SDK not inst
         skills: [],
       },
     });
-    assert.match(md, /### Past task cases/);
-    assert.match(md, /Diagnose Codex MCP/);
+    assert.doesNotMatch(md, /### Past task cases/);
+    assert.doesNotMatch(md, /Diagnose Codex MCP/);
+    assert.match(md, /no matching memories/i,
+      "a cases-only response has nothing left to show once cases are dropped");
+  });
+
+  test("renders agent skills with the id the body is fetched by", async () => {
+    const { renderSearchResultsAsMarkdown } = await import("../src/mcp.js");
+    const md = renderSearchResultsAsMarkdown("review", {
+      agentMemory: {
+        cases: [],
+        skills: [{
+          id: "6a98d9504ff33830c399cf66",
+          name: "Security and compliance review",
+          description: "How to scope and run a review before a release",
+          content: "SECRET_BODY_MARKER",
+          relevanceScore: 0.99,
+        }],
+      },
+    });
+    assert.match(md, /### Agent skills/);
+    assert.match(md, /\[skill 6a98d9504ff33830c399cf66\]/);
+    assert.doesNotMatch(md, /SECRET_BODY_MARKER/,
+      "the body goes to the local cache, not into the prompt");
   });
 
   test("emits a 'no matches' marker when every section is empty", async () => {
@@ -360,14 +387,16 @@ describe("renderSearchResultsAsMarkdown", { skip: !sdkAvailable && "SDK not inst
       "host LLMs need a clear 'nothing found' signal — empty markdown looks like a backend bug");
   });
 
-  test("rows are bounded in length (oneLine truncation at ~280 chars)", async () => {
+  test("rows are bounded in length (episodic truncation at EPISODE_MAX_CHARS)", async () => {
     const { renderSearchResultsAsMarkdown } = await import("../src/mcp.js");
-    const huge = "x".repeat(2000);
+    const { EPISODE_MAX_CHARS } = await import("@everme/agent-sdk");
+    const huge = "x".repeat(EPISODE_MAX_CHARS * 2);
     const md = renderSearchResultsAsMarkdown("q", { memories: [{ type: "episodic_memory", episode: huge }] });
-    // buildMemoryPrompt's oneLine() caps each row at 280 chars.
+    // buildMemoryPrompt's oneLine() caps an episodic row at EPISODE_MAX_CHARS.
     // Pin a generous upper bound so a future cap change doesn't bloat
     // the LLM context window unnoticed.
-    assert.ok(md.length < 500, `rendered length=${md.length} exceeded budget — long rows must be truncated`);
+    assert.ok(md.length < EPISODE_MAX_CHARS + 220,
+      `rendered length=${md.length} exceeded budget — long rows must be truncated`);
   });
 });
 
@@ -666,86 +695,6 @@ describe("mem_context / mem_search tools return raw markdown (no JSON envelope)"
   });
 });
 
-describe("mem_save_fact dispatch (profile write path)", { skip: !sdkAvailable && "SDK not installed" }, () => {
-  // mem_save_fact must hit /mem/personal (profile + episodic), NOT
-  // /mem/agent-memory (case/skill). Routing it to the agent path would
-  // silently reproduce the very bug this tool exists to fix: a stated
-  // user preference that never reaches the profile block.
-  test("`fact` shorthand posts a single user message to /mem/personal", async () => {
-    const http = await import("node:http");
-    const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
-    const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
-
-    let captured = null;
-    const mockServer = http.createServer((req, res) => {
-      if (req.url === "/api/v1/mem/personal" && req.method === "POST") {
-        const chunks = [];
-        req.on("data", (chunk) => chunks.push(chunk));
-        req.on("end", () => {
-          captured = JSON.parse(Buffer.concat(chunks).toString());
-          res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({
-            status: 0,
-            requestId: "req-mock",
-            error: "",
-            result: { status: "no_extraction", messageCount: captured.messages.length, flushed: true, extracted: false },
-          }));
-        });
-        return;
-      }
-      res.writeHead(404);
-      res.end();
-    });
-    await new Promise((resolve) => mockServer.listen(0, "127.0.0.1", resolve));
-    const port = mockServer.address().port;
-
-    process.env.EVERME_API_BASE = `http://127.0.0.1:${port}`;
-    process.env.EVERME_AGENT_ID = "agt_x";
-    process.env.EVERME_AGENT_TOKEN = "evt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const { createMcpServer } = await import("../src/mcp.js");
-    const { server, dispose } = createMcpServer();
-    const [c, s] = InMemoryTransport.createLinkedPair();
-    const client = new Client({ name: "t", version: "0" }, { capabilities: {} });
-    await Promise.all([server.connect(s), client.connect(c)]);
-
-    try {
-      const result = await client.callTool({ name: "mem_save_fact", arguments: { fact: "I love summer" } });
-      assert.ok(captured, "the personal endpoint must have been hit — mem_save_fact routed elsewhere otherwise");
-      assert.equal(captured.messages.length, 1);
-      assert.equal(captured.messages[0].role, "user");
-      assert.equal(captured.messages[0].content, "I love summer");
-      assert.equal(captured.flush, true, "flush defaults to true");
-      const parsed = JSON.parse(result.content[0].text);
-      assert.equal(parsed.saved, true);
-      // The tool passes through EverOS's real verdict from the BFF. This is
-      // success-shaped but NOT a profile update.
-      assert.equal(parsed.status, "no_extraction");
-      assert.equal(parsed.flushed, true);
-      assert.equal(parsed.extracted, false);
-
-      // A stray tool-role message must be REJECTED with an error — never
-      // silently rewritten into a user-attributed profile fact — and the
-      // backend must not be hit at all.
-      captured = null;
-      const bad = await client.callTool({
-        name: "mem_save_fact",
-        arguments: {
-          messages: [
-            { role: "user", content: "I take my coffee iced" },
-            { role: "tool", content: "tool output that must not become a fact" },
-          ],
-        },
-      });
-      assert.equal(bad.isError, true, "an invalid role must produce an error response");
-      assert.equal(captured, null, "the backend must not be hit when any role is invalid");
-    } finally {
-      await client.close();
-      await server.close();
-      await dispose();
-      await new Promise((resolve) => mockServer.close(resolve));
-    }
-  });
-});
 
 describe("EVERME_MCP_INSTRUCTIONS resources hint", { skip: !sdkAvailable && "SDK not installed" }, () => {
   test("instructions mention both URIs so Codex-like hosts can self-discover", async () => {

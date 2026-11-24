@@ -26,6 +26,4 @@ Slash:
 MCP tools:
   mem_search        — hybrid search across all memory buckets
   mem_context       — durable Profile snapshot only
-  mem_save_fact     — save a durable user fact to the Profile path
-  mem_save_turn     — save a reusable task trajectory
 ```

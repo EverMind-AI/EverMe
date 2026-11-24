@@ -1,6 +1,6 @@
 {
   "name": "@everme/codex",
-  "version": "0.6.1",
+  "version": "0.7.13",
   "type": "module",
   "description": "Native EverMe lifecycle hooks for Codex.",
   "license": "Apache-2.0",
@@ -17,7 +17,7 @@
   "scripts": {
     "build:marketplace": "node scripts/build-marketplace.mjs",
     "pretest": "npm run build:marketplace",
-    "test": "node --test tests/transcript.test.js tests/adapter.test.js tests/hook.test.js"
+    "test": "node --test --import ../scripts/no-device-route.mjs tests/everme-injection.test.js tests/transcript.test.js tests/adapter.test.js tests/hook.test.js tests/directory-package.test.js"
   },
   "keywords": [
     "evermind",
@@ -40,7 +40,7 @@
     "registry": "https://registry.npmjs.org"
   },
   "dependencies": {
-    "@everme/agent-sdk": "^0.6.1"
+    "@everme/agent-sdk": "^0.7.13"
   },
   "devDependencies": {
     "esbuild": "^0.28.1"

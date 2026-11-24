@@ -1,0 +1,20 @@
+{
+  "name": "everme-memory",
+  "version": "0.1.0",
+  "description": "EverMe work memory for Cursor and GitHub Copilot CLI: recalls your past decisions and fixes before each prompt and saves each finished turn to your EverMe account.",
+  "author": {
+    "name": "Evermind AI, Inc.",
+    "email": "support@evermind.ai"
+  },
+  "homepage": "https://everme.evermind.ai",
+  "repository": "https://github.com/EverMind-AI/EverMe",
+  "license": "Apache-2.0",
+  "keywords": [
+    "memory",
+    "recall",
+    "context",
+    "everme"
+  ],
+  "logo": "assets/logo.png",
+  "mcpServers": "./mcp.json"
+}

@@ -1,6 +1,6 @@
 {
   "name": "@everme/dsh",
-  "version": "0.6.1",
+  "version": "0.7.13",
   "type": "module",
   "description": "Native EverMe lifecycle hooks for DeepSeek Harness.",
   "license": "Apache-2.0",
@@ -18,7 +18,7 @@
     "node": ">=22.19.0"
   },
   "scripts": {
-    "test": "node --test tests/plugin.test.js"
+    "test": "node --test --import ../scripts/no-device-route.mjs tests/plugin.test.js"
   },
   "keywords": [
     "evermind",
@@ -43,10 +43,10 @@
     "registry": "https://registry.npmjs.org"
   },
   "dependencies": {
-    "@everme/agent-sdk": "^0.6.1"
+    "@everme/agent-sdk": "^0.7.13"
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-llm": ">=0.1.0-rc.6 <0.2.0"
+    "@deepseek-ai/dsh-llm": ">=0.1.0-rc.6 <0.3.0"
   },
   "devDependencies": {
     "@deepseek-ai/dsh-llm": "0.1.0-rc.6"

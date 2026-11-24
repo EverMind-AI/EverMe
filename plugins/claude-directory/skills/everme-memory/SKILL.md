@@ -1,6 +1,6 @@
 ---
 name: everme-memory
-description: Use EverMe memory when the user refers to previous conversations, earlier decisions, "last time", "remember when", existing project conventions, or previously solved errors. Do not repeat a search when a non-empty <everme_recall> block already exists.
+description: Use EverMe memory when the user refers to previous conversations, earlier decisions, "last time", "remember when", existing project conventions, or previously solved errors. Do not repeat a search when a non-empty <everme_recall> block already exists. If the user names EverOS or an EverOS memory space, use the EverOS tools instead.
 ---
 
 # EverMe Memory

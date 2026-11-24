@@ -12,12 +12,9 @@
 //   Sender (untrusted metadata):\n```json\n{"label": "openclaw-…"}\n```
 //   [message_id: 1778…]\nsender_id: ou_xxx
 //   [Mon 2026-05-13 22:16 GMT+8] …
-// Without stripping, this noise lands in (a) /mem/search queries —
-// hybrid retrieval is sensitive to query noise and recall collapses —
-// and (b) /mem/agent-memory writes — the envelope (including channel
-// ids and OpenIDs) gets durably indexed, conflating user-original text
-// with metadata and leaking identifiers to the cloud. Strip at the
-// boundary where text leaves the host, not at every call site.
+// These legacy heuristics normalize retrieval queries, not stored dialogue.
+// Write adapters must classify host metadata using native source structure;
+// actual conversation text can intentionally quote these same strings.
 //
 // See EverMind-AI/EverOS#139 and the reference patterns in
 // evermemos-openclaw-plugin/packages/plugin-local/src/messages.js.
@@ -38,8 +35,7 @@ const LEADING_TIMESTAMP_PATTERN =
   /^\[(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+)?\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?(?:\s+(?:GMT|UTC)[+-]\d+(?::\d{2})?|\s+[+-]\d{2}:?\d{2})?\]\s*/i;
 
 /**
- * Remove channel-injected envelope from a plain text string. Safe
- * (returns input unchanged) when the text contains no envelope.
+ * Remove legacy envelope patterns when normalizing a retrieval query.
  */
 export function stripChannelMetadata(text) {
   if (!text) return text;
@@ -60,16 +56,20 @@ export function stripChannelMetadata(text) {
  * { type, text } objects.
  */
 export function toText(content) {
-  if (typeof content === "string") return stripChannelMetadata(content);
+  return stripChannelMetadata(extractText(content));
+}
+
+// Conversation text can contain literal protocol examples; extraction must not strip them.
+export function extractText(content) {
+  if (typeof content === "string") return content;
   if (Array.isArray(content)) {
-    const joined = content
+    return content
       .map((p) => (typeof p === "string" ? p : p?.text || p?.content || ""))
       .filter(Boolean)
       .join("\n");
-    return stripChannelMetadata(joined);
   }
   if (content && typeof content === "object" && typeof content.text === "string") {
-    return stripChannelMetadata(content.text);
+    return content.text;
   }
   return "";
 }

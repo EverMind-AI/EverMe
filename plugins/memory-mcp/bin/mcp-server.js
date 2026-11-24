@@ -41,7 +41,7 @@ const logger = {
     process.exit(1);
   }
 
-  // Graceful shutdown. Runtime writes are synchronous via mem_save_turn, so
+  // Graceful shutdown. The server is read-only (no buffered writes), so
   // dispose is currently a no-op hook kept for future cleanup.
   for (const sig of ["SIGINT", "SIGTERM"]) {
     process.once(sig, async () => {

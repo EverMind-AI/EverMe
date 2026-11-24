@@ -1,0 +1,12 @@
+{"type":"session_meta","payload":{"history_mode":"paginated","thread_source":"user"}}
+{"timestamp":1749005000000,"type":"response_item","payload":{"type":"message","role":"user","content":"Inspect recorded actions"}}
+{"timestamp":1749005001000,"type":"response_item","payload":{"type":"function_call","call_id":"empty-function","name":"shell","arguments":"{}"}}
+{"timestamp":1749005002000,"type":"response_item","payload":{"type":"function_call_output","call_id":"empty-function","output":""}}
+{"timestamp":1749005003000,"type":"response_item","payload":{"type":"custom_tool_call","call_id":"empty-custom","name":"exec","input":""}}
+{"timestamp":1749005004000,"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"empty-custom","output":[{"type":"input_text","text":""}]}}
+{"timestamp":1749005005000,"type":"response_item","payload":{"type":"message","role":"assistant","content":"[external_agent_tool_call: Bash]\n{}\n[/external_agent_tool_call]"}}
+{"timestamp":1749005006000,"type":"response_item","payload":{"type":"message","role":"assistant","content":"[external_agent_tool_result]\n\n[/external_agent_tool_result]"}}
+{"timestamp":1749005007000,"type":"response_item","payload":{"type":"web_search_call","status":"completed","action":{"type":"search","query":"中文查询"}}}
+{"timestamp":1749005008000,"type":"response_item","payload":{"type":"web_search_call","status":"failed","action":{"type":"open_page","url":"https://example.com/?token=emk_1234567890123456"}}}
+{"timestamp":1749005009000,"type":"response_item","payload":{"type":"web_search_call"}}
+{"timestamp":1749005010000,"type":"response_item","payload":{"type":"message","role":"assistant","content":"Finished checking the recorded actions."}}

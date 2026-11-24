@@ -36,16 +36,11 @@ describe("memory-tools skill copy", () => {
     assert.doesNotMatch(SKILL, /usually do NOT need to call/i);
   });
 
-  test("extraction verdict honesty is spelled out", () => {
-    assert.match(SKILL, /no_extraction/);
-    assert.match(SKILL, /profileUpdated/);
-    assert.match(SKILL, /chat-dual-write/i);
-  });
 
-  test("published guidance uses only the canonical four MCP tool names", () => {
+  test("published guidance uses only the read MCP tool names", () => {
     const publishedCopy = [SKILL, README, RECALL_COMMAND, HELP_COMMAND].join("\n");
     assert.doesNotMatch(publishedCopy, /everme_search|everme_context/);
-    for (const tool of ["mem_search", "mem_context", "mem_save_fact", "mem_save_turn"]) {
+    for (const tool of ["mem_search", "mem_context"]) {
       assert.match(publishedCopy, new RegExp(`\\b${tool}\\b`));
     }
   });

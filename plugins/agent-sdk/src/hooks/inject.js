@@ -1,6 +1,7 @@
-import { buildMemoryPrompt } from "../prompt.js";
-import { searchMemory } from "../search.js";
+import { buildMemoryPrompt, filterSkillsByScore } from "../prompt.js";
+import { filterEpisodesByScore, searchMemory } from "../search.js";
 import { extractUserIntent, formatQueryStats } from "./query.js";
+import { recallTag } from "../brand.js";
 
 const MIN_PROMPT_TOKENS = 3;
 
@@ -12,11 +13,10 @@ export async function runInject({ input, client, config, search = searchMemory, 
   writeQueryStats(log, stats);
   if (countTokens(query) < MIN_PROMPT_TOKENS) return { block: "", count: 0 };
 
-  const result = await search(client, { query, topK: config.injectTopK }, log);
-  const memories = (result?.memories || []).filter((memory) => {
-    const score = memory?.score ?? memory?.relevanceScore;
-    return score == null || score === 0 || score >= config.injectMinScore;
-  });
+  const result = await search(client, { query, topK: config.injectTopK, skillFetch: config.skillFetch }, log);
+  // Shared with OpenClaw's assemble — see filterEpisodesByScore for why a
+  // literal 0 is rejected while a missing score passes.
+  const memories = filterEpisodesByScore(result?.memories, config.injectMinScore);
   const bundle = {
     memories,
     profiles: result?.profiles || [],
@@ -27,15 +27,14 @@ export async function runInject({ input, client, config, search = searchMemory, 
     episodes: true,
     profiles: config.injectProfile,
     skills: true,
-    cases: true,
     rawMessages: true,
   };
-  const inner = buildMemoryPrompt(bundle, { sections });
+  const inner = buildMemoryPrompt(bundle, { sections, skillFetch: config.skillFetch });
   if (!inner) return { block: "", count: 0 };
 
   return {
-    block: `<everme_recall>\n${inner}\n</everme_recall>`,
-    count: countBundle(bundle, sections),
+    block: `<${recallTag(config.brand)}>\n${inner}\n</${recallTag(config.brand)}>`,
+    count: countBundle(bundle, sections, config.skillFetch === true),
   };
 }
 
@@ -63,12 +62,15 @@ function countTokens(text) {
   return cjkCount + otherCount;
 }
 
-function countBundle(bundle, sections) {
+// Counts what the block actually carries, so the number the host logs and
+// the rows the model sees cannot disagree: cases are never rendered, and
+// skills are counted only under the same score filter AND the same host
+// capability gate the renderer applies.
+function countBundle(bundle, sections, skillFetch) {
   return (
     (sections.episodes ? bundle.memories.length : 0) +
     (sections.profiles ? bundle.profiles.length : 0) +
-    (sections.skills ? bundle.agentMemory?.skills?.length || 0 : 0) +
-    (sections.cases ? bundle.agentMemory?.cases?.length || 0 : 0) +
+    (sections.skills && skillFetch ? filterSkillsByScore(bundle.agentMemory?.skills).length : 0) +
     (sections.rawMessages ? bundle.rawMessages.length : 0)
   );
 }

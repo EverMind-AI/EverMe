@@ -20,8 +20,17 @@ afterEach(async () => {
 describe("everme-cursor hook CLI", () => {
   test("stop writes the latest turn and preCompact sends a flush-only request", async () => {
     const requests = [];
+    const telemetry = [];
     const server = await startServer(async (req, res) => {
-      requests.push({ path: req.url, body: JSON.parse(await readBody(req)) });
+      const body = JSON.parse(await readBody(req));
+      // Delivery telemetry shares the base URL; this test measures the
+      // memory writes, so the reports are recorded apart from them.
+      if (req.url.endsWith("/mem/import-events")) {
+        telemetry.push(body);
+        respond(res, 200, { status: 0, result: { ok: true } });
+        return;
+      }
+      requests.push({ path: req.url, body });
       respond(res, 200, { status: 0, result: { flushed: true } });
     });
     const runtime = await runtimeEnv(server, "test-agent-token");
@@ -41,13 +50,20 @@ describe("everme-cursor hook CLI", () => {
 
     assert.equal(stop.code, 0);
     assert.equal(stop.stdout, "");
-    assert.match(stop.stderr, /saveAgentMemory ok: .*requestId=[0-9a-f-]{36}/,
-      "stderr must carry the save line with its trace id");
+    assert.match(
+      stop.stderr,
+      /agent-memory stage=complete result=accepted .*requestId=[0-9a-f-]{36}/,
+      "stderr must carry one bounded completion line with its trace id",
+    );
+    assert.equal(stop.stderr.trim().split("\n").length, 4);
+    assert.match(stop.stderr, /transcript invalid_tool_id: dropped_items=1/);
     assert.equal(compact.code, 0);
     assert.equal(compact.stdout, "");
     assert.match(compact.stderr, /requestId=[0-9a-f-]{36}/);
     assert.equal(requests.length, 2);
     assert.ok(requests.every((request) => request.path === "/api/v1/mem/agent-memory"));
+    assert.deepEqual(telemetry, [],
+      "both turns landed, so neither reports: only losses cost a request");
     assert.deepEqual(requests[0].body.messages.map(({ role, content }) => ({ role, content })), [
       { role: "user", content: "latest question" },
       { role: "assistant", content: "latest answer" },
@@ -62,8 +78,15 @@ describe("everme-cursor hook CLI", () => {
 
   test("postToolUse spools locally without network and stop attaches the spooled calls", async () => {
     const requests = [];
+    const telemetry = [];
     const server = await startServer(async (req, res) => {
-      requests.push({ path: req.url, body: JSON.parse(await readBody(req)) });
+      const body = JSON.parse(await readBody(req));
+      if (req.url.endsWith("/mem/import-events")) {
+        telemetry.push(body);
+        respond(res, 200, { status: 0, result: { ok: true } });
+        return;
+      }
+      requests.push({ path: req.url, body });
       respond(res, 200, { status: 0, result: { flushed: true } });
     });
     const runtime = await runtimeEnv(server, "test-agent-token");
@@ -77,12 +100,14 @@ describe("everme-cursor hook CLI", () => {
       ...baseInput,
       hook_event_name: "postToolUse",
       tool_name: "shell",
+      tool_use_id: "native-shell-call",
       tool_input: { command: "npm test" },
       tool_output: "all green",
     }, runtime.env);
     assert.equal(post.code, 0);
     assert.equal(post.stdout, "");
     assert.equal(requests.length, 0, "postToolUse must not touch the network");
+    assert.equal(telemetry.length, 0, "a local spool must not report either");
 
     const stop = await runHookProcess("stop", { ...baseInput, hook_event_name: "stop" }, runtime.env);
     assert.equal(stop.code, 0);
@@ -97,6 +122,76 @@ describe("everme-cursor hook CLI", () => {
     assert.equal(messages[2].content, "all green");
     assert.equal(messages[3].role, "assistant");
     assert.equal(messages[3].content, "latest answer");
+  });
+
+  test("sessionEnd returns at once and a detached process stores the turn and flushes", async () => {
+    // cursor-agent -p ends its hooks when it exits. Each request here takes
+    // 2 s, so a hook that did the work itself could not return in time.
+    const requests = [];
+    const server = await startServer(async (req, res) => {
+      const body = JSON.parse(await readBody(req));
+      if (req.url.endsWith("/mem/import-events")) {
+        respond(res, 200, { status: 0, result: { ok: true } });
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      requests.push(body);
+      respond(res, 200, { status: 0, result: { flushed: body.flush === true } });
+    });
+    const runtime = await runtimeEnv(server, "test-agent-token");
+
+    const started = Date.now();
+    const end = await runHookProcess("sessionEnd", {
+      conversation_id: "cursor-oneshot",
+      hook_event_name: "sessionEnd",
+      transcript_path: fixture,
+      workspace_roots: ["/repo"],
+    }, runtime.env);
+
+    assert.equal(end.code, 0, end.stderr);
+    assert.equal(end.stdout, "");
+    assert.ok(Date.now() - started < 2000, "the hook must not wait for the backend");
+    assert.equal(requests.length, 0);
+
+    const deadline = Date.now() + 15000;
+    while (requests.length < 2 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    assert.equal(requests.length, 2);
+    assert.deepEqual(requests[0].messages.map(({ role, content }) => ({ role, content })), [
+      { role: "user", content: "latest question" },
+      { role: "assistant", content: "latest answer" },
+    ]);
+    assert.equal(requests[0].flush, false);
+    assert.deepEqual(requests[1], { conversationId: "cursor-oneshot", messages: [], flush: true });
+  });
+
+  test("each cursor-agent -p --continue run stores its own turn at sessionEnd", async () => {
+    // Checked on 2026-11-20: the sessionEnd of a -p run carries the
+    // conversation id as generation_id, the same value in every run.
+    const requests = [];
+    const server = await startServer(async (req, res) => {
+      const body = JSON.parse(await readBody(req));
+      if (!req.url.endsWith("/mem/import-events")) requests.push(body);
+      respond(res, 200, { status: 0, result: { flushed: body.flush === true } });
+    });
+    const runtime = await runtimeEnv(server, "test-agent-token");
+    const input = {
+      conversation_id: "cursor-continued",
+      generation_id: "cursor-continued",
+      hook_event_name: "sessionEnd",
+      transcript_path: fixture,
+    };
+    const env = { ...runtime.env, EVERME_CURSOR_HOOK_INPUT: JSON.stringify(input) };
+
+    for (let run = 0; run < 2; run += 1) {
+      const end = await runHookProcess("sessionEnd", {}, env);
+      assert.equal(end.code, 0, end.stderr);
+    }
+
+    const writes = requests.filter((body) => body.messages.length);
+    assert.equal(writes.length, 2, "the second run's turn must be stored too");
+    assert.equal(requests.filter((body) => body.flush === true).length, 2);
   });
 
   test("backend errors fail open and redact the credential", async () => {
@@ -116,7 +211,27 @@ describe("everme-cursor hook CLI", () => {
     assert.equal(result.stdout, "");
     assert.doesNotMatch(result.stderr, new RegExp(token));
     assert.match(result.stderr, /REDACTED/);
-    assert.equal(result.stderr.match(/\n/g)?.length, 1);
+    assert.equal(result.stderr.match(/\n/g)?.length, 4);
+  });
+});
+
+describe("everme-cursor hook CLI under Grok Build", () => {
+  test("hooks Grok runs from ~/.cursor/hooks.json send nothing", async () => {
+    const requests = [];
+    const server = await startServer(async (req, res) => {
+      requests.push(req.url);
+      await readBody(req);
+      respond(res, 200, { status: 0, result: { flushed: true } });
+    });
+    const runtime = await runtimeEnv(server, "test-agent-token");
+    const env = { ...runtime.env, GROK_HOOK_EVENT: "stop", GROK_SESSION_ID: "grok-session" };
+    const input = { conversation_id: "grok-session", generation_id: "g", transcript_path: fixture };
+    for (const event of ["sessionStart", "postToolUse", "stop", "preCompact"]) {
+      const result = await runHookProcess(event, input, env);
+      assert.equal(result.code, 0, result.stderr);
+      assert.equal(result.stdout, "");
+    }
+    assert.deepEqual(requests, []);
   });
 });
 

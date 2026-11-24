@@ -5,7 +5,7 @@
  *
  * Two layers of assertion:
  *   1. The exported EVERME_MCP_INSTRUCTIONS constant carries the
- *      protocol text and mentions mem_context / mem_save_turn / mem_search.
+ *      protocol text and mentions mem_context / mem_search (read-only).
  *   2. A full Client ↔ Server round-trip over InMemoryTransport, so we
  *      catch regressions where the constant is right but the server
  *      forgets to pass it into ServerOptions.
@@ -26,13 +26,13 @@ try {
 }
 
 describe("mcp instructions", { skip: !sdkAvailable && "SDK not installed" }, () => {
-  test("EVERME_MCP_INSTRUCTIONS references all four tools", async () => {
+  test("EVERME_MCP_INSTRUCTIONS references the two read tools and no write tools", async () => {
     const { EVERME_MCP_INSTRUCTIONS } = await import("../src/mcp.js");
     assert.ok(EVERME_MCP_INSTRUCTIONS, "instructions string must be non-empty");
     assert.ok(EVERME_MCP_INSTRUCTIONS.includes("mem_context"), "must reference mem_context");
-    assert.ok(EVERME_MCP_INSTRUCTIONS.includes("mem_save_turn"), "must reference mem_save_turn");
-    assert.ok(EVERME_MCP_INSTRUCTIONS.includes("mem_save_fact"), "must reference mem_save_fact");
     assert.ok(EVERME_MCP_INSTRUCTIONS.includes("mem_search"), "must reference mem_search");
+    assert.ok(!EVERME_MCP_INSTRUCTIONS.includes("mem_save_turn"), "the retired mem_save_turn must not be referenced");
+    assert.ok(!EVERME_MCP_INSTRUCTIONS.includes("mem_save_fact"), "the retired mem_save_fact must not be referenced");
   });
 
   test("EVERME_MCP_INSTRUCTIONS carries the autonomy-contract semantics", async () => {
@@ -40,9 +40,6 @@ describe("mcp instructions", { skip: !sdkAvailable && "SDK not installed" }, () 
     assert.match(EVERME_MCP_INSTRUCTIONS, /<everme_profile>/, "must dedupe against injected profile");
     assert.match(EVERME_MCP_INSTRUCTIONS, /<everme_recall>/, "must dedupe against injected recall");
     assert.match(EVERME_MCP_INSTRUCTIONS, /Profile ONLY/, "must brand mem_context Profile-only");
-    assert.match(EVERME_MCP_INSTRUCTIONS, /no_extraction/, "must spell out the extraction verdict");
-    assert.match(EVERME_MCP_INSTRUCTIONS, /profileUpdated/, "must name the profileUpdated signal");
-    assert.match(EVERME_MCP_INSTRUCTIONS, /chat-dual-write/, "must describe the derived profile verdict honestly");
     assert.match(EVERME_MCP_INSTRUCTIONS, /provisional/, "raw rows must be branded provisional");
   });
 

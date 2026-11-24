@@ -15,7 +15,7 @@
 
 import { existsSync } from "fs";
 import { readFile } from "fs/promises";
-import { AGENT_MEMORY_ROLES, AGENT_MEMORY_TOOL_CALL_TYPES } from "@everme/agent-sdk";
+import { AGENT_MEMORY_ROLES, AGENT_MEMORY_TOOL_CALL_TYPES, humanTextFromWrappers } from "@everme/agent-sdk";
 
 const READ_RETRIES = 5;
 const RETRY_DELAY_MS = 100;
@@ -133,8 +133,9 @@ export function extractTurns(lines) {
   return turns;
 }
 
-export function extractAgentMessages(lines) {
+export function extractAgentMessages(lines, { subagent = false, diagnostic = () => {} } = {}) {
   const messages = [];
+  const dropped = { calls: 0, results: 0 };
   for (const line of lines) {
     let ev;
     try {
@@ -142,6 +143,7 @@ export function extractAgentMessages(lines) {
     } catch {
       continue;
     }
+    if (isInternalEvent(ev, subagent)) continue;
     const timestamp = normalizeTimestamp(ev.timestamp);
     // Real Claude Code transcript schema is nested: each line is
     //   { "type":"user"|"assistant", "message":{role, content}, ... }
@@ -159,27 +161,210 @@ export function extractAgentMessages(lines) {
       // messages (with their own toolCallId), free text becomes a
       // role=user message. A single CC user event can therefore emit
       // multiple EverMe messages.
-      const toolResults = extractToolResults(rawContent, timestamp);
+      const toolResults = extractToolResults(rawContent, timestamp, dropped);
       messages.push(...toolResults);
-      const text = textFromContent(rawContent);
-      if (text) messages.push({ role: AGENT_MEMORY_ROLES.USER, timestamp, content: text });
+      if (subagent) continue;
+      const text = normalizeClaudeUserText(textFromContent(rawContent));
+      if (!text) continue;
+      // Earlier releases uploaded these records as user turns. They keep
+      // their turn as an empty placeholder so checkpoints and the gate's turn
+      // watermark line up across the upgrade; the text never leaves.
+      const human = isHumanAuthored(ev) && !isHostEventText(text, ev) ? humanTextFromWrappers(text) : "";
+      if (!human) {
+        messages.push({ role: AGENT_MEMORY_ROLES.USER, timestamp, content: "", placeholder: true });
+        continue;
+      }
+      messages.push({ role: AGENT_MEMORY_ROLES.USER, timestamp, content: human });
       continue;
     }
     if (role === AGENT_MEMORY_ROLES.ASSISTANT) {
-      const msg = agentAssistantMessage(rawContent, timestamp);
-      if (msg) messages.push(msg);
+      const msg = agentAssistantMessage(rawContent, timestamp, dropped);
+      if (msg) {
+        if (inner?.stop_reason === "end_turn") msg.turnComplete = true;
+        messages.push(msg);
+      }
       continue;
     }
     // Legacy flat tool-role fallback: { role:"tool", content, toolCallId }
     if (role === AGENT_MEMORY_ROLES.TOOL || ev.type === "tool_result") {
-      const toolCallId = ev.toolCallId || ev.tool_call_id || ev.tool_use_id;
-      if (!toolCallId) continue;
+      const toolCallId = firstToolId(ev.toolCallId, ev.tool_call_id, ev.tool_use_id);
+      if (!toolCallId) {
+        dropped.results++;
+        continue;
+      }
       const content =
         typeof rawContent === "string" ? rawContent : safeJsonStringify(rawContent);
       messages.push({ role: AGENT_MEMORY_ROLES.TOOL, timestamp, toolCallId, content });
     }
   }
-  return messages;
+  const filtered = filterInvalidToolCalls(messages, diagnostic);
+  if (dropped.calls || dropped.results) {
+    diagnostic(`[everme] claude-code parse lines=${lines.length} messages=${filtered.length} dropped_invalid_call_id=${dropped.calls} dropped_invalid_result_id=${dropped.results}`.slice(0, 1024));
+  }
+  return filtered;
+}
+
+function filterInvalidToolCalls(messages, diagnostic) {
+  const callCounts = new Map();
+  const invalidCalls = new Set();
+  const invalidIds = new Map();
+  const dropped = {
+    invalid_tool_name: { calls: 0, results: 0 },
+    invalid_tool_arguments: { calls: 0, results: 0 },
+  };
+  for (const message of messages) {
+    for (const call of message.toolCalls || []) {
+      callCounts.set(call.id, (callCounts.get(call.id) || 0) + 1);
+      const reason = invalidToolCallReason(call);
+      if (reason) {
+        invalidCalls.add(call);
+        invalidIds.set(call.id, reason);
+        dropped[reason].calls++;
+      }
+    }
+  }
+  if (!invalidCalls.size) return messages;
+  const filtered = [];
+  for (const message of messages) {
+    if (message.role === AGENT_MEMORY_ROLES.TOOL
+      && invalidIds.has(message.toolCallId) && callCounts.get(message.toolCallId) === 1) {
+      dropped[invalidIds.get(message.toolCallId)].results++;
+      continue;
+    }
+    if (message.toolCalls?.some(call => invalidCalls.has(call))) {
+      const kept = { ...message, toolCalls: message.toolCalls.filter(call => !invalidCalls.has(call)) };
+      if (!kept.toolCalls.length) {
+        delete kept.toolCalls;
+        if (!kept.content?.trim()) continue;
+      }
+      filtered.push(kept);
+    } else {
+      filtered.push(message);
+    }
+  }
+  for (const [reason, counts] of Object.entries(dropped)) {
+    if (counts.calls) diagnostic(`[everme] claude-code parse reason=${reason} dropped_calls=${counts.calls} dropped_results=${counts.results}`.slice(0, 1024));
+  }
+  return filtered;
+}
+
+function invalidToolCallReason(call) {
+  if (typeof call.name !== "string" || !call.name.trim()) return "invalid_tool_name";
+  return isJsonArguments(call.arguments) ? "" : "invalid_tool_arguments";
+}
+
+function isJsonArguments(value) {
+  if (typeof value !== "string") return false;
+  try {
+    JSON.parse(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function firstToolId(...values) {
+  return values.find(value => typeof value === "string" && value.trim().length > 0) || "";
+}
+
+// Claude Code also writes enveloped records that are not turns: an
+// api-request-blob replays slices of the request it sent (history copies,
+// "Tool loaded.", system context) under role=user/assistant/system. Only
+// user and assistant records are the conversation.
+const CONTENT_TYPES = new Set(["user", "assistant"]);
+
+function isInternalEvent(event, subagent) {
+  if (event?.message && typeof event.message === "object"
+      && typeof event.type === "string" && !CONTENT_TYPES.has(event.type)) return true;
+  if (event?.isMeta === true) return true;
+  if (subagent) return false;
+  return event?.isSidechain === true
+    || (typeof event?.agentId === "string" && event.agentId.length > 0);
+}
+
+// Claude Code stamps the source of each user record in origin.kind. Only the
+// kinds its own writers use for machine-made turns are excluded; any other
+// kind, and records from before the field existed, stay the person's words.
+const NON_HUMAN_ORIGINS = new Set(["task-notification", "auto-continuation", "peer", "coordinator", "observer-activity"]);
+
+function isHumanAuthored(event) {
+  if (event?.isCompactSummary === true) return false;
+  return !NON_HUMAN_ORIGINS.has(event?.origin?.kind);
+}
+
+const INTERRUPT_MARKERS = new Set(["[Request interrupted by user]", "[Request interrupted by user for tool use]"]);
+
+// Records from before origin existed: the interrupt markers Claude Code
+// writes, and another session's message in its <agent-message> envelope.
+function isHostEventText(text, event) {
+  if (INTERRUPT_MARKERS.has(text)) return true;
+  return event?.origin === undefined && hasEnvelopePrefix(text, "agent-message");
+}
+
+function normalizeClaudeUserText(text) {
+  let trimmed = String(text || "").trim();
+  const initialCommand = commandIntent(trimmed);
+  if (initialCommand) return initialCommand;
+  if (hasEnvelopePrefix(trimmed, "command-message")) return "";
+
+  const injectedTags = [
+    "system-reminder",
+    "preview-annotation-context",
+    "task-notification",
+    "local-command-caveat",
+    "local-command-stdout",
+    "bash-input",
+    "bash-stdout",
+    "command-name",
+    "turn_aborted",
+  ];
+  for (;;) {
+    let stripped = false;
+    for (const tag of injectedTags) {
+      const remaining = stripLeadingEnvelope(trimmed, tag);
+      if (remaining !== null) {
+        trimmed = remaining;
+        stripped = true;
+        break;
+      }
+    }
+    if (!stripped) break;
+  }
+  if (!trimmed) return "";
+  const command = commandIntent(trimmed);
+  if (command) return command;
+  return hasEnvelopePrefix(trimmed, "command-message") ? "" : trimmed;
+}
+
+function commandIntent(text) {
+  if (!hasEnvelopePrefix(text, "command-message")) return "";
+  const name = envelopeValue(text, "command-name");
+  if (!name.startsWith("/")) return "";
+  const args = envelopeValue(text, "command-args");
+  return `${name} ${args}`.trim();
+}
+
+function stripLeadingEnvelope(text, tag) {
+  if (!hasEnvelopePrefix(text, tag)) return null;
+  const close = `</${tag}>`;
+  const end = text.indexOf(close);
+  if (end < 0) return null;
+  return text.slice(end + close.length).trim();
+}
+
+function hasEnvelopePrefix(text, tag) {
+  if (!text.startsWith(`<${tag}`)) return false;
+  return [">", " ", "\t", "\n", "\r"].includes(text.at(tag.length + 1));
+}
+
+function envelopeValue(text, tag) {
+  const open = `<${tag}>`;
+  const close = `</${tag}>`;
+  const start = text.indexOf(open);
+  if (start < 0) return "";
+  const valueStart = start + open.length;
+  const end = text.indexOf(close, valueStart);
+  return end < 0 ? "" : text.slice(valueStart, end).trim();
 }
 
 // extractToolResults pulls every `tool_result` block out of a CC user-
@@ -187,14 +372,17 @@ export function extractAgentMessages(lines) {
 // message. CC encodes tool_result as a content block inside a user
 // envelope (not a separate top-level event), so without this step the
 // entire tool round-trip is lost.
-function extractToolResults(content, timestamp) {
+function extractToolResults(content, timestamp, dropped) {
   if (!Array.isArray(content)) return [];
   const out = [];
   for (const b of content) {
     if (!b || typeof b !== "object") continue;
     if (b.type !== "tool_result") continue;
-    const toolCallId = b.tool_use_id || b.toolCallId || b.tool_call_id;
-    if (!toolCallId) continue;
+    const toolCallId = firstToolId(b.tool_use_id, b.toolCallId, b.tool_call_id);
+    if (!toolCallId) {
+      dropped.results++;
+      continue;
+    }
     let text;
     if (typeof b.content === "string") {
       text = b.content;
@@ -217,23 +405,28 @@ function extractToolResults(content, timestamp) {
   return out;
 }
 
-function agentAssistantMessage(content, timestamp) {
+function agentAssistantMessage(content, timestamp, dropped) {
   if (typeof content === "string") {
     return content ? { role: AGENT_MEMORY_ROLES.ASSISTANT, timestamp, content } : null;
   }
   if (!Array.isArray(content)) return null;
   const textParts = [];
   const toolCalls = [];
-  for (const [i, b] of content.entries()) {
+  for (const b of content) {
     if (!b || typeof b !== "object") continue;
     if (b.type === "text" && typeof b.text === "string") {
       textParts.push(b.text);
     } else if (b.type === "tool_use" || b.type === "toolCall") {
+      const id = firstToolId(b.id, b.tool_use_id);
+      if (!id) {
+        dropped.calls++;
+        continue;
+      }
       const args = b.input ?? b.arguments ?? {};
       toolCalls.push({
-        id: b.id || b.tool_use_id || `claude_tool_${timestamp}_${i}`,
+        id,
         type: AGENT_MEMORY_TOOL_CALL_TYPES.FUNCTION,
-        name: b.name || "unknown",
+        name: b.name,
         arguments: typeof args === "string" ? args : safeJsonStringify(args),
       });
     }
@@ -242,7 +435,7 @@ function agentAssistantMessage(content, timestamp) {
   const text = textParts.join("\n\n");
   if (text) out.content = text;
   if (toolCalls.length) out.toolCalls = toolCalls;
-  return out.content || out.toolCalls ? out : null;
+  return text.trim() || toolCalls.length ? out : null;
 }
 
 function textFromContent(content) {
@@ -264,7 +457,8 @@ function normalizeTimestamp(ts) {
   }
   const parsed = Date.parse(ts);
   if (Number.isFinite(parsed)) return parsed;
-  return Date.now();
+  // No host time: the SDK assigns a fallback once and reuses it on resends.
+  return undefined;
 }
 
 function flattenAssistant(content) {

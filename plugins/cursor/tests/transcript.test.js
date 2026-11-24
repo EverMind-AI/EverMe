@@ -20,7 +20,12 @@ describe("Cursor transcript parser", () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), "everme-cursor-transcript-"));
     const file = path.join(dir, "unsupported.jsonl");
     try {
-      await writeFile(file, "not-json\n{\"type\":\"reasoning\",\"text\":\"hidden\"}\n", "utf8");
+      await writeFile(file, [
+        "not-json",
+        JSON.stringify({ type: "reasoning", role: "assistant", text: "hidden reasoning" }),
+        JSON.stringify({ type: "system", message: { role: "user", content: "injected system prompt" } }),
+        "",
+      ].join("\n"), "utf8");
       assert.deepEqual(await readLastTurn(file), []);
     } finally {
       await rm(dir, { recursive: true, force: true });
@@ -50,11 +55,7 @@ describe("Cursor transcript parser, host shape", () => {
   });
 });
 
-// Cursor 3.16+ rewrote the transcript as a typed event stream. No full
-// real sample with tool records exists yet (capture blocked on a usage
-// limit), so the reader is deliberately lenient about field names and
-// must warn on record types it does not recognise instead of silently
-// dropping them — 2026-08-17 review item 1.1.10.
+// These legacy compatibility fixtures are not evidence of a native writer schema.
 describe("Cursor transcript parser, tool events", () => {
   const toolEvents = path.join(
     path.dirname(fileURLToPath(import.meta.url)),
@@ -78,10 +79,10 @@ describe("Cursor transcript parser, tool events", () => {
       { role: "tool", toolCallId: "call_standalone", content: "file body" },
       { role: "assistant", content: "all green" },
     ]);
-    assert.deepEqual(warned, ["future_record_kind"]);
+    assert.deepEqual(warned, ["invalid_tool_id", "unknown_record_type"]);
   });
 
-  test("synthesizes an id for a tool call record that carries none", async () => {
+  test("rejects a legacy tool record without a native ID", async () => {
     const dir = await mkdtemp(path.join(os.tmpdir(), "everme-cursor-transcript-"));
     const file = path.join(dir, "no-id.jsonl");
     try {
@@ -90,14 +91,55 @@ describe("Cursor transcript parser, tool events", () => {
         JSON.stringify({ type: "tool_call", tool_name: "shell", tool_input: { command: "ls" } }),
         "",
       ].join("\n"), "utf8");
-      const [, call] = await readLastTurn(file);
-      assert.equal(call.role, "assistant");
-      assert.equal(call.toolCalls.length, 1);
-      assert.equal(call.toolCalls[0].name, "shell");
-      assert.equal(call.toolCalls[0].arguments, "{\"command\":\"ls\"}");
-      assert.ok(call.toolCalls[0].id, "synthesized id must be non-empty");
+      const warnings = [];
+      assert.deepEqual(await readLastTurn(file, { warn: (...args) => warnings.push(args) }), [
+        { role: "user", content: "question" },
+      ]);
+      assert.deepEqual(warnings, [["invalid_tool_id", 1]]);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
   });
+});
+
+test("Cursor 3.5.38 user envelope and ID-less inline calls are projected without inventions", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "everme-cursor-native-"));
+  const file = path.join(dir, "native.jsonl");
+  try {
+    await writeFile(file, [
+      { role: "user", message: { content: [{ type: "text", text: "<timestamp>Thursday, May 28, 2026, 11:10 AM (UTC+1)</timestamp>\n<user_query>\nfollow the steps in the rs-readme-test readme file\n</user_query>" }] } },
+      { role: "assistant", message: { content: [{ type: "text", text: "I’ll open the README." }, { type: "tool_use", name: "ReadFile", input: { path: "README.md" } }] } },
+      { role: "assistant", message: { content: [{ type: "tool_use", name: "Shell", input: { command: "pwd" } }] } },
+      { role: "assistant", message: { content: [{ type: "text", text: "Completed the README steps." }] } },
+    ].map(JSON.stringify).join("\n"));
+    const warnings = [];
+    assert.deepEqual(await readLastTurn(file, { warn: (...args) => warnings.push(args) }), [
+      { role: "user", content: "follow the steps in the rs-readme-test readme file" },
+      { role: "assistant", content: "I’ll open the README.", turnComplete: false },
+      { role: "assistant", content: "Completed the README steps." },
+    ]);
+    assert.deepEqual(warnings, [["invalid_tool_id", 2]]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("legacy tool compatibility preserves empty results and valid long JSON arguments", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "everme-cursor-legacy-"));
+  const file = path.join(dir, "legacy.jsonl");
+  const input = { command: "x".repeat(9000) };
+  try {
+    await writeFile(file, [
+      { type: "tool_call", id: "native", name: "shell", arguments: JSON.stringify(input) },
+      { type: "tool_result", tool_call_id: "native", content: "" },
+      { type: "tool_result", tool_call_id: "native-long", content: "x".repeat(16001) },
+    ].map(JSON.stringify).join("\n"));
+    const messages = await readLastTurn(file);
+    assert.equal(messages.length, 3);
+    assert.deepEqual(JSON.parse(messages[0].toolCalls[0].arguments), input);
+    assert.equal(messages[1].content, "");
+    assert.equal(messages[2].content.length, 16001);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

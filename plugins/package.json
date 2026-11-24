@@ -12,14 +12,10 @@
     "cursor",
     "devin",
     "dsh",
+    "copilot",
+    "opencode",
     "cli"
   ],
-  "overrides": {
-    "@hono/node-server": "^2.0.11",
-    "hono": "^4.13.3",
-    "fast-uri": "^3.1.5",
-    "ip-address": "^10.4.0"
-  },
   "scripts": {
     "test": "npm test --workspaces --if-present",
     "test:sdk": "npm test --workspace @everme/agent-sdk",
@@ -28,10 +24,19 @@
     "test:claude-code": "npm test --workspace @everme/claude-code",
     "test:kimicode": "npm test --workspace @everme/kimicode",
     "build:codex-marketplace": "npm run build:marketplace --workspace @everme/codex",
+    "build:codex-directory": "node scripts/package-codex-directory.mjs",
     "test:codex": "npm test --workspace @everme/codex",
     "test:cli": "npm test --workspace @everme/cli",
     "test:cursor": "npm test --workspace @everme/cursor",
     "test:devin": "npm test --workspace @everme/devin",
-    "test:dsh": "npm test --workspace @everme/dsh"
+    "test:dsh": "npm test --workspace @everme/dsh",
+    "test:copilot": "npm test --workspace @everme/copilot",
+    "test:opencode": "npm test --workspace @everme/opencode"
+  },
+  "overrides": {
+    "@hono/node-server": "^2.0.11",
+    "hono": "^4.13.3",
+    "fast-uri": "^3.1.5",
+    "ip-address": "^10.4.0"
   }
 }

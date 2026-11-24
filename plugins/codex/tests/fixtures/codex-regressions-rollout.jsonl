@@ -1,0 +1,31 @@
+{"timestamp":1749005000000,"type":"session_meta","payload":{"history_mode":"legacy","thread_source":"user"}}
+{"timestamp":1749005001000,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"injected legacy context"}]}}
+{"timestamp":1749005002000,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"real legacy question"}]}}
+{"timestamp":1749005002000,"type":"event_msg","payload":{"type":"user_message","message":"real legacy question"}}
+{"timestamp":1749005003000,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"legacy answer"}]}}
+{"timestamp":1749005010000,"type":"session_meta","payload":{"history_mode":"paginated","thread_source":"user"}}
+{"timestamp":1749005011000,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<app-context>internal app context</app-context>\nPlease inspect the bug."}]}}
+{"timestamp":1749005012000,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"I will inspect it."}]}}
+{"timestamp":1749005013000,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<recommended_plugins>internal plugins</recommended_plugins>"},{"type":"input_text","text":"Please inspect the second bug."}]}}
+{"timestamp":1749005014000,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Please explain <app-context> literally."}]}}
+{"timestamp":1749005015000,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>internal only</environment_context>"}]}}
+{"timestamp":1749005015100,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<in-app-browser-context>internal browser state</in-app-browser-context>\nPlease inspect the browser."}]}}
+{"timestamp":1749005015200,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<codex_internal_context>internal only</codex_internal_context>"}]}}
+{"timestamp":1749005015300,"type":"response_item","payload":{"type":"agent_message","id":"agent-message-1","author":"agent-a","recipient":"agent-b","content":[{"type":"input_text","text":"internal agent coordination"}],"internal_chat_message_metadata_passthrough":{}}}
+{"timestamp":1749005016000,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Both requests are visible."}]}}
+{"timestamp":1749005020000,"type":"session_meta","payload":{"history_mode":"paginated","thread_source":"user","parent_thread_id":"parent-must-not-override"}}
+{"timestamp":1749005021000,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"explicit root question"}]}}
+{"timestamp":1749005022000,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"explicit root answer"}]}}
+{"timestamp":1749005030000,"type":"session_meta","payload":{"history_mode":"paginated","parent_thread_id":"legacy-parent"}}
+{"timestamp":1749005031000,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"legacy child task"}]}}
+{"timestamp":1749005032000,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"fallback child answer"}]}}
+{"timestamp":1749005033000,"type":"response_item","payload":{"type":"function_call","call_id":"fallback_child_call","name":"read_file","arguments":"{\"path\":\"child.txt\"}"}}
+{"timestamp":1749005034000,"type":"response_item","payload":{"type":"function_call_output","call_id":"fallback_child_call","output":"child result"}}
+{"timestamp":1749005035000,"type":"session_meta","payload":{"history_mode":"paginated","thread_source":"future-user-source","parent_thread_id":"must-not-override-explicit-source"}}
+{"timestamp":1749005036000,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"unknown explicit source question"}]}}
+{"timestamp":1749005037000,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"unknown explicit source answer"}]}}
+{"timestamp":1749005040000,"type":"session_meta","payload":{"history_mode":"paginated","thread_source":"user"}}
+{"timestamp":1749005041000,"type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"internal developer instructions"}]}}
+{"timestamp":1749005042000,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"agent note"}]}}
+{"timestamp":1749005043000,"type":"response_item","payload":{"type":"custom_tool_call","call_id":"agent_only_call","name":"exec","input":"pwd"}}
+{"timestamp":1749005044000,"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"agent_only_call","output":"/repo"}}

@@ -1,4 +1,4 @@
-{"timestamp":1749001000000,"type":"session_meta","payload":{"id":"session"}}
+{"timestamp":1749001000000,"type":"session_meta","payload":{"id":"session","history_mode":"paginated","thread_source":"user"}}
 {"timestamp":1749001001000,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"prior question"}]}}
 {"timestamp":1749001002000,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"prior answer"}]}}
 this is malformed json

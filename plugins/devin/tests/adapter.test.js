@@ -88,18 +88,16 @@ describe("Devin hook adapter", () => {
     }
   });
 
-  // Regression: turn.js used to read input.executionId, a field
-  // normalizeInput never produces (it emits turnId), so every tool call
-  // id silently fell back to the command line. Pipe the real normalized
-  // input through, exactly as runStore does, to pin the id derivation.
-  test("tool call ids come from execution_id, not the command line", async () => {
+  test("execution_id cannot identify a native tool call", async () => {
     const input = devinAdapter.normalizeInput({
       trajectory_id: "traj-1",
       execution_id: "exec-101",
       tool_info: { command_line: "echo hi", cwd: "/tmp" },
     }, "post_run_command");
-    const messages = await devinAdapter.readLastTurn(input);
-    assert.equal(messages[0].toolCalls[0].id, "devin_exec-101");
+    const warnings = [];
+    const messages = await devinAdapter.readLastTurn(input, { log: (line) => warnings.push(line) });
+    assert.deepEqual(messages, []);
+    assert.deepEqual(warnings, ["Devin tool event skipped: missing native tool call ID"]);
   });
 
   test("emits no output for asynchronous post hooks", () => {
@@ -161,3 +159,17 @@ function withHome(fn) {
     }
   };
 }
+
+describe("L1-2 population", () => {
+  test("devin is NOT a per-turn writer", () => {
+    // mapEvent folds four host events into "Stop", and two of them
+    // (post_run_command, post_read_code) fire per tool call: the adapter's own
+    // header records a real session emitting post_cascade_response AND
+    // post_run_command. So one logical turn produces several "Stop"
+    // invocations, each keyed by a different execution_id. Declaring "stop"
+    // would count each of them as a turn and inflate L1-2's numerator, the
+    // same defect minimaxcode is excluded for. Revisit only with a measured
+    // Stop-per-turn ratio of 1:1.
+    assert.equal(devinAdapter.turnBoundary, undefined);
+  });
+});

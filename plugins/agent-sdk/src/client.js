@@ -15,7 +15,7 @@
 
 import { randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
-import { TIMEOUT_MS } from "./config.js";
+import { readDeviceRoute, TIMEOUT_MS } from "./config.js";
 import { boundedTimeoutMs } from "./hooks/deadline.js";
 
 const noop = { info() {}, warn() {} };
@@ -67,18 +67,40 @@ export function redactError(msg) {
     .replace(awsKeyIDRe, "[REDACTED-AWSKEY]");
 }
 
+/** Redact, single-line, and cap external text before writing diagnostics. */
+export function boundedDiagnostic(value, maxChars = 240) {
+  const text = redactError(value).replace(/\s+/g, " ").trim();
+  return text.length > maxChars ? `${text.slice(0, maxChars)}…` : text;
+}
+
 /**
  * Typed error returned from request(). `code` is the backend errno when
  * the failure came through the envelope; otherwise 0. `requestId` is
  * surfaced from the envelope's requestId field for support correlation.
  */
+/** The header that marks a request from a client that follows the local memory route. */
+export const MEMORY_ROUTE_HEADER = "X-EverMe-Memory-Route";
+
+/** The cloud's code for a write refused because the account keeps its memory on a device. */
+export const MEMORY_STORED_ON_DEVICE = 42501;
+
+/**
+ * storedOnDeviceMessage is what a refused write tells the person: the cloud
+ * keeps the device name out of its own message (and its logs), so the client
+ * puts it in from the refusal's result.
+ */
+export function storedOnDeviceMessage(deviceName) {
+  const name = typeof deviceName === "string" && deviceName.trim() ? deviceName.trim() : "another device";
+  return `This account keeps its memory on “${name}”, so EverMe refuses memory from this computer. Switch it back to the cloud on that Mac (or on the web, if that Mac is gone) to save memory from here.`;
+}
+
 export class EvermeError extends Error {
   constructor({ message, status = 0, code = 0, requestId = "", type = "upstream" }) {
-    super(redactError(message));
+    super(boundedDiagnostic(message, 240));
     this.name = "EvermeError";
     this.httpStatus = status;
     this.code = code;
-    this.requestId = requestId;
+    this.requestId = boundedDiagnostic(requestId, 128);
     this.type = type;
   }
 
@@ -102,7 +124,7 @@ export class EvermeError extends Error {
  */
 export function describeError(err) {
   if (err instanceof EvermeError) return err.describe();
-  return redactError(err?.message || String(err));
+  return boundedDiagnostic(err?.message || String(err), 240);
 }
 
 /**
@@ -122,11 +144,27 @@ export async function requestMeta(client, method, path, body, opts) {
  * individual methods (e.g. inject a fake fetch via cfg).
  */
 export function createClient(cfg, log = noop) {
+  // Both kind and version are required: a kind with no version is a wiring
+  // bug, not a partial identity, and must fall back to no header at all
+  // rather than fabricate a version that would launder it into a valid,
+  // wrongly attributed identity instead of the honest "unknown" bucket.
+  const identity = cfg.clientKind && cfg.clientVersion ? `${cfg.clientKind}/${cfg.clientVersion}` : "";
   const headers = (requestId) => ({
     "Content-Type": "application/json",
     Accept: "application/json",
     Authorization: `Bearer ${cfg.agentToken}`,
-    "User-Agent": `everme-memory-mcp/0.1 (agentId=${cfg.agentId})`,
+    // Versioned when the caller declared who it is; the legacy literal
+    // otherwise, so old integrations keep their exact wire shape.
+    "User-Agent": identity
+      ? `everme-${identity} (agentId=${cfg.agentId})`
+      : `everme-memory-mcp/0.1 (agentId=${cfg.agentId})`,
+    // Structured attribution header (server: middleware.ClientAttribution).
+    // No platform here: the server derives it from the evt agent row.
+    ...(identity ? { "X-EverMe-Client": identity } : {}),
+    // This client follows the local memory route (config.js readDeviceRoute),
+    // so the cloud may refuse its writes while the account keeps its memory
+    // on another device (42501) instead of keeping a second copy.
+    [MEMORY_ROUTE_HEADER]: "device",
     // Client-generated trace id. The gateway reuses a valid inbound value,
     // so plugin logs, EverMe ELK, and the cloud platform all join on it —
     // even when the request times out before any response arrives.
@@ -140,7 +178,10 @@ export function createClient(cfg, log = noop) {
    */
   async function requestWithMeta(method, path, body, { timeoutMs = TIMEOUT_MS, query } = {}) {
     const requestId = randomUUID();
-    const url = buildUrl(cfg.baseUrl, path, query);
+    // Read per request so a long-lived host (OpenClaw, an MCP server)
+    // follows a switch to or from local memory without a restart.
+    const route = readDeviceRoute(cfg.memoryHome ? { EVERME_MEMORY_HOME: cfg.memoryHome } : process.env);
+    const url = buildUrl(route ? route.baseUrl : cfg.baseUrl, path, query);
     const init = {
       method,
       headers: headers(requestId),
@@ -149,7 +190,20 @@ export function createClient(cfg, log = noop) {
     // cfg.deadlineAt is set when the caller runs under a host deadline (a
     // native hook). Clamping here is what makes sequential requests share
     // one budget instead of each taking a fresh timeoutMs.
-    return execWithRetry(url, init, boundedTimeoutMs(timeoutMs, cfg.deadlineAt), log, requestId);
+    try {
+      return await execWithRetry(url, init, boundedTimeoutMs(timeoutMs, cfg.deadlineAt), log, requestId);
+    } catch (err) {
+      if (route && err instanceof EvermeError && err.type === "upstream" && !err.httpStatus) {
+        // EverMe's gateway runs inside EverMe Desktop; EverOS's is a service
+        // evercli runs, which `evercli doctor` checks.
+        const fix = cfg.brand === "everos" ? "run `evercli doctor`" : "open EverMe Desktop";
+        err.message = boundedDiagnostic(
+          `local memory service is not reachable (${err.message}); ${fix}`,
+          240,
+        );
+      }
+      throw err;
+    }
   }
 
   /**
@@ -274,7 +328,7 @@ async function execWithRetry(url, init, timeoutMs, log, requestId) {
     if (method !== "GET" && method !== "HEAD") {
       throw err;
     }
-    log.warn?.(`[everme] ${method} failed, retrying once (requestId=${requestId}): ${redactError(err?.message)}`);
+    log.warn?.(`[everme] ${method} failed, retrying once (requestId=${boundedDiagnostic(requestId, 128)}): ${boundedDiagnostic(err, 240)}`);
     await sleep(150);
     return execOnce(url, init, timeoutMs, requestId);
   }
@@ -347,7 +401,7 @@ async function execOnce(url, init, timeoutMs, requestId = "") {
   const code = Number(env?.status) || 0;
   const errType = code >= 30000 && code < 30300 && code !== 30104 ? "auth" : "upstream";
   throw new EvermeError({
-    message: env?.error || `HTTP ${res.status}`,
+    message: code === MEMORY_STORED_ON_DEVICE ? storedOnDeviceMessage(env?.result?.deviceName) : env?.error || `HTTP ${res.status}`,
     status: res.status,
     code,
     requestId: env?.requestId || requestId,

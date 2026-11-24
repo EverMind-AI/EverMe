@@ -26,6 +26,7 @@ export const HOST_HOOK_TIMEOUT_S = Object.freeze({
   SessionStart: 30,
   UserPromptSubmit: 10,
   Stop: 30,
+  SubagentStop: 30,
   SessionEnd: 30,
   PreCompact: 30,
 });
@@ -43,6 +44,18 @@ export const HOOK_SAFETY_MARGIN_MS = 3_000;
  * to make one honest attempt with what little is left.
  */
 export const MIN_REQUEST_BUDGET_MS = 1_000;
+
+/**
+ * Budget for a worker the plugin itself detached from the host, so no host
+ * timeout applies. A synchronous EverOS add took up to 81 s on dev
+ * (2026-10-28), and EverOS holds the session lock while it runs: a resend
+ * sent before the first write finishes waits 30 s for that lock, gets a 503
+ * and writes nothing. A write timeout of 120 s outlasts what was observed,
+ * and the process budget leaves room for the flush after it. The cost is a
+ * background process that can live up to 3 minutes.
+ */
+export const DETACHED_WRITE_TIMEOUT_MS = 120_000;
+export const DETACHED_HOOK_BUDGET_MS = 180_000;
 
 /**
  * Milliseconds this hook process may spend before the host kills it, or
