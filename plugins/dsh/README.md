@@ -69,6 +69,8 @@ evercli plugin install dsh
 
 `@everme/dsh` declares a native DSH bundle. EverCLI prefers the installed `dsh` launcher and falls back to `npx --yes @deepseek-ai/dsh@latest`, refreshes the dependency in both the `web` and `headless` profiles, and configures both profiles to start `@everme/memory-mcp@latest` through `npx` at runtime. The profiles share the credentials in `~/.dsh/.env`, while EverCLI manages separate MCP blocks in `~/.dsh/profiles/web/cordis.patch.yml` and `~/.dsh/profiles/headless/cordis.patch.yml`. The DSH install flow has a five-minute minimum operation budget so the first npm download is not clipped by EverCLI's default command timeout.
 
+DeepSeek Harness Desktop uses its own `desktop` profile. If the app is installed and you opened it once, EverCLI also installs `@everme/dsh` and `@everme/memory-mcp` into that profile with the CLI inside the app. That profile runs the MCP server on the app's own runtime, so a Desktop-only machine needs no Node.js. Quit the app (Cmd+Q) before you run `evercli plugin install dsh`. If the app is running, EverCLI leaves the `desktop` profile unchanged and tells you to run the command again after you quit the app. Reopen the app after the install.
+
 Web sessions recall and save automatically after restart. Headless tasks use the same lifecycle integration and wait for pending memory writes before the one-shot process exits:
 
 ```bash
