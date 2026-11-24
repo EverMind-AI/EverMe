@@ -96,7 +96,7 @@ try {
 }
 
 describe("mcp tool schema", { skip: !sdkAvailable && "SDK not installed" }, () => {
-  test("tools/list exposes mem_search / mem_context / mem_save_turn / mem_save_fact with stable required fields", async () => {
+  test("tools/list exposes only the read tools mem_search / mem_context / mem_skill with stable required fields", async () => {
     process.env.EVERME_API_BASE = "http://127.0.0.1:0";
     process.env.EVERME_AGENT_ID = "agt_x";
     process.env.EVERME_AGENT_TOKEN = "evt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -120,9 +120,12 @@ describe("mcp tool schema", { skip: !sdkAvailable && "SDK not installed" }, () =
 
       assert.ok(byName.mem_search, "mem_search must be advertised");
       assert.ok(byName.mem_context, "mem_context must be advertised");
-      assert.ok(byName.mem_save_turn, "mem_save_turn must be advertised");
-      assert.ok(byName.mem_save_fact, "mem_save_fact must be advertised — the profile-write sibling of mem_save_turn");
-      assert.equal(tools.length, 4, "no unexpected tools advertised — surface is search/context/save_turn/save_fact");
+      // mem_skill reads back a skill body the search already cached locally;
+      // still read-only, and still no write tool on this surface.
+      assert.ok(byName.mem_skill, "mem_skill must be advertised");
+      assert.ok(!byName.mem_save_turn, "mem_save_turn was retired — must not be advertised");
+      assert.ok(!byName.mem_save_fact, "mem_save_fact was retired — must not be advertised");
+      assert.equal(tools.length, 3, "read-only surface: search + context + skill");
 
       assert.deepEqual(
         byName.mem_search.inputSchema.required,
@@ -142,21 +145,6 @@ describe("mcp tool schema", { skip: !sdkAvailable && "SDK not installed" }, () =
         byName.mem_context.description,
         /Profile snapshot ONLY|never performs semantic search/,
         "mem_context description must brand the tool Profile-only",
-      );
-      assert.equal(
-        byName.mem_save_turn.inputSchema.required,
-        undefined,
-        "mem_save_turn has no top-level required: either single-message or trajectory form is acceptable",
-      );
-      assert.equal(
-        byName.mem_save_fact.inputSchema.required,
-        undefined,
-        "mem_save_fact has no top-level required: either `fact` or `messages` form is acceptable",
-      );
-      assert.deepEqual(
-        byName.mem_save_fact.inputSchema.properties.messages.items.properties.role.enum,
-        ["user", "assistant"],
-        "mem_save_fact rejects tool roles — the personal-memory path is user/assistant only",
       );
 
       const claudeTools = await listClaudeTools();

@@ -5,9 +5,18 @@
  * shape while preserving assistant tool calls and tool results.
  */
 
-import { requestMeta } from "./client.js";
-import { toText, stripChannelMetadata } from "./messages.js";
+import { boundedDiagnostic, requestMeta } from "./client.js";
+import { extractText } from "./messages.js";
 import { capRunes } from "./truncate.js";
+import { batchAgentMessages } from "./agent-batches.js";
+import { batchUserTasks } from "./task-batches.js";
+import { turnOrdinals, completedTurns } from "./turns.js";
+import { dropEvermeMemoryToolPairs } from "./everme-injection.js";
+import { createMemoryTimestampLedger, hostTimestamp, resolveFallbackTimestamps } from "./timestamps.js";
+
+// Callers that pass no ledger still resend with stable fallbacks within this
+// process; the hook runtime passes a file ledger so later processes do too.
+const processTimestampLedger = createMemoryTimestampLedger();
 
 export const AGENT_MEMORY_ROLES = Object.freeze({
   USER: "user",
@@ -24,15 +33,79 @@ export const AGENT_MEMORY_TOOL_CALL_TYPES = Object.freeze({
 // many messages. Keep in sync with the server-side validation limit.
 export const MAX_MESSAGES_PER_REQUEST = 500;
 
-export async function saveAgentMemory(client, { conversationId, messages = [], flush = true } = {}, log = { info() {}, warn() {} }) {
-  if (!conversationId) return null;
+const LOG_ID_MAX_CHARS = 128;
+const LOG_ERROR_MAX_CHARS = 240;
+
+function logValue(value, maxChars = LOG_ID_MAX_CHARS) {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  return text.length > maxChars ? `${text.slice(0, maxChars)}…` : text;
+}
+
+// `channel` is the writer's claim on the session gate ("hook" for the hook
+// runtime). It is opt-in on purpose: an unclaimed write is still trimmed
+// against session watermarks but never advances them, and the gateway counts
+// it as source="unknown" — which is exactly right for MCP save_turn and any
+// other caller that does not report turn losses. Only writers that take part
+// in loss reporting (hooks) should claim, or L1-2 gains denominator without
+// numerator.
+//
+// `turns` is the caller's declaration of how many logical turns this write
+// completes, forwarded on the last batch only (leading batches send 0). It is
+// never derived from the messages here: only the caller knows what a turn is,
+// and a whole-session upload of a thousand user messages would otherwise
+// declare a count the gateway rejects. The Stop path declares 1; callers
+// without a loss reporter declare nothing and are counted once per request.
+// `baseTurn` is the whole-session turn ordinal of messages[0] (see turns.js).
+// A writer that knows it -- any host holding the full transcript plus a
+// checkpoint of what it already uploaded -- lets the gate trim and advance by
+// exact turn position, so a later import of the same session dedupes against
+// what the hook landed instead of re-sending it. With baseTurn the batches are
+// turn-aligned and `turns` is derived per batch as the turns that batch
+// COMPLETES (a caller's `turns` is ignored): that is the count the gate moves
+// the watermark by, and a batch cut mid-turn must not claim its open turn.
+// Without baseTurn nothing changes: legacy batching, the caller's declaration.
+//
+// `timestampLedger` keeps the fallback timestamps of host messages that carry
+// none stable across resends (see timestamps.js); without one the process
+// ledger is used. `timeoutMs` overrides the client's per-request timeout for
+// the write requests, for detached workers that can wait longer than a hook.
+export async function saveAgentMemory(client, { conversationId, messages = [], flush = true, sync = false, channel, turns, baseTurn, taskBatching = false, deduplication, syncScope, timestampLedger, timeoutMs } = {}, log = { info() {}, warn() {} }) {
+  if (!conversationId) {
+    log.info?.("[everme] agent-memory stage=skip reason=missing_conversation_id");
+    return null;
+  }
   const flushOnly = flush === true && messages.length === 0;
   const stamp = Date.now();
-  const converted = messages
-    .map((m, i) => convertAgentMessage(m, stamp + i))
-    .filter(Boolean)
-    .filter((m) => m.content != null || (m.toolCalls && m.toolCalls.length));
-  if (!converted.length && !flushOnly) return null;
+  // Runs before conversion, while the source messages still carry the host's
+  // own provenance (an MCP namespace is source-local and never reaches the
+  // wire shape).
+  messages = dropEvermeMemoryToolPairs(messages);
+  let fallbacks;
+  try {
+    fallbacks = await resolveFallbackTimestamps({
+      conversationId,
+      messages,
+      ledger: timestampLedger || processTimestampLedger,
+      now: stamp,
+    });
+  } catch (error) {
+    // A ledger that cannot be read or locked must not cost the turn. The
+    // write goes out with fresh fallbacks, which only risks a duplicate if
+    // this send is retried.
+    log.warn?.(`[everme] agent-memory stage=timestamps result=degraded conversationId=${logValue(conversationId)} error=${boundedDiagnostic(error, LOG_ERROR_MAX_CHARS)}`);
+    fallbacks = messages.map((_, i) => stamp + i);
+  }
+  const entries = messages
+    .map((source, i) => ({ source, message: convertAgentMessage(source, fallbacks[i] ?? stamp + i) }))
+    .filter(({ message }) => message && (message.content != null || message.toolCalls?.length));
+  const converted = entries.map(({ message }) => message);
+  if (!converted.length && !flushOnly) {
+    log.info?.(`[everme] agent-memory stage=skip reason=no_parseable_messages conversationId=${logValue(conversationId)} inputMessages=${messages.length}`);
+    return null;
+  }
+  if (syncScope) {
+    await requireSyncScopeSupport(client, conversationId, syncScope, channel);
+  }
 
   // Whole-session uploads (e.g. a kimicode SessionEnd) can exceed the
   // gateway's per-request message cap, which would reject — and lose — the
@@ -40,39 +113,91 @@ export async function saveAgentMemory(client, { conversationId, messages = [], f
   // carries the caller's flush flag so extraction sees the complete session,
   // not a partial prefix. A mid-batch failure throws and surfaces to the
   // caller instead of pretending the upload succeeded.
-  const batches = Math.max(1, Math.ceil(converted.length / MAX_MESSAGES_PER_REQUEST));
+  const hasBase = Number.isInteger(baseTurn) && baseTurn >= 0;
+  const metadata = entries.map(({ source }) => source);
+  const slices = taskBatching
+    ? batchUserTasks(converted, metadata, log)
+    : batchAgentMessages(converted, MAX_MESSAGES_PER_REQUEST, metadata, hasBase);
+  if (flushOnly) slices.push([]);
+  const ordinals = hasBase ? turnOrdinals(converted) : null;
+  const batches = slices.length;
+  if (batches > 1) {
+    log.info?.(`[everme] agent-memory stage=start conversationId=${logValue(conversationId)} messages=${converted.length} batches=${batches} flush=${flush === true}`);
+  }
+  // A declared count rides on the last batch only: a split write whose final
+  // batch fails is a lost turn, not a delivered one.
+  const declaredTurns = Number.isInteger(turns) && turns >= 0 ? turns : null;
   let res = null;
   const requestIds = [];
+  let offset = 0;
   for (let batch = 0; batch < batches; batch += 1) {
-    const slice = converted.slice(batch * MAX_MESSAGES_PER_REQUEST, (batch + 1) * MAX_MESSAGES_PER_REQUEST);
+    const slice = slices[batch];
     const isLast = batch === batches - 1;
-    const { result, requestId } = await requestMeta(client, "POST", "/mem/agent-memory", {
-      conversationId,
-      messages: slice,
-      flush: isLast ? flush : false,
-      // Leading batches of a flushing upload must keep the server's
-      // synchronous-add guarantee: an async leading batch can still be
-      // invisible to the final request's flush (first-flush data loss,
-      // one request boundary later). Servers without the field ignore it.
-      ...(!isLast && flush === true ? { sync: true } : {}),
-    });
-    res = result;
-    requestIds.push(requestId);
+    const sliceBase = hasBase ? baseTurn + (ordinals[offset] ?? 0) : null;
+    const sliceTurns = hasBase ? completedTurns(slices, batch, baseTurn) : null;
+    offset += slice.length;
+    try {
+      const { result, requestId } = await requestMeta(client, "POST", "/mem/agent-memory", {
+        conversationId,
+        messages: slice,
+        flush: isLast ? flush : false,
+        // Leading batches of a flushing upload must keep the server's
+        // synchronous-add guarantee: an async leading batch can still be
+        // invisible to the final request's flush (first-flush data loss,
+        // one request boundary later). Servers without the field ignore it.
+        ...(sync === true || (!isLast && flush === true) ? { sync: true } : {}),
+        ...(channel ? { channel } : {}),
+        ...(syncScope ? { syncScope } : {}),
+        ...(deduplication ? { deduplication } : {}),
+        ...(hasBase
+          ? { baseTurn: sliceBase, turns: sliceTurns }
+          : (declaredTurns !== null && slice.length ? { turns: isLast ? declaredTurns : 0 } : {})),
+      }, ...(Number.isFinite(timeoutMs) && timeoutMs > 0 ? [{ timeoutMs }] : []));
+      res = result;
+      requestIds.push(requestId);
+      if (batches > 1) {
+        log.info?.(`[everme] agent-memory stage=batch result=accepted conversationId=${logValue(conversationId)} batch=${batch + 1}/${batches} messages=${slice.length} requestId=${logValue(requestId)}`);
+      }
+    } catch (error) {
+      if (batches > 1) {
+        log.warn?.(`[everme] agent-memory stage=batch result=failed conversationId=${logValue(conversationId)} batch=${batch + 1}/${batches} messages=${slice.length} error=${boundedDiagnostic(error, LOG_ERROR_MAX_CHARS)}`);
+      }
+      throw error;
+    }
   }
-  log.info?.(`[everme] saveAgentMemory ok: messages=${converted.length} batches=${batches} flushed=${Boolean(res?.flushed)} status=${res?.status ?? ""} requestId=${requestIds.join(",")}`);
+  const lastRequestId = requestIds[requestIds.length - 1] || "";
+  log.info?.(`[everme] agent-memory stage=complete result=accepted conversationId=${logValue(conversationId)} messages=${converted.length} batches=${batches} flushed=${Boolean(res?.flushed)} status=${logValue(res?.status)} requestId=${logValue(lastRequestId)} requestIdCount=${requestIds.filter(Boolean).length}`);
   return res == null ? res : { ...res, requestId: requestIds[requestIds.length - 1], requestIds };
 }
 
-export async function flushAgentMemory(client, { conversationId } = {}, log) {
-  return saveAgentMemory(client, { conversationId, messages: [], flush: true }, log);
+async function requireSyncScopeSupport(client, conversationId, syncScope, channel) {
+  const { result } = await requestMeta(client, "POST", "/mem/agent-memory/state", {
+    sessions: [{ conversationId, syncScope }],
+  });
+  const supported = channel === "hook"
+    ? result?.hookSyncScopeSupported === true
+    : channel === "import" && result?.syncScopeSupported === true;
+  if (!supported) {
+    throw new Error("Agent memory sync scope is not supported for this channel; upgrade the EverMe server before retrying");
+  }
+}
+
+export async function flushAgentMemory(client, { conversationId, timeoutMs } = {}, log) {
+  return saveAgentMemory(client, { conversationId, messages: [], flush: true, timeoutMs }, log);
 }
 
 export function convertAgentMessage(msg, fallbackTimestamp) {
   if (!msg || !msg.role) return null;
-  const timestamp = normalizeTimestamp(msg.timestamp, fallbackTimestamp);
+  const timestamp = hostTimestamp(msg.timestamp) ?? fallbackTimestamp;
   if (msg.role === AGENT_MEMORY_ROLES.USER) {
-    const content = cap(toText(msg.content));
-    return content ? { role: AGENT_MEMORY_ROLES.USER, timestamp, content } : null;
+    const content = cap(extractText(msg.content).trim());
+    if (content) return { role: AGENT_MEMORY_ROLES.USER, timestamp, content };
+    // A host record that earlier releases uploaded as a user turn but that is
+    // not the person's words (a background notice, a compaction summary). It
+    // still occupies its turn: the gate counts user messages to place turns
+    // and the server drops empty content before EverOS, so the turn positions
+    // stay where earlier releases put them while the text never reaches memory.
+    return msg.placeholder === true ? { role: AGENT_MEMORY_ROLES.USER, timestamp, content: "" } : null;
   }
   if (msg.role === AGENT_MEMORY_ROLES.ASSISTANT) {
     return convertAssistant(msg, timestamp);
@@ -84,7 +209,7 @@ export function convertAgentMessage(msg, fallbackTimestamp) {
       role: AGENT_MEMORY_ROLES.TOOL,
       timestamp,
       toolCallId,
-      content: cap(toText(msg.content)),
+      content: extractText(msg.content).trim(),
     };
   }
   return null;
@@ -129,29 +254,16 @@ function convertAssistant(msg, timestamp) {
       });
     }
   }
-  // Strip channel envelope from assistant text too: an LLM that
-  // echoes the user's enveloped input (or re-emits a tool result that
-  // included it) would otherwise re-introduce the noise on the write
-  // side that toText already removes on the read side. Tool-call
-  // arguments are NOT stripped — those are structured JSON, not free
-  // text, and stripping would corrupt them.
-  const content = cap(stripChannelMetadata(textParts.join("\n")));
+  // Host adapters classify control records; assistant text may quote them.
+  const content = cap(textParts.join("\n").trim());
   if (!content && !toolCalls.length) return null;
   return {
     role: AGENT_MEMORY_ROLES.ASSISTANT,
     timestamp,
     ...(content ? { content } : {}),
     ...(toolCalls.length ? { toolCalls } : {}),
+    ...(typeof msg.turnComplete === "boolean" ? { turnComplete: msg.turnComplete } : {}),
   };
-}
-
-function normalizeTimestamp(ts, fallback) {
-  if (typeof ts === "number" && Number.isFinite(ts)) {
-    return ts > 10_000_000_000 ? Math.trunc(ts) : Math.trunc(ts * 1000);
-  }
-  const parsed = Date.parse(ts);
-  if (Number.isFinite(parsed)) return parsed;
-  return fallback;
 }
 
 function cap(text) {

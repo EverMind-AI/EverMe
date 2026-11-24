@@ -18,6 +18,29 @@ async function newBuffer() {
 }
 
 describe("tool event buffer", () => {
+  test("missing names remain missing instead of becoming unknown", async () => {
+    const { buffer } = await newBuffer();
+    await buffer.append("missing-name", { id: "native-call", input: {}, output: "" });
+    const [event] = await buffer.drain("missing-name");
+    assert.equal(event.name, "");
+  });
+
+  test("tool fields preserve empty and long values without clipping encoded JSON", async () => {
+    const { buffer } = await newBuffer();
+    for (const size of [0, 8000, 8001, 16001]) {
+      const content = "x".repeat(size);
+      await buffer.append("long-tools", { id: `native-${size}`, name: "Shell", input: { command: content }, output: content });
+    }
+    const events = await buffer.drain("long-tools");
+    assert.equal(events.length, 4);
+    events.forEach((event, i) => {
+      const size = [0, 8000, 8001, 16001][i];
+      assert.equal(event.output, "x".repeat(size));
+      assert.deepEqual(JSON.parse(event.input), { command: "x".repeat(size) });
+      assert.equal(event.id, `native-${size}`);
+    });
+  });
+
   test("drain returns appended events in order and clears the file", async () => {
     const { buffer, dir } = await newBuffer();
     await buffer.append("session-a", { name: "shell", input: { command: "ls" }, output: "a.js" });

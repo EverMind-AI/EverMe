@@ -1,6 +1,10 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { resolveConfig, assertConfigUsable } from "../src/config.js";
+import { DEFAULT_INJECT_MIN_SCORE } from "../src/hooks/knobs.js";
 
 describe("config", () => {
   test("env vars feed defaults", () => {
@@ -55,9 +59,9 @@ describe("config", () => {
 
     assert.equal(c.flushEveryTurns, 5);
     assert.equal(c.flushMode, "");
-    assert.equal(c.injectTopK, 10);
+    assert.equal(c.injectTopK, 5);
     assert.equal(c.injectProfile, false);
-    assert.equal(c.injectMinScore, 0.1);
+    assert.equal(c.injectMinScore, 0.3);
   });
 
   test("legacy flush mode restores every-turn flushing", () => {
@@ -87,8 +91,8 @@ describe("config", () => {
     process.env.EVERME_INJECT_MIN_SCORE = "not-a-number";
 
     const invalid = resolveConfig({});
-    assert.equal(invalid.injectTopK, 10);
-    assert.equal(invalid.injectMinScore, 0.1);
+    assert.equal(invalid.injectTopK, 5);
+    assert.equal(invalid.injectMinScore, 0.3);
   });
 
   test("assertConfigUsable rejects missing token", () => {
@@ -99,6 +103,17 @@ describe("config", () => {
     assert.throws(
       () => assertConfigUsable(c),
       /EVERME_AGENT_TOKEN/,
+    );
+  });
+
+  test("assertConfigUsable names the brand of the credentials", () => {
+    assert.throws(
+      () => assertConfigUsable({ agentId: "agt_x", agentToken: "", brand: "everos" }),
+      (err) => /^EverOS plugin: missing EVERME_AGENT_TOKEN/.test(err.message),
+    );
+    assert.throws(
+      () => assertConfigUsable({ agentId: "agt_x", agentToken: "", brand: "everme" }),
+      (err) => /^EverMe plugin: missing EVERME_AGENT_TOKEN/.test(err.message),
     );
   });
 
@@ -117,5 +132,30 @@ describe("config", () => {
       () => assertConfigUsable({ agentId: "", agentToken: "" }, { requireAgentId: false }),
       /EVERME_AGENT_TOKEN/,
     );
+  });
+
+  test("resolveConfig passes clientKind and clientVersion through untouched", () => {
+    const cfg = resolveConfig({ agentId: "a", agentToken: "t", clientKind: "mcp", clientVersion: "0.6.4" });
+    assert.equal(cfg.clientKind, "mcp");
+    assert.equal(cfg.clientVersion, "0.6.4");
+    assert.equal(resolveConfig({ agentId: "a", agentToken: "t" }).clientKind, undefined);
+  });
+
+  test("the route's recall floor is the default; EVERME_INJECT_MIN_SCORE still wins", () => {
+    const home = mkdtempSync(join(tmpdir(), "everme-floor-"));
+    const saved = process.env.EVERME_INJECT_MIN_SCORE;
+    try {
+      delete process.env.EVERME_INJECT_MIN_SCORE;
+      assert.equal(resolveConfig({ memoryHome: home }).injectMinScore, DEFAULT_INJECT_MIN_SCORE);
+      writeFileSync(join(home, "route.json"), JSON.stringify({ mode: "local", apiBase: "http://127.0.0.1:47391", injectMinScore: 0.1 }));
+      assert.equal(resolveConfig({ memoryHome: home }).injectMinScore, 0.1);
+      process.env.EVERME_INJECT_MIN_SCORE = "0.25";
+      assert.equal(resolveConfig({ memoryHome: home }).injectMinScore, 0.25);
+      assert.equal(resolveConfig({ memoryHome: home, injectMinScore: 0.4 }).injectMinScore, 0.4);
+    } finally {
+      if (saved === undefined) delete process.env.EVERME_INJECT_MIN_SCORE;
+      else process.env.EVERME_INJECT_MIN_SCORE = saved;
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });

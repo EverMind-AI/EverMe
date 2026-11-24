@@ -3,14 +3,28 @@ import assert from "node:assert/strict";
 import { savePersonalMemory, convertPersonalMessage } from "../src/personal-memory.js";
 
 describe("personal memory", () => {
-  test("convertPersonalMessage strips channel envelope from user content", () => {
+  for (const text of [
+    'Sender (untrusted metadata):\n```json\n{"label":"example"}\n```\nKeep the example.',
+    "Log: [message_id: native-id]\nstatus: failed\nEnd.",
+    "[2026-09-06 10:00:00 UTC+0] The task finished.",
+  ]) {
+    for (const content of [text, [{ type: "text", text }]]) {
+      test(`assistant preserves literal protocol text in ${typeof content}`, () => {
+        assert.deepEqual(convertPersonalMessage({ role: "assistant", content }, 1), {
+          role: "assistant", timestamp: 1, content: text,
+        });
+      });
+    }
+  }
+
+  test("convertPersonalMessage preserves user text already classified by the host", () => {
     const enveloped =
       'Sender (untrusted metadata):\n```json\n{"label":"openclaw-feishu"}\n```\n\n我最热爱的季节是夏天';
     const out = convertPersonalMessage(
       { role: "user", timestamp: 1710000000000, content: enveloped },
       1,
     );
-    assert.equal(out.content, "我最热爱的季节是夏天");
+    assert.equal(out.content, enveloped);
     assert.equal(out.role, "user");
     assert.equal(out.timestamp, 1710000000000);
   });
@@ -54,5 +68,32 @@ describe("personal memory", () => {
     assert.equal(await savePersonalMemory(client, { conversationId: "s", messages: [] }), null);
     assert.equal(await savePersonalMemory(client, { conversationId: "", messages: [{ role: "user", content: "x" }] }), null);
     assert.equal(called, false);
+  });
+
+  test("savePersonalMemory logs bounded metadata without message content", async () => {
+    const lines = [];
+    const secretContent = "private personal memory";
+    const client = {
+      async requestWithMeta() {
+        return {
+          result: { status: "accepted", flushed: true },
+          requestId: `req-${"x".repeat(300)}`,
+        };
+      },
+    };
+
+    await savePersonalMemory(
+      client,
+      {
+        conversationId: "session-1",
+        messages: [{ role: "user", content: secretContent }],
+      },
+      { info: (line) => lines.push(line) },
+    );
+
+    assert.equal(lines.length, 1);
+    assert.ok(!lines[0].includes(secretContent));
+    assert.ok(lines[0].includes("messages=1"));
+    assert.ok(lines[0].length < 300);
   });
 });

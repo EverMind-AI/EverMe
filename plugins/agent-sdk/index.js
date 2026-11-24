@@ -7,6 +7,8 @@
  *
  *   - createClient(cfg)       HTTP client (+ redactError, EvermeError)
  *   - searchMemory(...)       /mem/search
+ *   - createSkillContentCache() local skill-body cache, read back by id
+ *   - buildTimestampFilter()  startTime/endTime -> filters.timestamp
  *   - getContext(...)         /mem/context
  *   - saveAgentMemory(...)    /mem/agent-memory real-time write
  *   - savePersonalMemory(...) /mem/personal real-time profile write
@@ -35,15 +37,39 @@ export {
   AGENT_MEMORY_TOOL_CALL_TYPES,
   MAX_MESSAGES_PER_REQUEST,
 } from "./src/agent-memory.js";
+export { recordDelivery, deliveryAgentRef, deliveryFailReason } from "./src/delivery.js";
+export { createMemoryTimestampLedger, createTimestampLedger } from "./src/timestamps.js";
 export { capRunes, MAX_CONTENT_RUNES } from "./src/truncate.js";
+export { dropEvermeMemoryToolPairs, isEvermeMemoryTool } from "./src/everme-injection.js";
+export { humanTextFromWrappers } from "./src/host-wrappers.js";
+export { filterInvalidTools } from "./src/tool-validation.js";
+export { turnOrdinals, splitTurnAligned, completedTurns } from "./src/turns.js";
 export { savePersonalMemory, convertPersonalMessage } from "./src/personal-memory.js";
-export { searchMemory, getContext } from "./src/search.js";
+export {
+  searchMemory,
+  getContext,
+  filterEpisodesByScore,
+  buildTimestampFilter,
+  normalizeInstant,
+} from "./src/search.js";
 export { resolveConfig, assertConfigUsable, TIMEOUT_MS, UPLOAD_TIMEOUT_MS } from "./src/config.js";
-export { buildMemoryPrompt, MEMORY_TYPES, MEMORY_TYPE_LABELS } from "./src/prompt.js";
-export { toText, stripChannelMetadata, isSessionResetPrompt } from "./src/messages.js";
+export {
+  buildMemoryPrompt,
+  filterSkillsByScore,
+  MEMORY_TYPES,
+  MEMORY_TYPE_LABELS,
+  ONE_LINE_MAX_CHARS,
+  EPISODE_MAX_CHARS,
+  PROFILE_MAX_CHARS,
+  PROFILE_MAX_ITEMS,
+  SKILL_MIN_SCORE,
+} from "./src/prompt.js";
+export { extractText, toText, stripChannelMetadata, isSessionResetPrompt } from "./src/messages.js";
 export { resolveHookKnobs } from "./src/hooks/knobs.js";
 export {
   boundedTimeoutMs,
+  DETACHED_HOOK_BUDGET_MS,
+  DETACHED_WRITE_TIMEOUT_MS,
   HOOK_SAFETY_MARGIN_MS,
   HOST_HOOK_TIMEOUT_S,
   hookBudgetMs,
@@ -51,8 +77,21 @@ export {
   startHookWatchdog,
 } from "./src/hooks/deadline.js";
 export { sanitizeRecallQuery, extractUserIntent, formatQueryStats, QUERY_MAX_CHARS } from "./src/hooks/query.js";
-export { createSessionState, createTurnCounter } from "./src/hooks/state.js";
+export {
+  createSessionState,
+  createTranscriptCheckpointStore,
+  createTurnCounter,
+} from "./src/hooks/state.js";
+export { cacheSkillContent, createSkillContentCache } from "./src/hooks/skill-cache.js";
+export {
+  createTelemetry,
+  hookDegradedEvent,
+  turnDeliveryEvent,
+  TELEMETRY_PATH,
+  TELEMETRY_TIMEOUT_MS,
+} from "./src/hooks/telemetry.js";
 export { createToolEventBuffer } from "./src/hooks/toolbuffer.js";
 export { runHook } from "./src/hooks/runtime.js";
 export { runInject } from "./src/hooks/inject.js";
 export { renderProfileBlock, profileItemCount } from "./src/hooks/session-start.js";
+export { brandOf, brandStrings, recallTag, profileTag, INJECTED_TAGS } from "./src/brand.js";

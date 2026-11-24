@@ -29,8 +29,11 @@ import { test, describe, after, before } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import { spawn } from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SERVER_SCRIPT = path.join(__dirname, "..", "hooks", "scripts", "mcp-server.js");
@@ -46,7 +49,9 @@ const FAKE_CREDS = {
 // yet and we want this file to be self-contained.
 function startBackend(handler) {
   const calls = [];
+  let lastHeaders = null;
   const srv = http.createServer((req, res) => {
+    lastHeaders = req.headers;
     const chunks = [];
     req.on("data", (c) => chunks.push(c));
     req.on("end", () => {
@@ -66,6 +71,7 @@ function startBackend(handler) {
       const port = srv.address().port;
       resolve({
         calls,
+        get lastHeaders() { return lastHeaders; },
         url: `http://127.0.0.1:${port}`,
         close: () => new Promise((r) => srv.close(r)),
       });
@@ -76,7 +82,12 @@ function startBackend(handler) {
 // Send a sequence of JSON-RPC frames to the server's stdin and collect
 // responses from stdout. Returns a map { id → result|error } once all
 // expected ids have come back, or rejects on timeout.
-async function rpc(env, frames, expectedIds, timeoutMs = 5000) {
+// `sequential` sends the next frame only after the previous one answered.
+// The server reads stdin line by line and dispatches without awaiting, so a
+// batch write races: a tools/call that depends on a side effect of an earlier
+// call (mem_skill reading what mem_search cached) must be ordered the way a
+// real host orders it — one request at a time.
+async function rpc(env, frames, expectedIds, timeoutMs = 5000, { sequential = false } = {}) {
   const proc = spawn("node", [SERVER_SCRIPT], {
     env: { ...process.env, ...env },
     stdio: ["pipe", "pipe", "pipe"],
@@ -84,6 +95,7 @@ async function rpc(env, frames, expectedIds, timeoutMs = 5000) {
   const responses = new Map();
   let buf = "";
   let stderr = "";
+  let next = 0;
 
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -106,12 +118,22 @@ async function rpc(env, frames, expectedIds, timeoutMs = 5000) {
           clearTimeout(timer);
           proc.kill();
           resolve(responses);
+          return;
+        }
+        if (sequential && next < frames.length && responses.has(frames[next - 1].id)) {
+          proc.stdin.write(JSON.stringify(frames[next]) + "\n");
+          next += 1;
         }
       }
     });
     proc.stderr.on("data", (c) => { stderr += c.toString("utf8"); });
     proc.on("error", reject);
 
+    if (sequential) {
+      proc.stdin.write(JSON.stringify(frames[0]) + "\n");
+      next = 1;
+      return;
+    }
     for (const f of frames) {
       proc.stdin.write(JSON.stringify(f) + "\n");
     }
@@ -135,7 +157,7 @@ describe("mcp-server.js: stdio handshake (regression: path bug)", () => {
     assert.deepEqual(init.result.capabilities?.tools, { listChanged: false });
   });
 
-  test("tools/list advertises exactly the canonical four tools", async () => {
+  test("tools/list advertises exactly the three read tools", async () => {
     const responses = await rpc(
       { ...FAKE_CREDS, EVERME_API_BASE: "http://127.0.0.1:1" },
       [
@@ -149,18 +171,18 @@ describe("mcp-server.js: stdio handshake (regression: path bug)", () => {
     const names = tools.map((t) => t.name).sort();
     assert.deepEqual(names, [
       "mem_context",
-      "mem_save_fact",
-      "mem_save_turn",
       "mem_search",
+      "mem_skill",
     ]);
     // Canonical ABI guards — keep in lockstep with @everme/memory-mcp and
-    // the Go hosted /mcp surface.
+    // the Go hosted /mcp surface. The write tools were retired.
     assert.deepEqual(byName.mem_search.inputSchema.required, ["query"]);
     assert.equal(byName.mem_context.inputSchema.required, undefined,
       "mem_context has no required fields — Profile-only, query deprecated/ignored");
     assert.ok(byName.mem_context.inputSchema.properties.forceRefresh);
-    assert.equal(byName.mem_save_turn.inputSchema.properties.flush.default, true);
-    assert.equal(byName.mem_save_fact.inputSchema.properties.flush.default, true);
+    assert.deepEqual(byName.mem_skill.inputSchema.required, ["id"]);
+    assert.ok(!byName.mem_save_turn, "mem_save_turn was retired");
+    assert.ok(!byName.mem_save_fact, "mem_save_fact was retired");
   });
 
   test("legacy everme_* tool names are rejected", async () => {
@@ -238,6 +260,43 @@ describe("mcp-server.js: tool responses are raw markdown (regression: JSON envel
     assert.match(text, /User said they like durian/, "rendered body must surface the episodic memory text via buildMemoryPrompt");
     assert.ok(!text.startsWith("{"), "result text must not start with `{` — that means JSON.stringify wrapping is back");
     assert.ok(!text.includes('"memories":'), 'result text must not contain the literal `"memories":` JSON key from the searchMemory bundle');
+  });
+
+  // The fixed text names the brand of the credentials; memory content is the
+  // user's and stays as stored.
+  test("mem_search names EverOS in its header under the EverOS brand", async () => {
+    const responses = await rpc(
+      { ...FAKE_CREDS, EVERME_API_BASE: backend.url, EVERME_BRAND: "everos" },
+      [
+        { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "0" } } },
+        { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "mem_search", arguments: { query: "durian", topK: 3 } } },
+      ],
+      [1, 2],
+    );
+    const text = responses.get(2)?.result?.content?.[0]?.text;
+    assert.match(text, /^## EverOS search results for "durian"/);
+    assert.match(text, /User said they like durian/);
+  });
+
+  test("an unconfigured server names EverOS under the EverOS brand", async () => {
+    const responses = await rpc(
+      {
+        EVERME_API_BASE: backend.url,
+        EVERME_BRAND: "everos",
+        EVERME_AGENT_TOKEN: "",
+        EVERME_API_KEY: "",
+        EVERME_ENV_FILE_PATH: path.join(os.tmpdir(), "everos-mcp-test-no-such-env"),
+        HOME: os.tmpdir(),
+      },
+      [
+        { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "0" } } },
+        { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "mem_search", arguments: { query: "durian" } } },
+      ],
+      [1, 2],
+    );
+    const text = responses.get(2)?.result?.content?.[0]?.text;
+    assert.match(text, /EverOS not configured/);
+    assert.doesNotMatch(text, /EverMe/);
   });
 
   test("mem_context returns rendered profile markdown, not the gateway envelope", async () => {
@@ -318,6 +377,8 @@ describe("mcp-server.js: canonical mem_* tools", () => {
     assert.match(text, /^## EverMe search results for "raven"/);
     const call = backend.calls.find((c) => c.path === "/api/v1/mem/search");
     assert.equal(call?.body?.memoryTypes, undefined, "no memoryTypes narrowing — the gateway default covers the full bundle");
+    const pkg = createRequire(import.meta.url)("../package.json");
+    assert.equal(backend.lastHeaders["x-everme-client"], `mcp/${pkg.version}`);
   });
 
   test("mem_context forwards forceRefresh and ignores query", async () => {
@@ -338,51 +399,7 @@ describe("mcp-server.js: canonical mem_* tools", () => {
     assert.deepEqual(call?.body, { forceRefresh: true }, "body must carry forceRefresh only — no query");
   });
 
-  test("mem_save_fact surfaces the honest no_extraction verdict", async () => {
-    const responses = await rpc(
-      { ...FAKE_CREDS, EVERME_API_BASE: backend.url },
-      [
-        { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "0" } } },
-        { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "mem_save_fact", arguments: { fact: "loves mango iced tea" } } },
-      ],
-      [1, 2],
-    );
-    const text = responses.get(2)?.result?.content?.[0]?.text;
-    const parsed = JSON.parse(text);
-    assert.equal(parsed.saved, true);
-    assert.equal(parsed.accepted, true);
-    assert.equal(parsed.status, "no_extraction");
-    assert.equal(parsed.extracted, false);
-    assert.equal(parsed.profileUpdated, false, "no_extraction must never claim a profile update");
-    const call = backend.calls.find((c) => c.path === "/api/v1/mem/personal");
-    assert.equal(call?.body?.flush, true, "flush must default to true");
-  });
 
-  test("mem_save_turn defaults flush=true and surfaces derived profile updates", async () => {
-    const responses = await rpc(
-      { ...FAKE_CREDS, EVERME_API_BASE: backend.url },
-      [
-        { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "0" } } },
-        { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "mem_save_turn", arguments: {
-          sessionKey: "conv-1",
-          messages: [
-            { role: "user", content: "deploy to staging", timestamp: 1000 },
-            { role: "assistant", content: "deploying", timestamp: 2000, toolCalls: [{ id: "t1", name: "deploy", arguments: "{}" }] },
-            { role: "tool", content: "ok", timestamp: 3000, toolCallId: "t1" },
-          ],
-        } } },
-      ],
-      [1, 2],
-    );
-    const parsed = JSON.parse(responses.get(2)?.result?.content?.[0]?.text);
-    assert.equal(parsed.saved, true);
-    assert.equal(parsed.accepted, true);
-    assert.equal(parsed.profileStatus, "extracted");
-    assert.equal(parsed.profileUpdated, true);
-    const call = backend.calls.find((c) => c.path === "/api/v1/mem/agent-memory");
-    assert.equal(call?.body?.flush, true, "flush must default to true");
-    assert.equal(call?.body?.messages?.length, 3);
-  });
 });
 
 describe("mcp-server.js: mem_context empty-profile fallback (regression: empty tool result)", () => {
@@ -413,5 +430,77 @@ describe("mcp-server.js: mem_context empty-profile fallback (regression: empty t
     const text = responses.get(2)?.result?.content?.[0]?.text;
     assert.ok(text && text.length > 0, `mem_context must not return empty content for a profile with no facts/traits; got: ${JSON.stringify(responses.get(2))}`);
     assert.match(text, /no profile available/, "empty-profile case must surface the friendly fallback message");
+  });
+});
+
+describe("mcp-server.js: progressive skill loading", () => {
+  const SKILL = {
+    id: "6a98d9504ff33830c399cf66",
+    name: "Security and compliance review",
+    description: "How to scope and run a review before a release",
+    content: "## Steps\n1. Scope the review\n2. Check the diff",
+    relevanceScore: 0.99,
+  };
+  let backend;
+  let stateDir;
+  before(async () => {
+    stateDir = await mkdtemp(path.join(os.tmpdir(), "everme-cc-skill-"));
+    backend = await startBackend(({ path: url }) => {
+      if (url !== "/api/v1/mem/search") return { json: {} };
+      return {
+        json: {
+          items: [],
+          profiles: [],
+          rawMessages: [],
+          agentMemory: {
+            cases: [{ taskIntent: "Diagnose MCP not loading", approach: "Reinstall" }],
+            skills: [SKILL, { ...SKILL, id: "weak", name: "Unrelated", relevanceScore: 0.002, content: "WEAK BODY" }],
+          },
+        },
+      };
+    });
+  });
+  after(async () => {
+    await backend.close();
+    await rm(stateDir, { recursive: true, force: true });
+  });
+
+  test("mem_search prints skill ids without bodies, and mem_skill reads a body back by id", async () => {
+    // One process does both halves, which is the point: the search writes the
+    // body into the shared state dir and a later tool call reads it from
+    // there. In production the two halves are different processes (recall runs
+    // in a hook), and they meet because both default to the same directory.
+    const responses = await rpc(
+      { ...FAKE_CREDS, EVERME_API_BASE: backend.url, EVERME_STATE_DIR: stateDir },
+      [
+        { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "0" } } },
+        { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "mem_search", arguments: { query: "security review" } } },
+        { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "mem_skill", arguments: { id: SKILL.id } } },
+        { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "mem_skill", arguments: { id: "weak" } } },
+        { jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "mem_skill", arguments: { id: "ffffffffffffffffffffffff" } } },
+      ],
+      [1, 2, 3, 4, 5],
+      5000,
+      { sequential: true },
+    );
+
+    const search = responses.get(2)?.result?.content?.[0]?.text || "";
+    assert.match(search, /\[skill 6a98d9504ff33830c399cf66\]/, "the rendered line must carry the id");
+    assert.doesNotMatch(search, /Scope the review/, "the body must not be injected");
+    assert.doesNotMatch(search, /Past task cases/, "cases are no longer rendered");
+    assert.doesNotMatch(search, /Diagnose MCP not loading/);
+    assert.doesNotMatch(search, /Unrelated/, "a below-threshold skill is not rendered");
+
+    const hit = responses.get(3)?.result;
+    assert.ok(!hit?.isError, `mem_skill must resolve an id the search just cached; got ${JSON.stringify(hit)}`);
+    assert.match(hit.content[0].text, /1\. Scope the review/);
+
+    const weak = responses.get(4)?.result;
+    assert.equal(weak?.isError, true, "a skill below the render threshold is never cached, so its id misses");
+
+    const miss = responses.get(5)?.result;
+    assert.equal(miss?.isError, true, "an unknown id must be an honest miss");
+    assert.match(miss.content[0].text, /not in this machine's local skill cache/);
+    assert.doesNotMatch(miss.content[0].text, /Scope the review/);
   });
 });

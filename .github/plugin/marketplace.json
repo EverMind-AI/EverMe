@@ -1,0 +1,19 @@
+{
+  "name": "evermind",
+  "owner": {
+    "name": "Evermind AI, Inc.",
+    "email": "support@evermind.ai"
+  },
+  "metadata": {
+    "description": "Evermind AI plugins for GitHub Copilot CLI."
+  },
+  "plugins": [
+    {
+      "name": "everme-memory",
+      "source": "./plugins/agent-plugin",
+      "description": "EverMe work memory for Cursor and GitHub Copilot CLI: recalls your past decisions and fixes before each prompt and saves each finished turn to your EverMe account.",
+      "version": "0.1.0",
+      "category": "productivity"
+    }
+  ]
+}

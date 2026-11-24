@@ -1,6 +1,6 @@
 {
   "name": "@everme/kimicode",
-  "version": "0.6.1",
+  "version": "0.7.13",
   "type": "module",
   "description": "EverMe native plugin for Kimi Code — automatic memory recall via SessionStart/UserPromptSubmit/Stop/SessionEnd hooks, plus bundled MCP server. Single self-contained kimi.plugin.json manifest.",
   "license": "Apache-2.0",
@@ -8,7 +8,7 @@
     "node": ">=18.0.0"
   },
   "scripts": {
-    "test": "node --test tests/kimi-transcript.test.js tests/hooks.test.js tests/skills.test.js"
+    "test": "node --test --import ../scripts/no-device-route.mjs tests/kimi-transcript.test.js tests/hooks.test.js tests/skills.test.js tests/config.test.js"
   },
   "files": [
     "kimi.plugin.json",
@@ -18,7 +18,7 @@
     "README.md"
   ],
   "dependencies": {
-    "@everme/agent-sdk": "^0.6.1"
+    "@everme/agent-sdk": "^0.7.13"
   },
   "keywords": [
     "evermind",

@@ -9,8 +9,8 @@
  * — the personal endpoint ignores them.
  */
 
-import { requestMeta } from "./client.js";
-import { toText, stripChannelMetadata } from "./messages.js";
+import { boundedDiagnostic, requestMeta } from "./client.js";
+import { extractText } from "./messages.js";
 import { capRunes } from "./truncate.js";
 
 const PERSONAL_MEMORY_ROLES = new Set(["user", "assistant"]);
@@ -28,15 +28,13 @@ export async function savePersonalMemory(client, { conversationId, messages = []
     messages: converted,
     flush,
   });
-  log.info?.(`[everme] savePersonalMemory ok: messages=${converted.length} flushed=${Boolean(res?.flushed)} requestId=${requestId}`);
+  log.info?.(`[everme] personal-memory stage=complete result=accepted messages=${converted.length} flushed=${Boolean(res?.flushed)} requestId=${boundedDiagnostic(requestId, 128)}`);
   return res == null ? res : { ...res, requestId };
 }
 
 export function convertPersonalMessage(msg, fallbackTimestamp) {
   if (!msg || !PERSONAL_MEMORY_ROLES.has(msg.role)) return null;
-  // Assistant text can echo the channel envelope; strip it on the write
-  // side the same way agent-memory.js does.
-  const content = cap(stripChannelMetadata(toText(msg.content)));
+  const content = cap(extractText(msg.content).trim());
   if (!content) return null;
   return {
     role: msg.role,

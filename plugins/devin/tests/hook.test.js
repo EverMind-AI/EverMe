@@ -20,8 +20,17 @@ afterEach(async () => {
 describe("everme-devin hook CLI", () => {
   test("stores the latest conversational turn without code-action bodies", async () => {
     const requests = [];
+    const telemetry = [];
     const server = await startServer(async (req, res) => {
-      requests.push({ path: req.url, body: JSON.parse(await readBody(req)) });
+      const body = JSON.parse(await readBody(req));
+      // Delivery telemetry shares the base URL; this test measures the
+      // memory writes, so the reports are recorded apart from them.
+      if (req.url.endsWith("/mem/import-events")) {
+        telemetry.push(body);
+        respond(res, 200, { status: 0, result: { ok: true } });
+        return;
+      }
+      requests.push({ path: req.url, body });
       respond(res, 200, { status: 0, result: { flushed: false } });
     });
     const runtime = await runtimeEnv(server, "test-agent-token");
@@ -37,9 +46,15 @@ describe("everme-devin hook CLI", () => {
 
     assert.equal(result.code, 0);
     assert.equal(result.stdout, "");
-    assert.match(result.stderr, /saveAgentMemory ok: .*requestId=[0-9a-f-]{36}/,
-      "stderr must carry the save line with its trace id");
+    assert.match(
+      result.stderr,
+      /agent-memory stage=complete result=accepted .*requestId=[0-9a-f-]{36}/,
+      "stderr must carry one bounded completion line with its trace id",
+    );
+    assert.equal(result.stderr.trim().split("\n").length, 4);
+    assert.match(result.stderr, /Devin transcript unsupported_tool_trace: dropped_steps=1/);
     assert.equal(requests.length, 1);
+    assert.deepEqual(telemetry, [], "a delivered turn reports nothing; the write itself is the record");
     assert.equal(requests[0].path, "/api/v1/mem/agent-memory");
     assert.equal(requests[0].body.conversationId, "devin-trajectory");
     assert.equal(requests[0].body.flush, false);
@@ -72,7 +87,7 @@ describe("everme-devin hook CLI", () => {
     assert.equal(result.stdout, "");
     assert.doesNotMatch(result.stderr, new RegExp(token));
     assert.match(result.stderr, /REDACTED/);
-    assert.equal(result.stderr.match(/\n/g)?.length, 1);
+    assert.equal(result.stderr.match(/\n/g)?.length, 4);
   });
 });
 

@@ -1,64 +1,45 @@
 /**
  * Build the messages a Devin hook event contributes to a conversation.
  *
- * Devin hands each hook a `tool_info` shaped for that event rather than a
- * transcript file: post_cascade_response carries the answer inline,
- * post_run_command carries the command that ran. A real session emitted
- * post_cascade_response and never post_cascade_response_with_transcript,
- * so there is no transcript to parse — the turn is assembled here.
+ * Devin Local's Stop carries the final answer; the prompt comes from the
+ * UserPromptSubmit stash of the same prompt_id.
+ * Cascade inline responses are turn summaries, not necessarily final answers.
+ * Command and read hooks lack native call identities and cannot form tool pairs.
  */
 
-export function messagesForEvent(event, input = {}, pendingPrompt = "") {
+export function messagesForEvent(event, input = {}, pendingPrompt = null, { log = console.error } = {}) {
   const toolInfo = input?.toolInfo ?? {};
+  const prompt = text(pendingPrompt?.prompt);
+  const messages = prompt ? [{ role: "user", content: prompt, ...timestampField(pendingPrompt.timestamp) }] : [];
   switch (event) {
+    case "Stop":
+      return [...messages, ...assistantMessage(input.lastAssistantMessage, input.timestamp)];
     case "post_cascade_response":
-      return responseMessages(toolInfo, pendingPrompt);
-    // turnId is the event's execution_id (see adapter.normalizeInput).
+      return [...messages, ...responseMessages(toolInfo, input.timestamp)];
     case "post_run_command":
-      return toolCallMessages("run_command", pick(toolInfo, ["command_line", "cwd"]), "command_line", input?.turnId);
     case "post_read_code":
-      return toolCallMessages("read_code", pick(toolInfo, ["file_path"]), "file_path", input?.turnId);
+      // execution_id identifies the turn, not a call. These hooks supply no
+      // native call ID or result, so neither can be reconstructed reliably.
+      log("Devin tool event skipped: missing native tool call ID");
+      return messages;
     default:
       return [];
   }
 }
 
-function pick(toolInfo, keys) {
-  const out = {};
-  for (const key of keys) {
-    const value = text(toolInfo[key]);
-    if (value) out[key] = value;
-  }
-  return out;
+function responseMessages(toolInfo, timestamp) {
+  return assistantMessage(toolInfo.response, timestamp);
 }
 
-function responseMessages(toolInfo, pendingPrompt) {
-  const response = text(toolInfo.response);
+function assistantMessage(value, timestamp) {
+  const response = text(value);
   if (!response) return [];
-  const prompt = text(pendingPrompt);
-  const messages = [];
-  // The prompt arrives on a different event (and a different process), so
-  // it is only here when pre_user_prompt stashed it. Storing the answer
-  // alone is still better than storing nothing.
-  if (prompt) messages.push({ role: "user", content: prompt });
-  messages.push({ role: "assistant", content: response });
-  return messages;
+  return [{ role: "assistant", content: response, ...timestampField(timestamp) }];
 }
 
-// No paired tool result is emitted: Devin reports what a tool was asked
-// to do but not what came back, and a fabricated empty result would claim
-// we captured output we never saw.
-function toolCallMessages(name, args, requiredKey, executionId) {
-  if (!args[requiredKey]) return [];
-  return [{
-    role: "assistant",
-    toolCalls: [{
-      id: `devin_${executionId || args[requiredKey]}`,
-      type: "function",
-      name,
-      arguments: JSON.stringify(args),
-    }],
-  }];
+function timestampField(value) {
+  const timestamp = typeof value === "string" ? Date.parse(value) : NaN;
+  return Number.isFinite(timestamp) ? { timestamp } : {};
 }
 
 function text(value) {

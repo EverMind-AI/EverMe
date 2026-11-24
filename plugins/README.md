@@ -83,7 +83,8 @@ A single multi-host package would be a Frankenstein where every release re-versi
 | Generic local MCP host | `@everme/memory-mcp` | ✅ via stdio MCP | same as Cursor | same as Cursor |
 | Cloud MCP agent | hosted `@everme/memory-mcp` | ✅ endpoint; host smoke required | MCP tool call | MCP tool call |
 | Devin | `@everme/devin` + `@everme/memory-mcp` | ✅ native save + MCP | MCP fallback | Transcript hook (auto) |
-| opencode | `@everme/memory-mcp` | ✅ via MCP | same as Cursor | same as Cursor |
+| opencode / Kilo Code | `@everme/opencode` + `@everme/memory-mcp` | ✅ native plugin + read-only MCP | `chat.message` synthetic recall part; profile via `experimental.chat.system.transform` (auto) | `session.idle` reads the session through the SDK client (auto) |
+| Copilot CLI | `@everme/copilot` + `@everme/memory-mcp` | ✅ native hooks + read-only MCP | `sessionStart` profile; `userPromptSubmitted` recall (host may drop it) + MCP | `agentStop` / `sessionEnd` hooks, detached (auto) |
 
 > One-command `evercli plugin install <host>` covers **claude-code, openclaw, cursor, claude-desktop, codex, dsh, hermes, devin, opencode**. **Kimi Code** is two-step: `evercli plugin install kimicode` stages the bundle + credentials, then you finish registration inside the TUI with `/plugins install ~/.kimi-code/everme`. Cline and generic MCP hosts also work but need manual `mcpServers` wiring — no dedicated `evercli` installer for them yet.
 

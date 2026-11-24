@@ -22,20 +22,20 @@ function withStateDir(fn) {
 describe("Devin pending prompt", () => {
   test("a stashed prompt is returned to the response that follows it", withStateDir(async (dir) => {
     await stashPrompt("traj-1", "how many lines", { stateDir: dir });
-    assert.equal(await takePrompt("traj-1", { stateDir: dir }), "how many lines");
+    assert.deepEqual(await takePrompt("traj-1", { stateDir: dir }), { prompt: "how many lines" });
   }));
 
   test("taking it consumes it, so one prompt cannot label two answers", withStateDir(async (dir) => {
     await stashPrompt("traj-1", "once", { stateDir: dir });
-    assert.equal(await takePrompt("traj-1", { stateDir: dir }), "once");
-    assert.equal(await takePrompt("traj-1", { stateDir: dir }), "");
+    assert.deepEqual(await takePrompt("traj-1", { stateDir: dir }), { prompt: "once" });
+    assert.equal(await takePrompt("traj-1", { stateDir: dir }), null);
   }));
 
   test("trajectories do not borrow each other's prompts", withStateDir(async (dir) => {
     await stashPrompt("traj-1", "first", { stateDir: dir });
     await stashPrompt("traj-2", "second", { stateDir: dir });
-    assert.equal(await takePrompt("traj-2", { stateDir: dir }), "second");
-    assert.equal(await takePrompt("traj-1", { stateDir: dir }), "first");
+    assert.deepEqual(await takePrompt("traj-2", { stateDir: dir }), { prompt: "second" });
+    assert.deepEqual(await takePrompt("traj-1", { stateDir: dir }), { prompt: "first" });
   }));
 
   test("a prompt is user content, so it is not left world-readable", withStateDir(async (dir) => {
@@ -46,16 +46,16 @@ describe("Devin pending prompt", () => {
 
   test("an id with path separators cannot escape the state directory", withStateDir(async (dir) => {
     await stashPrompt("../../escape", "x", { stateDir: dir });
-    assert.equal(await takePrompt("../../escape", { stateDir: dir }), "x");
+    assert.deepEqual(await takePrompt("../../escape", { stateDir: dir }), { prompt: "x" });
     assert.equal(statSync(dir).isDirectory(), true);
   }));
 
   test("nothing stashed reads as nothing, not as a crash", withStateDir(async (dir) => {
-    assert.equal(await takePrompt("never-seen", { stateDir: dir }), "");
+    assert.equal(await takePrompt("never-seen", { stateDir: dir }), null);
   }));
 
   test("a missing trajectory id is not tracked at all", withStateDir(async (dir) => {
     await stashPrompt("", "orphan", { stateDir: dir });
-    assert.equal(await takePrompt("", { stateDir: dir }), "");
+    assert.equal(await takePrompt("", { stateDir: dir }), null);
   }));
 });

@@ -69,3 +69,10 @@ describe("Codex hook adapter", () => {
     }
   });
 });
+
+test("declares a per-turn Stop boundary so batch writes claim the hook channel", () => {
+  // Codex fires the hook once per turn and runs the delivery marker, so its
+  // writes belong in L1-2's denominator. The SDK only claims the channel on
+  // the batch path for adapters that say so.
+  assert.equal(codexAdapter.turnBoundary, "stop");
+});

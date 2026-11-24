@@ -24,9 +24,73 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { claudeCodeAdapter } from "../hooks/scripts/lib/adapter.js";
+import { detachedSpawnOptions } from "../hooks/scripts/lib/run-hook.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const HOOK_DIR = path.join(__dirname, "..", "hooks", "scripts");
+
+describe("native session identity", () => {
+  const invalidIds = [undefined, null, "", " \t\n", "\u3000", 17, false, {}, []];
+
+  test("normalization rejects invalid root and child identities without inventing IDs", () => {
+    for (const id of invalidIds) {
+      assert.equal(claudeCodeAdapter.normalizeInput({ session_id: id }, "Stop").sessionId, "");
+      assert.equal(claudeCodeAdapter.normalizeInput({ session_id: id, agent_id: "child" }, "SubagentStop").sessionId, "");
+      assert.equal(claudeCodeAdapter.normalizeInput({ session_id: "parent", agent_id: id }, "SubagentStop").sessionId, "");
+    }
+    for (const id of ["native-session", "claude-code-session", " parent "]) {
+      assert.equal(claudeCodeAdapter.normalizeInput({ session_id: id }, "Stop").sessionId, id);
+      assert.equal(claudeCodeAdapter.normalizeInput({ session_id: id, agent_id: "subagent" }, "SubagentStop").sessionId, `${id}__subagent`);
+    }
+  });
+
+  test("direct batch reads reject invalid session identity before accessing checkpoints", async () => {
+    const checkpointStore = { read: async () => assert.fail("must not access checkpoint") };
+    for (const sessionId of invalidIds) {
+      assert.deepEqual(await claudeCodeAdapter.readStoreBatches({
+        sessionId, transcriptPath: "/nonexistent-session-fixture.jsonl",
+      }, { checkpointStore }), []);
+    }
+  });
+
+  test("write hooks log bounded reasons and send no requests for invalid native IDs", async () => {
+    const backend = await startBackend(() => ({ json: { status: "saved" } }));
+    const dir = mkdtempSync(path.join(tmpdir(), "everme-session-id-test-"));
+    const transcriptPath = path.join(dir, "private-transcript-sentinel.jsonl");
+    writeFileSync(transcriptPath, [
+      JSON.stringify({ type: "assistant", message: { role: "assistant", content: "private-content-sentinel" } }),
+      JSON.stringify({ type: "turn_duration", durationMs: 1 }),
+    ].join("\n"), { mode: 0o600 });
+    const hooks = [
+      ["store-memories.js", "session_id", "missing_session_id"],
+      ["store-subagent-memories.js", "session_id", "missing_session_id"],
+      ["store-subagent-memories.js", "agent_id", "missing_agent_id"],
+      ["session-summary.js", "session_id", "missing_session_id"],
+    ];
+    try {
+      for (const [script, field, reason] of hooks) {
+        for (const [index, id] of [...invalidIds, { private: "private-id-sentinel".repeat(1000) }].entries()) {
+          const result = await runHook(script, {
+            session_id: "parent", agent_id: "child", [field]: id,
+            transcript_path: transcriptPath, agent_transcript_path: transcriptPath,
+          }, {
+            ...FAKE_CREDS, EVERME_API_BASE: backend.url,
+            EVERME_STATE_DIR: path.join(dir, `${script}-${field}-${index}`),
+          });
+          assert.equal(result.code, 0, result.stderr);
+          assert.equal(backend.calls.length, 0, `${script} ${field} case ${index}`);
+          assert.match(result.stderr, new RegExp(`reason=${reason}`));
+          assert.ok(Buffer.byteLength(result.stderr) <= 512, "bounded diagnostics");
+          assert.doesNotMatch(result.stderr, /private-(content|transcript|id)-sentinel/);
+        }
+      }
+    } finally {
+      await backend.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 /**
  * Spawn a hook as Claude Code would: node interpreter, stdin JSON
@@ -163,7 +227,7 @@ describe("inject-memories.js: UserPromptSubmit hook contract", () => {
       "What backend language do I prefer?",
       "search query must be the user's prompt from stdin",
     );
-    assert.equal(searchCalls[0].body.topK, 10, "shared hook default must request topK=10");
+    assert.equal(searchCalls[0].body.topK, 5, "shared hook default must request topK=5");
 
     const parsed = JSON.parse(stdout);
     assert.equal(parsed.hookSpecificOutput.hookEventName, "UserPromptSubmit");
@@ -416,6 +480,131 @@ describe("store-memories.js: Stop hook contract", () => {
     assert.equal(saves.length, 1, "second Stop over the same transcript must be deduped");
   });
 
+  test("assistant-only growth uploads only the new trusted root message", async () => {
+    const transcriptPath = path.join(tmpDir, "transcript-assistant-only.jsonl");
+    const stateDir = path.join(tmpDir, "state-assistant-only");
+    const lines = [
+      JSON.stringify({
+        type: "assistant",
+        message: { role: "assistant", content: "first autonomous result" },
+        uuid: "assistant-only-1",
+      }),
+      JSON.stringify({ type: "turn_duration", durationMs: 1000 }),
+    ];
+    writeFileSync(transcriptPath, lines.join("\n"), { mode: 0o600 });
+    const payload = {
+      transcript_path: transcriptPath,
+      session_id: "sess-assistant-only",
+      hook_event_name: "Stop",
+      stop_hook_active: false,
+    };
+    const env = {
+      ...FAKE_CREDS,
+      EVERME_API_BASE: backend.url,
+      EVERME_STATE_DIR: stateDir,
+    };
+    const before = backend.calls.length;
+
+    const first = await runHook("store-memories.js", payload, env);
+    lines.push(
+      JSON.stringify({
+        type: "assistant",
+        message: { role: "assistant", content: "second autonomous result" },
+        uuid: "assistant-only-2",
+      }),
+      JSON.stringify({ type: "turn_duration", durationMs: 1000 }),
+    );
+    writeFileSync(transcriptPath, lines.join("\n"), { mode: 0o600 });
+    const second = await runHook("store-memories.js", payload, env);
+
+    assert.equal(first.code, 0, first.stderr);
+    assert.equal(second.code, 0, second.stderr);
+    const saves = backend.calls.slice(before).filter((call) => call.path.endsWith("/mem/agent-memory"));
+    assert.equal(saves.length, 2);
+    assert.deepEqual(
+      saves.map((call) => call.body.messages.map((message) => message.content)),
+      [["first autonomous result"], ["second autonomous result"]],
+    );
+  });
+
+  test("Stop compresses an oversized task before splitting and preserves source IDs", async () => {
+    const transcriptPath = writeTranscript([
+      JSON.stringify({ type: "user", uuid: "large-user", timestamp: "2026-09-07T00:00:00Z", message: { role: "user", content: "inspect" } }),
+      JSON.stringify({ type: "assistant", uuid: "large-call", timestamp: "2026-09-07T00:00:01Z", message: { role: "assistant", content: [{ type: "tool_use", id: "native-large", name: "Bash", input: { command: "pwd" } }] } }),
+      JSON.stringify({ type: "user", uuid: "large-result", timestamp: "2026-09-07T00:00:02Z", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "native-large", content: "Script completed\n" + "x".repeat(320000) + "\nexit code: 0" }] } }),
+      JSON.stringify({ type: "assistant", uuid: "large-final", timestamp: "2026-09-07T00:00:03Z", message: { role: "assistant", content: "done", stop_reason: "end_turn" } }),
+      JSON.stringify({ type: "turn_duration", durationMs: 3000 }),
+    ].join("\n"));
+    const before = backend.calls.length;
+    const result = await runHook("store-memories.js", { session_id: "large-task", transcript_path: transcriptPath }, {
+      ...FAKE_CREDS, EVERME_API_BASE: backend.url, EVERME_STATE_DIR: path.join(tmpDir, "state-large-task"),
+    });
+    assert.equal(result.code, 0, result.stderr);
+    const saves = backend.calls.slice(before).filter((call) => call.path.endsWith("/mem/agent-memory"));
+    assert.equal(saves.length, 1);
+    const messages = saves[0].body.messages;
+    assert.deepEqual(messages.map((message) => message.role), ["user", "assistant", "tool", "assistant"]);
+    assert.equal(messages[2].toolCallId, messages[1].toolCalls[0].id);
+    assert.ok(Buffer.byteLength(messages[2].content) <= 4096);
+    assert.match(messages[2].content, /exit code: 0$/);
+    assert.equal(messages[3].content, "done");
+  });
+
+  test("SubagentStop skips userless child trajectories without uploading", async () => {
+    const transcriptPath = writeTranscript([
+      JSON.stringify({
+        type: "user",
+        isSidechain: true,
+        agentId: "child-1",
+        message: { role: "user", content: "task wrapper" },
+        uuid: "child-uuid-1",
+      }),
+      JSON.stringify({
+        type: "assistant",
+        isSidechain: true,
+        agentId: "child-1",
+        message: { role: "assistant", content: [{ type: "tool_use", id: "child-call", name: "Read", input: { file: "a" } }] },
+        uuid: "child-uuid-2",
+      }),
+      JSON.stringify({
+        type: "user",
+        isSidechain: true,
+        agentId: "child-1",
+        message: { role: "user", content: [{ type: "tool_result", tool_use_id: "child-call", content: "ok" }] },
+        uuid: "child-uuid-3",
+      }),
+      JSON.stringify({
+        type: "assistant",
+        isSidechain: true,
+        agentId: "child-1",
+        message: { role: "assistant", content: "child answer" },
+        uuid: "child-uuid-4",
+      }),
+      JSON.stringify({ type: "turn_duration", durationMs: 1000 }),
+    ].join("\n"));
+    const env = {
+      ...FAKE_CREDS,
+      EVERME_API_BASE: backend.url,
+      EVERME_STATE_DIR: path.join(tmpDir, "state-subagent"),
+    };
+    const payload = {
+      session_id: "parent",
+      agent_id: "child-1",
+      agent_transcript_path: transcriptPath,
+      hook_event_name: "SubagentStop",
+    };
+    const before = backend.calls.length;
+
+    const first = await runHook("store-subagent-memories.js", payload, env);
+    const duplicate = await runHook("store-subagent-memories.js", payload, env);
+    assert.equal(first.code, 0, first.stderr);
+    assert.equal(duplicate.code, 0, duplicate.stderr);
+    const saves = backend.calls.slice(before).filter((call) => call.path.endsWith("/mem/agent-memory"));
+    assert.equal(saves.length, 0);
+    assert.match(first.stderr, /subagent_without_user/);
+    assert.match(duplicate.stderr, /subagent_without_user/);
+  });
+
   test("enqueues each turn and flushes extraction at turn five", async () => {
     const stateDir = path.join(tmpDir, "state-cadence");
     const transcriptPath = path.join(tmpDir, "transcript-cadence.jsonl");
@@ -579,6 +768,13 @@ describe("session-summary.js: SessionEnd hook contract", () => {
         { ...FAKE_CREDS, EVERME_API_BASE: backend.url },
       );
       assert.equal(code, 0);
+      // Claude Code cancels a SessionEnd hook after 1.5 s, so the hook hands
+      // the flush to a detached process and returns before it is sent.
+      assert.equal(backend.calls.length, 0, "the hook returns before the flush");
+      const deadline = Date.now() + 4000;
+      while (backend.calls.length === 0 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
       assert.equal(backend.calls.length, 1);
       assert.deepEqual(backend.calls[0].body, {
         conversationId: "s",
@@ -587,6 +783,114 @@ describe("session-summary.js: SessionEnd hook contract", () => {
       });
     } finally {
       await backend.close();
+    }
+  });
+});
+
+describe("SessionEnd detached process", () => {
+  test("hides its console window on Windows and carries the hook input", () => {
+    const opts = detachedSpawnOptions({ session_id: "s" }, { PATH: "/bin" });
+    assert.equal(opts.detached, true);
+    assert.equal(opts.windowsHide, true);
+    assert.equal(opts.stdio, "ignore");
+    assert.equal(opts.env.PATH, "/bin");
+    assert.deepEqual(JSON.parse(opts.env.EVERME_CLAUDE_HOOK_INPUT), { session_id: "s" });
+  });
+});
+
+// -------------------------------------------------------------------- //
+// Host-capability gate on the injected skill id (L2-1, L2-4)
+// -------------------------------------------------------------------- //
+describe("skill id injection is enabled by this host's declared capability", () => {
+  const SKILL_BUNDLE = {
+    items: [],
+    profiles: [],
+    rawMessages: [],
+    agentMemory: {
+      cases: [{ taskIntent: "Diagnose MCP not loading", approach: "Reinstall", keyInsight: "stale config" }],
+      skills: [{ id: "sk_1", name: "N", description: "D", content: "BODY", relevanceScore: 0.99 }],
+    },
+  };
+
+  test("the adapter declares skillFetch, so the recall block carries the id and no case", async () => {
+    const backend = await startBackend(({ path: p }) =>
+      p.endsWith("/mem/search") ? { json: SKILL_BUNDLE } : { status: 404, json: { error: "not found" } });
+    try {
+      const { stdout, code, stderr } = await runHook("inject-memories.js", {
+        prompt: "help me run a security compliance review",
+        transcript_path: "/tmp/x.jsonl",
+        session_id: "sess-skill",
+      }, { ...FAKE_CREDS, EVERME_API_BASE: backend.url });
+      assert.equal(code, 0, `expected exit 0, stderr=${stderr}`);
+      assert.equal(claudeCodeAdapter.skillFetch, true, "the gate is driven by this declaration");
+      const context = JSON.parse(stdout).hookSpecificOutput.additionalContext;
+      assert.match(context, /\[skill sk_1\]/);
+      assert.doesNotMatch(context, /BODY/, "the body stays in the cache, never in the prompt");
+      assert.doesNotMatch(context, /Past task cases/);
+      assert.doesNotMatch(context, /Diagnose MCP not loading/);
+    } finally {
+      await backend.close();
+    }
+  });
+
+  test("the mem_skill tool the injected id points at is actually advertised", async () => {
+    // An id in the prompt is only redeemable because this same plugin ships
+    // the tool. Asserting the two together is the point: either both hold or
+    // the gate is promising something the host cannot deliver.
+    const proc = spawn("node", [path.join(HOOK_DIR, "mcp-server.js")], {
+      env: { ...process.env, ...FAKE_CREDS, EVERME_API_BASE: "http://127.0.0.1:1" },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    proc.stdout.on("data", (d) => { stdout += d.toString(); });
+    proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "t", version: "0" } } }) + "\n");
+    proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }) + "\n");
+    const names = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => { proc.kill("SIGKILL"); reject(new Error("tools/list timed out")); }, 5000);
+      const poll = setInterval(() => {
+        for (const line of stdout.split("\n")) {
+          if (!line.trim()) continue;
+          let frame;
+          try { frame = JSON.parse(line); } catch { continue; }
+          if (frame.id === 2) {
+            clearInterval(poll);
+            clearTimeout(timer);
+            proc.kill();
+            resolve((frame.result?.tools || []).map((t) => t.name));
+          }
+        }
+      }, 20);
+    });
+    assert.ok(names.includes("mem_skill"), `tools/list must advertise mem_skill; got ${names.join(", ")}`);
+  });
+});
+
+// -------------------------------------------------------------------- //
+// Grok Build runs Claude Code hooks for compatibility
+// -------------------------------------------------------------------- //
+describe("hooks spawned by Grok Build", () => {
+  test("every hook stays silent when GROK_HOOK_EVENT is set, and runs without it", async () => {
+    const backend = await startBackend(() => ({ json: { items: [], status: "saved" } }));
+    const dir = mkdtempSync(path.join(tmpdir(), "everme-grok-guard-"));
+    const transcriptPath = path.join(__dirname, "fixtures", "claude-clean-transcript.jsonl");
+    const payload = {
+      session_id: "grok-session", transcript_path: transcriptPath, cwd: dir,
+      prompt: "What backend language do I prefer?",
+    };
+    const env = { ...FAKE_CREDS, EVERME_API_BASE: backend.url, EVERME_STATE_DIR: dir };
+    try {
+      for (const script of ["session-start.js", "inject-memories.js", "store-memories.js", "store-subagent-memories.js", "session-summary.js"]) {
+        const result = await runHook(script, payload, { ...env, GROK_HOOK_EVENT: "stop", GROK_SESSION_ID: "grok-session" });
+        assert.equal(result.code, 0, `${script}: ${result.stderr}`);
+        assert.equal(result.stdout, "", script);
+      }
+      assert.equal(backend.calls.length, 0, "no request under grok");
+      const control = await runHook("inject-memories.js", payload, env);
+      assert.equal(control.code, 0, control.stderr);
+      assert.equal(backend.calls.filter((call) => call.path.endsWith("/mem/search")).length, 1);
+    } finally {
+      await backend.close();
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

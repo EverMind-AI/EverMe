@@ -544,7 +544,7 @@ describe("hosted MCP Streamable HTTP transport", () => {
           const { tools } = await client.listTools();
           assert.deepEqual(
             tools.map((tool) => tool.name).sort(),
-            ["mem_context", "mem_save_fact", "mem_save_turn", "mem_search"],
+            ["mem_context", "mem_search", "mem_skill"],
           );
 
           const result = await client.callTool({
@@ -574,40 +574,6 @@ describe("hosted MCP Streamable HTTP transport", () => {
     }
   });
 
-  test("mem_save_turn surfaces the derived profile verdict", async () => {
-    const gateway = await startGateway();
-    const hosted = await startServer({
-      apiBase: gateway.baseUrl,
-      logger: { info() {}, warn() {} },
-    });
-    const token = evtToken("p");
-    const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
-    const { StreamableHTTPClientTransport } = await import(
-      "@modelcontextprotocol/sdk/client/streamableHttp.js"
-    );
-    const client = new Client(
-      { name: "everme-http-profile-test", version: "0.0.0" },
-      { capabilities: {} },
-    );
-    const transport = new StreamableHTTPClientTransport(new URL(`${hosted.baseUrl}/mcp`), {
-      requestInit: { headers: { Authorization: `Bearer ${token}` } },
-    });
-
-    try {
-      await client.connect(transport);
-      const result = await client.callTool({
-        name: "mem_save_turn",
-        arguments: { sessionKey: "conv-1", text: "deploy succeeded" },
-      });
-      const payload = JSON.parse(result.content[0].text);
-      assert.equal(payload.profileStatus, "extracted");
-      assert.equal(payload.profileUpdated, true);
-    } finally {
-      await client.close().catch(() => {});
-      await stopServer(hosted.server);
-      await stopServer(gateway.server);
-    }
-  });
 
   test("isolates concurrent tenants and cleans every request lifecycle exactly once", async () => {
     const { createMcpServer } = await import("../src/mcp.js");
@@ -704,7 +670,7 @@ describe("hosted MCP Streamable HTTP transport", () => {
       for (const { listed, searched } of results) {
         assert.deepEqual(
           listed.tools.map((tool) => tool.name).sort(),
-          ["mem_context", "mem_save_fact", "mem_save_turn", "mem_search"],
+          ["mem_context", "mem_search", "mem_skill"],
         );
         assert.equal(searched.isError, undefined);
       }
@@ -776,7 +742,7 @@ describe("hosted MCP SSE transport", () => {
       const { tools } = await client.listTools();
       assert.deepEqual(
         tools.map((tool) => tool.name).sort(),
-        ["mem_context", "mem_save_fact", "mem_save_turn", "mem_search"],
+        ["mem_context", "mem_search", "mem_skill"],
       );
       const result = await client.callTool({
         name: "mem_search",

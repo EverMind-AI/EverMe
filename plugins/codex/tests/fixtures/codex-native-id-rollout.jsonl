@@ -1,0 +1,19 @@
+{"type":"session_meta","payload":{"history_mode":"paginated","thread_source":"user"}}
+{"type":"turn_context","payload":{"turn_id":"turn-a"}}
+{"timestamp":1788400000000,"type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{}"}}
+{"timestamp":1788400000000,"type":"response_item","payload":{"type":"function_call_output","output":""}}
+{"timestamp":1788400000000,"type":"response_item","payload":{"type":"custom_tool_call","call_id":"known-custom","name":"exec","input":"pwd"}}
+{"timestamp":1788400000000,"type":"response_item","payload":{"type":"custom_tool_call_output","output":"custom output"}}
+{"timestamp":1788400000000,"type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{}"}}
+{"timestamp":1788400000000,"type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{}"}}
+{"timestamp":1788400000000,"type":"response_item","payload":{"type":"function_call_output","output":"ambiguous output"}}
+{"timestamp":1788400000000,"type":"response_item","payload":{"type":"function_call_output","call_id":"real-unmatched","output":"unmatched output"}}
+{"timestamp":1788400000000,"type":"response_item","payload":{"type":"message","role":"user","content":"Start a new request"}}
+{"timestamp":1788400000000,"type":"response_item","payload":{"type":"function_call","call_id":"codex_generated_tool_3","name":"shell","arguments":"{}"}}
+{"timestamp":1788400000000,"type":"response_item","payload":{"type":"function_call_output","call_id":"codex_generated_tool_3","output":"reserved source ID"}}
+{"timestamp":1788400000000,"type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{}"}}
+{"timestamp":1788400000000,"type":"response_item","payload":{"type":"function_call_output","output":"second generated output"}}
+{"timestamp":1788400000000,"type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"{}"}}
+{"type":"turn_context","payload":{"turn_id":"turn-b"}}
+{"timestamp":1788400000000,"type":"response_item","payload":{"type":"function_call_output","output":"previous turn output"}}
+{"timestamp":1788400000000,"type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":"Done"}}

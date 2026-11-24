@@ -1,0 +1,19 @@
+{
+  "_comment": "ordinals are baseTurn-agnostic labels within the array (the first user message never increments; leading non-user messages share its ordinal); baseTurn only informs completed, where a leading non-user message past turn 0 is the tail of an earlier turn. Whole-turn coordinate cases shared by the JS hook SDK (agent-sdk/src/turns.js) and the Go importer (cli/internal/importer/conversation batch.go / uploader.go). Both must label, split and count identically or hook and import writes of one session disagree on ordinals. roles are message roles in order; max is the per-batch message cap; batches are index groups; completed[i] is the turns batch i completes.",
+  "cases": [
+    { "name": "clean turns", "roles": ["user", "assistant", "user", "assistant"], "max": 2, "baseTurn": 0,
+      "ordinals": [0, 0, 1, 1], "batches": [[0, 1], [2, 3]], "completed": [1, 1] },
+    { "name": "turn split at turn 0", "roles": ["user", "assistant", "assistant", "user", "assistant"], "max": 2, "baseTurn": 0,
+      "ordinals": [0, 0, 0, 1, 1], "batches": [[0, 1], [2], [3, 4]], "completed": [0, 1, 1] },
+    { "name": "turn split past turn 0", "roles": ["user", "assistant", "assistant", "user", "assistant"], "max": 2, "baseTurn": 5,
+      "ordinals": [0, 0, 0, 1, 1], "batches": [[0, 1], [2], [3, 4]], "completed": [0, 1, 1] },
+    { "name": "opening context rides with turn 0", "roles": ["tool", "user", "assistant"], "max": 10, "baseTurn": 0,
+      "ordinals": [0, 0, 0], "batches": [[0, 1, 2]], "completed": [1] },
+    { "name": "tail of a previous upload past turn 0", "roles": ["assistant", "user", "assistant"], "max": 10, "baseTurn": 4,
+      "ordinals": [0, 0, 0], "batches": [[0, 1, 2]], "completed": [2] },
+    { "name": "unanswered final user stays open", "roles": ["user", "assistant", "user"], "max": 10, "baseTurn": 0,
+      "ordinals": [0, 0, 1], "batches": [[0, 1, 2]], "completed": [1] },
+    { "name": "one turn longer than a batch", "roles": ["user", "assistant", "assistant", "assistant", "assistant"], "max": 2, "baseTurn": 3,
+      "ordinals": [0, 0, 0, 0, 0], "batches": [[0, 1], [2, 3], [4]], "completed": [0, 0, 1] }
+  ]
+}

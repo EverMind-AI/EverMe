@@ -37,6 +37,29 @@ describe("config", () => {
     clearEverme();
   });
 
+  test("a brand env file owns every key it sets over the process env", () => {
+    process.env.EVERME_API_BASE = "https://exported.example";
+    process.env.EVERME_STATE_DIR = "/exported/state";
+    const path = withEnvFile("EVERME_API_BASE=http://127.0.0.1:47391\nEVERME_AGENT_TOKEN=evt_x\nEVERME_BRAND=everos\nEVERME_STATE_DIR=/everos/state\n");
+    try {
+      const c = getConfig();
+      assert.equal(c.baseUrl, "http://127.0.0.1:47391/api/v1");
+      assert.equal(process.env.EVERME_STATE_DIR, "/everos/state");
+    } finally {
+      unlinkSync(path);
+    }
+  });
+
+  test("an EverMe env file keeps the process env override for the API base", () => {
+    process.env.EVERME_API_BASE = "https://exported.example";
+    const path = withEnvFile("EVERME_API_BASE=https://api.everme.evermind.ai\nEVERME_AGENT_TOKEN=evt_x\n");
+    try {
+      assert.equal(getConfig().baseUrl, "https://exported.example/api/v1");
+    } finally {
+      unlinkSync(path);
+    }
+  });
+
   test("isConfigured = false when neither token is set", () => {
     assert.equal(isConfigured(), false);
     const c = getConfig();

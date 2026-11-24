@@ -11,14 +11,13 @@ description: |
 
 # What it gives you
 
-When this plugin is loaded, the host has these MCP tools available:
+When this plugin is loaded, the host has these read-only MCP tools available. Saving is fully automatic via the host's hooks — there is no save tool to call.
 
 | tool            | input                                                          | output (markdown / JSON)                                    |
 |-----------------|----------------------------------------------------------------|-------------------------------------------------------------|
 | `mem_context`   | `{ forceRefresh? }` (`query` deprecated/ignored)               | markdown Profile snapshot — Profile ONLY, never a search    |
-| `mem_search`    | `{ query, topK? }`                                             | markdown search results across all memory buckets           |
-| `mem_save_fact` | `{ fact \| messages, sessionKey?, flush? }`                   | `{ saved, accepted, status, extracted, profileUpdated, … }` |
-| `mem_save_turn` | `{ role, text \| messages, sessionKey?, toolCallId?, flush? }` | `{ saved, accepted, status, messageCount, flushed, profileStatus, profileUpdated }` |
+| `mem_search`    | `{ query, topK?, startTime?, endTime? }`                       | markdown search results across all memory buckets           |
+| `mem_skill`     | `{ id }`                                                       | markdown body of one agent skill; a miss is an error, never substitute text |
 
 # Recommended usage
 
@@ -53,31 +52,24 @@ naming the topic; do NOT paste in the whole conversation. Rely on the
 default `topK` of 10; only raise it if a first search genuinely missed.
 Do not repeat an identical query within the same turn.
 
-Results cover episodic memories, profile entries, agent cases/skills,
-and the recent raw transcript. Rows under "Recent unextracted
+`startTime` / `endTime` (ISO 8601) bound **when the conversation
+happened**, not when the thing being discussed happened. Set them only
+when the user named a window you can put exact dates on ("yesterday",
+"Sep 3", "last week") and pass absolute values. Leave them out for
+vague recency ("recently", "last time"), and leave them out when the
+date belongs to the subject ("which year did I graduate", "the stack I
+chose last year") — filtering by the event's year returns nothing. The
+result echoes the window that was applied.
+
+Results cover episodic memories, profile entries, agent skills, and
+the recent raw transcript. Agent cases are no longer rendered: their
+scores do not separate relevant from irrelevant, so the section was
+noise. Each skill row carries an id and a one-line summary; `mem_skill`
+reads that skill's full text back by id. Rows under "Recent unextracted
 transcript" are provisional — not yet extracted — never quote them as
 established facts or confirmed decisions.
 
-## When the user states a durable fact — `mem_save_fact`
 
-When the user says something true about themselves that should outlive
-this conversation (a preference, habit, trait, long-term goal, or
-decision), call `mem_save_fact` — without waiting to be asked. Only
-`extracted: true` / `profileUpdated: true` confirms the fact reached
-the profile; on `status: "no_extraction"` the profile did NOT update —
-say so plainly, do not auto-retry, and do not claim success.
-
-## To capture how a task was solved — `mem_save_turn`
-
-When a task is solved in a way worth reusing, call `mem_save_turn` with
-the complete trajectory (user → assistant tool calls → tool results →
-final answer). It feeds episodic / agent_case / agent_skill extraction.
-On chat-dual-write backends, the derived user/assistant transcript may also
-update the user's Profile; check `profileUpdated` for that verdict.
-`sessionKey` becomes the conversation id; use a stable value for the whole
-chat. Use `mem_save_fact` for a deliberate durable fact rather than relying
-on the derived chat write. If your host's native hooks already saved the turn,
-do not save it again.
 
 # Error handling
 

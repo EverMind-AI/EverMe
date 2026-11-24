@@ -2,6 +2,14 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { toText, stripChannelMetadata, isSessionResetPrompt } from "../src/messages.js";
 import { buildMemoryPrompt } from "../src/prompt.js";
+import { extractText } from "../index.js";
+
+test("public extractText preserves literal protocol text for write adapters", () => {
+  const text = 'Sender (untrusted metadata):\n```json\n{"label":"example"}\n```';
+  for (const content of [text, [{ type: "text", text }], { text }]) {
+    assert.equal(extractText(content), text);
+  }
+});
 
 describe("messages.toText", () => {
   test("plain string passes through", () => {
@@ -109,13 +117,16 @@ describe("prompt.buildMemoryPrompt", () => {
         },
         rawMessages: [{ senderName: "user", contentItems: [{ text: "raw" }] }],
       },
-      { sections: { profiles: false } },
+      { sections: { profiles: false }, skillFetch: true },
     );
 
     assert.match(out, /### Episodic memory/);
     assert.doesNotMatch(out, /### User profile/);
     assert.match(out, /### Agent skills/);
-    assert.match(out, /### Past task cases/);
+    // Cases are no longer a section: their scores do not separate relevant
+    // from irrelevant, so they are dropped on the render side. Covered in
+    // skill-recall.test.js.
+    assert.doesNotMatch(out, /### Past task cases/);
     assert.match(out, /### Recent unextracted transcript/);
   });
 });

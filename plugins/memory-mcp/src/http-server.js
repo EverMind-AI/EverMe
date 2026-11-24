@@ -5,7 +5,7 @@ import { createClient, redactError, resolveConfig } from "@everme/agent-sdk";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
-import { createMcpServer } from "./mcp.js";
+import { createMcpServer, PKG_VERSION } from "./mcp.js";
 
 const EVT_TOKEN_RE = /^evt_[A-Za-z0-9]{32}$/;
 const DEFAULT_RATE_LIMIT_MAX_KEYS = 10_000;
@@ -361,7 +361,7 @@ function createFixedWindowLimiter({
 }
 
 async function validateAgentToken(agentToken, { apiBase, log }) {
-  const cfg = resolveConfig({ apiBase, agentId: "", agentToken });
+  const cfg = resolveConfig({ apiBase, agentId: "", agentToken, clientKind: "mcp", clientVersion: PKG_VERSION });
   const client = createClient(cfg, log);
   await client.request("POST", "/mem/capabilities", {});
 }

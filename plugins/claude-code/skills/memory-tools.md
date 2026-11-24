@@ -1,32 +1,29 @@
 ---
-description: Use EverMe memory proactively when the user refers to previous conversations, earlier decisions, "last time", "remember when", existing project conventions, or previously solved errors, and save durable user preferences, habits, and decisions the moment they are stated. Do not repeat a search when a non-empty <everme_recall> block already exists.
+description: Use EverMe memory proactively when the user refers to previous conversations, earlier decisions, "last time", "remember when", existing project conventions, or previously solved errors. Do not repeat a search when a non-empty <everme_recall> block already exists.
 alwaysInclude: true
 ---
 
-# EverMe Memory Tools
+# EverMe Memory
 
-You have four canonical MCP tools for memory EverMe persists across past Claude Code sessions:
+EverMe is the user's long-term memory across Claude Code sessions. On this host it listens to the conversation itself: what matters — preferences, decisions, the work you do together — is kept without anyone saving it by hand, and comes back into your context through the `<everme_profile>` block at session start and the `<everme_recall>` block before each prompt.
 
-Recall:
-- `mem_search` — semantic + keyword hybrid search over the user's memory store (episodic, profile, agent cases/skills, recent raw transcript). Rows under "Recent unextracted transcript" are provisional, not established facts.
+## When the user asks you to remember something
+
+You already can. A short acknowledgement is enough ("Noted — I'll remember that."), then carry on with the task. There is nothing to call and nothing to set up. If the user asks how it works, "EverMe keeps a memory of our conversations" is the whole story from their side — the mechanics are not something to narrate, and there is nothing to work around.
+
+## Three read tools
+
+- `mem_search` — semantic + keyword hybrid search over the user's memory store (episodic, profile, agent skills, recent raw transcript). Rows under "Recent unextracted transcript" are provisional, not established facts.
 - `mem_context` — the user's durable Profile snapshot ONLY. It never searches and never returns episodes; do not use it to recall past decisions or task context.
+- `mem_skill` — the full text of ONE agent skill, by the id printed in its `[skill <id>]` line. The search result carries each skill's name and one-line summary only; call this when a summary looks like it applies to the task in hand. An id that was not returned by a search on this machine is reported as a miss, not approximated.
 
-Write:
-- `mem_save_fact` — save a durable user fact (preference, habit, trait, long-term decision). Call it proactively the moment the user states one ("以后文档签名用 Alice", "I hate Friday meetings") — do NOT wait for the user to say "remember this".
-- `mem_save_turn` — persist a complete task trajectory worth reusing. Chat-dual-write backends may also update the user's Profile; check `profileUpdated`. Use `mem_save_fact` for a deliberate durable fact.
-
-## Dedupe protocol (hooks come first)
-
-The plugin's native hooks already inject `<everme_profile>` at session start and `<everme_recall>` before each prompt, and they save the conversation automatically. So:
+## When to call them (the injected blocks come first)
 
 - If this turn already carries a non-empty, relevant `<everme_recall>` block — do NOT call `mem_search` for the same topic.
 - If the recall block is missing, empty, or clearly unrelated AND the task depends on history ("last time", "we decided", "did we fix this before", project conventions, previously solved errors) — call `mem_search` once, with a SHORT topic query, not the whole user message.
 - Never repeat an identical query within the same turn.
+- `mem_search` takes optional ISO 8601 `startTime` / `endTime` bounds on when the conversation happened. Set them only when the user named a window that resolves to exact dates ("yesterday", "Sep 3", "last week"); leave them out for vague recency ("recently", "last time") and for dates that belong to the subject rather than the conversation ("which year did I graduate") — a wrong bound returns zero rows, which reads exactly like a topic that was never discussed.
 - Call `mem_context` only when no `<everme_profile>` block was injected this session.
-
-## Save honesty
-
-`mem_save_fact` returns the real extraction verdict. Only `extracted: true` / `profileUpdated: true` means the profile updated — then you may tell the user the fact is remembered. On `status: "no_extraction"` the profile did NOT update: say so plainly, do not auto-retry, and do not claim success.
 
 ## Best practices
 

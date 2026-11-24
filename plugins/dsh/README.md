@@ -4,11 +4,58 @@ Native EverMe lifecycle integration for [DeepSeek Harness](https://github.com/de
 
 The Cordis plugin complements `@everme/memory-mcp`:
 
-- `agent/pre-step` performs query-specific recall before the first model step of each turn.
+- `agent/pre-step` performs query-specific recall before the first model step of each turn. The recall is appended as a user message whose source kind is `everme` (form `snapshot`); DSH 0.1.7+ session format v4 rejects the retired `plugin` source kind.
 - `session/event` captures the completed DSH turn, including tool calls and results, and writes it through `/mem/agent-memory`.
 - `session/flush` waits for pending EverMe writes so DSH persistence checkpoints do not race the memory upload.
 - Recall and save failures degrade open: DSH continues without blocking the user turn.
-- The MCP server remains available through `npx -y @everme/memory-mcp@latest` for explicit `mem_context`, `mem_search`, `mem_save_fact`, and `mem_save_turn` tool calls.
+- The MCP server remains available through `npx -y @everme/memory-mcp@latest` for explicit read-only `mem_context` and `mem_search` tool calls (saving is automatic via the hooks).
+
+## Message conversion
+
+The native turn-end writer uses task-aware batching: preserve fitting tasks,
+compress oversized tool results with 4/3/2 KiB budgets, then split only if
+necessary. This does not alter the existing flush-on-turn-end contract.
+Native child sessions without genuine human input are skipped at the writer.
+After a native browser-authored follow-up, later assistant-only turns remain
+eligible; root sessions are not subject to this child-only admission rule.
+
+The native turn collector uses `turn/start` and `turn/end` from the session log.
+Only `user/message` records whose source is `user` become human messages;
+plugin context, reasoning, and control events do not become conversation text.
+For native child sessions (`origin: subagent` with a v3 one-shot or continuable
+descriptor), initial delegated tasks use a bare user source and are excluded.
+Browser-authored follow-ups retain their native `source.rpcId` and are preserved.
+This distinction does not depend on message position, text, or configurable
+provider names. Root-session user messages and child assistant/tool activity
+are unchanged; inherited history is not replayed as new turn content.
+Trusted user text is extracted without channel-metadata pattern stripping, so
+quoted Sender blocks, message IDs, and timestamps remain part of the dialogue.
+Recall query cleaning is unchanged; ordinary write limits still apply.
+Assistant tool-call blocks carry the provider's string ID and name. Arguments
+must be a valid JSON string; the native runtime's explicit empty-string argument
+form means no parameters and is encoded as `{}`. Missing fields are not filled in.
+The separate `tool/call` log record is not uploaded a second time.
+
+Tool results retain their native `toolCallId` and content array. An explicit
+empty array remains one empty result; a missing content field is rejected.
+Long tool results have no additional 8000-character cap. Normal text extraction,
+ordinary-message limits, and the SDK's request budgets still apply. Invalid
+native IDs, names, arguments, or result fields are counted in bounded diagnostics;
+valid neighboring text is retained. A missing real session ID prevents the write.
+When an invalid call has a unique native ID within the turn, its corresponding
+result is excluded as well. Duplicate native IDs are ambiguous, so they do not
+authorize guessing which result belongs to the rejected call.
+
+Only an actual final assistant text message in a `completed` turn, without tool
+calls or interruption, carries the internal completion marker. A tool can itself
+conclude a native DSH turn, so `turn/end` does not authorize inventing a final
+assistant message. Other assistant messages explicitly remain non-final. The
+marker reaches the BFF for batching but is not sent to EverOS.
+
+`collectTurnMessages` accepts an optional fourth logger argument for conversion
+diagnostics; existing three-argument callers remain compatible. Historical
+non-native object arguments, string result containers, and coerced IDs are not
+part of the native DSH contract and are rejected rather than repaired.
 
 ## Install
 
@@ -39,6 +86,12 @@ export function apply(ctx, config) {}
 ```
 
 Credentials are read from DSH's layered environment (`EVERME_API_BASE`, `EVERME_AGENT_ID`, and `EVERME_AGENT_TOKEN`). Do not put tokens directly in `cordis.patch.yml`.
+
+## Where memory is kept
+
+Without EverMe Desktop, this plugin saves memory in the EverMe cloud. To keep memory only on this Mac, install EverMe Desktop and turn on local memory. The plugin then sends memory to the local memory gateway that EverMe Desktop runs (it reads `~/.everme/memory/route.json` on each request).
+
+Each EverMe account keeps its memory in one place: the cloud, or one Mac. If your account keeps its memory on another Mac, the cloud refuses memory from this computer, and the error names that Mac. To save memory from here, switch the account back to the cloud on that Mac, or on the web if that Mac is gone.
 
 ## License
 

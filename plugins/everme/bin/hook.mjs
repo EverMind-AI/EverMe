@@ -3084,7 +3084,7 @@ function stringValue(value) {
 }
 
 // src/adapter.js
-var PKG_VERSION = true ? "0.7.12" : createRequire(import.meta.url)("../package.json").version;
+var PKG_VERSION = true ? "0.7.13" : createRequire(import.meta.url)("../package.json").version;
 var CONTEXT_EVENTS = /* @__PURE__ */ new Set(["SessionStart", "UserPromptSubmit"]);
 var codexAdapter = {
   platform: "codex",

@@ -1,7 +1,7 @@
 import { test, describe, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
-import { createClient, EvermeError } from "../src/client.js";
+import { boundedDiagnostic, createClient, EvermeError } from "../src/client.js";
 
 /**
  * Helper: spin up a tiny HTTP server, return its base URL + a
@@ -116,6 +116,80 @@ describe("client", () => {
     await c.request("GET", "/agents", undefined, { query: { platform: "claude-code" } });
     assert.equal(s.getLastRequest().url, "/agents?platform=claude-code");
   });
+
+  test("tells the cloud it follows the local memory route", async (t) => {
+    t.after(async () => s.close());
+    const c = createClient({ baseUrl: s.baseUrl, agentId: "agt_1", agentToken: "evt_x" });
+    await c.request("POST", "/mem/agent-memory", {});
+    assert.equal(s.getLastRequest().headers["x-everme-memory-route"], "device");
+  });
+
+  test("a write refused for a device names that device", async (t) => {
+    t.after(async () => s.close());
+    s.setReply({ status: 409, body: { status: 42501, error: "This account keeps its memory on another device, so the cloud does not store this write", result: { deviceName: "Work Mac" }, requestId: "r-1" } });
+    const c = createClient({ baseUrl: s.baseUrl, agentId: "agt_1", agentToken: "evt_x" });
+    await assert.rejects(c.request("POST", "/mem/agent-memory", {}), (err) => {
+      assert.ok(err instanceof EvermeError);
+      assert.equal(err.code, 42501);
+      assert.match(err.message, /keeps its memory on “Work Mac”/);
+      return true;
+    });
+    s.setReply({ status: 409, body: { status: 42501, error: "x", result: null, requestId: "r-2" } });
+    await assert.rejects(c.request("POST", "/mem/agent-memory", {}), /on “another device”/);
+  });
+
+  test("sends X-EverMe-Client and a versioned User-Agent when the caller declares a kind", async (t) => {
+    t.after(async () => s.close());
+    const c = createClient({
+      baseUrl: s.baseUrl, agentId: "agt_1", agentToken: "evt_x",
+      clientKind: "hook", clientVersion: "0.6.4",
+    });
+    await c.request("POST", "/mem/capabilities", {});
+    const req = s.getLastRequest();
+    assert.equal(req.headers["x-everme-client"], "hook/0.6.4");
+    assert.equal(req.headers["user-agent"], "everme-hook/0.6.4 (agentId=agt_1)");
+  });
+
+  test("omits X-EverMe-Client and keeps the legacy User-Agent when no kind is declared", async (t) => {
+    t.after(async () => s.close());
+    const c = createClient({ baseUrl: s.baseUrl, agentId: "agt_1", agentToken: "evt_x" });
+    await c.request("POST", "/mem/capabilities", {});
+    const req = s.getLastRequest();
+    assert.equal(req.headers["x-everme-client"], undefined);
+    assert.equal(req.headers["user-agent"], "everme-memory-mcp/0.1 (agentId=agt_1)");
+  });
+
+  test("omits X-EverMe-Client and keeps the legacy User-Agent when kind is declared without a version", async (t) => {
+    t.after(async () => s.close());
+    const c = createClient({
+      baseUrl: s.baseUrl, agentId: "agt_1", agentToken: "evt_x",
+      clientKind: "hook",
+    });
+    await c.request("POST", "/mem/capabilities", {});
+    const req = s.getLastRequest();
+    assert.equal(req.headers["x-everme-client"], undefined, "must not fabricate a version to complete the identity");
+    assert.equal(req.headers["user-agent"], "everme-memory-mcp/0.1 (agentId=agt_1)");
+  });
+
+  test("omits X-EverMe-Client and keeps the legacy User-Agent when clientVersion is an empty string", async (t) => {
+    t.after(async () => s.close());
+    const c = createClient({
+      baseUrl: s.baseUrl, agentId: "agt_1", agentToken: "evt_x",
+      clientKind: "hook", clientVersion: "",
+    });
+    await c.request("POST", "/mem/capabilities", {});
+    const req = s.getLastRequest();
+    assert.equal(req.headers["x-everme-client"], undefined, "must not fabricate a version to complete the identity");
+    assert.equal(req.headers["user-agent"], "everme-memory-mcp/0.1 (agentId=agt_1)");
+  });
+});
+
+test("boundedDiagnostic redacts, single-lines, and caps external text", () => {
+  const token = "evt_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const output = boundedDiagnostic(`${token}\n${"x".repeat(500)}`, 80);
+  assert.ok(output.length <= 81);
+  assert.doesNotMatch(output, /evt_[a-f0-9]{32}/);
+  assert.doesNotMatch(output, /[\r\n]/);
 });
 
 describe("request id propagation", () => {

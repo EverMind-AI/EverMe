@@ -81,6 +81,7 @@ function loadEnvFile() {
   if (!existsSync(path)) return;
   try {
     const raw = readFileSync(path, "utf8");
+    const fileEnv = {};
     for (const line of raw.split("\n")) {
       const t = line.trim();
       if (!t || t.startsWith("#")) continue;
@@ -92,7 +93,13 @@ function loadEnvFile() {
       if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
         v = v.slice(1, -1);
       }
-      if (EVERME_ROTATED_KEYS.has(k)) {
+      fileEnv[k] = v;
+    }
+    // A file that names its brand (EverOS) owns every key it sets, so an
+    // exported EverMe variable cannot point EverOS at EverMe.
+    const ownsAll = Boolean(fileEnv.EVERME_BRAND);
+    for (const [k, v] of Object.entries(fileEnv)) {
+      if (ownsAll || EVERME_ROTATED_KEYS.has(k)) {
         // evercli owns this key — env file always wins.
         process.env[k] = v;
       } else if (!process.env[k]) {

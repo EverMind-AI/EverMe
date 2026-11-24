@@ -2,7 +2,7 @@
   "id": "@everme/openclaw",
   "name": "EverMe Memory Plugin",
   "description": "Real-time memory retrieval and persistence backed by the EverMe cloud (cold-start memory uploaded by evercli)",
-  "version": "0.6.1",
+  "version": "0.7.13",
   "kind": "context-engine",
   "contextEngine": true,
   "main": "./index.js",
@@ -38,6 +38,16 @@
         "type": "integer",
         "description": "Deprecated compatibility switch. Set both flushEveryTurns and flushMaxBytes to 0 to disable per-turn uploads; realtime writes do not buffer by byte size.",
         "default": 65536
+      },
+      "brand": {
+        "type": "string",
+        "description": "Brand of this install: everme or everos. Written by `evercli plugin install` on an EverOS machine. Defaults to env EVERME_BRAND.",
+        "default": ""
+      },
+      "memoryHome": {
+        "type": "string",
+        "description": "Memory home whose route.json the plugin reads. Written by `evercli plugin install` on an EverOS machine. Defaults to env EVERME_MEMORY_HOME.",
+        "default": ""
       }
     }
   }

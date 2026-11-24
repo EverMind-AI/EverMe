@@ -29,10 +29,10 @@
  *     DROP part.type=="think".
  *   - context.append_loop_event, event.type=="tool.call"
  *     ({toolCallId,name,args}) -> assistant message with a toolCalls entry
- *     (args is an object -> JSON-stringified). Pending text is flushed
+ *     (args is a parsed JSON value -> JSON-stringified). Pending text is flushed
  *     first so order is text -> call -> result.
  *   - context.append_loop_event, event.type=="tool.result"
- *     ({toolCallId|parentUuid, result.output}) -> a tool message.
+ *     ({toolCallId, result.output}) -> a tool message.
  *
  * "last turn" = from the last user message through end of stream
  * (mirrors claude-code store-memories.js lastTurn).
@@ -162,15 +162,18 @@ function sleep(ms) {
  * Robust to unknown event kinds — only the recognised events are
  * consumed, everything else is skipped.
  */
-export function extractAgentMessages(lines) {
+export function extractAgentMessages(lines, { subagent = false, diagnostic = console.warn } = {}) {
   const messages = [];
+  const callCounts = new Map();
+  const invalidNames = new Set();
+  const dropped = { calls: 0, results: 0, names: 0, nameResults: 0 };
   // Assistant text is streamed as many content.part events; aggregate
   // per (turnId, step) and flush on step.end. Keyed map preserves the
   // first-seen timestamp for the flushed message.
   const pending = new Map(); // key -> { parts:[], timestamp }
 
   const keyFor = (ev) => `${ev?.turnId ?? ""}::${ev?.step ?? ""}`;
-  const flushPending = (key) => {
+  const flushPending = (key, turnComplete = false) => {
     const slot = pending.get(key);
     if (!slot) return;
     pending.delete(key);
@@ -180,6 +183,7 @@ export function extractAgentMessages(lines) {
         role: AGENT_MEMORY_ROLES.ASSISTANT,
         timestamp: slot.timestamp,
         content,
+        ...(turnComplete ? { turnComplete: true } : {}),
       });
     }
   };
@@ -198,13 +202,14 @@ export function extractAgentMessages(lines) {
       const m = row?.message;
       if (!m || typeof m !== "object") continue;
       if (m.role !== AGENT_MEMORY_ROLES.USER) continue;
+      if (subagent) continue;
       // Keep only genuine user input: origin.kind=="user" (or no origin).
       // Drop every system-injected pseudo-user message — injection (recall
       // blocks / system reminders), skill_activation (injected skill text),
       // and any other non-user origin.
       const okind = m?.origin?.kind;
       if (okind && okind !== "user") continue;
-      const text = textFromContent(m.content);
+      const text = textFromContent(withoutHookResults(m.content));
       if (text) {
         messages.push({ role: AGENT_MEMORY_ROLES.USER, timestamp, content: text });
       }
@@ -229,32 +234,45 @@ export function extractAgentMessages(lines) {
         // Flush any assistant preamble text for this step first so order is
         // text -> tool call -> tool result.
         flushPending(keyFor(ev));
+        const id = ev.toolCallId;
+        if (!validToolId(id)) {
+          dropped.calls++;
+          continue;
+        }
+        callCounts.set(id, (callCounts.get(id) || 0) + 1);
         const name = ev.name;
-        if (!name) continue;
-        const args = ev.args ?? {};
+        if (typeof name !== "string" || !name.trim()) {
+          invalidNames.add(id);
+          dropped.names++;
+          continue;
+        }
+        const args = ev.args === undefined ? {} : ev.args;
         messages.push({
           role: AGENT_MEMORY_ROLES.ASSISTANT,
           timestamp,
           toolCalls: [{
-            id: ev.toolCallId || ev.uuid || `kimi_tool_${timestamp}`,
+            id,
             type: AGENT_MEMORY_TOOL_CALL_TYPES.FUNCTION,
             name,
-            arguments: typeof args === "string" ? args : safeJsonStringify(args),
+            arguments: JSON.stringify(args),
           }],
         });
       } else if (ev.type === "tool.result") {
-        const id = ev.toolCallId || ev.parentUuid;
-        if (!id) continue;
+        const id = ev.toolCallId;
+        if (!validToolId(id)) {
+          dropped.results++;
+          continue;
+        }
         const output = ev?.result?.output;
         const content = typeof output === "string" ? output : safeJsonStringify(output ?? "");
         messages.push({
           role: AGENT_MEMORY_ROLES.TOOL,
           timestamp,
-          content: content || "tool result",
+          content,
           toolCallId: id,
         });
       } else if (ev.type === "step.end") {
-        flushPending(keyFor(ev));
+        flushPending(keyFor(ev), ev.finishReason === "end_turn");
       }
       continue;
     }
@@ -266,7 +284,31 @@ export function extractAgentMessages(lines) {
     flushPending(key);
   }
 
-  return messages;
+  const filtered = messages.filter(message => {
+    if (message.role !== AGENT_MEMORY_ROLES.TOOL
+      || !invalidNames.has(message.toolCallId) || callCounts.get(message.toolCallId) !== 1) return true;
+    dropped.nameResults++;
+    return false;
+  });
+  if (dropped.calls || dropped.results || dropped.names) {
+    diagnostic(`[everme] kimicode parse dropped_invalid_call_id=${dropped.calls} dropped_invalid_result_id=${dropped.results} dropped_invalid_name=${dropped.names} dropped_name_results=${dropped.nameResults}`);
+  }
+  return filtered;
+}
+
+function validToolId(value) {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+// Kimi Code returns a UserPromptSubmit hook's output as a separate text part
+// of the user's own message, wrapped in <hook_result>. A part that is exactly
+// such an envelope is hook output; a part that only mentions the tag is the
+// user's text.
+const HOOK_RESULT_PART = /^\s*<hook_result(?:\s[^>]*)?>[\s\S]*<\/hook_result>\s*$/;
+
+function withoutHookResults(content) {
+  if (!Array.isArray(content)) return content;
+  return content.filter((b) => !(b?.type === "text" && typeof b.text === "string" && HOOK_RESULT_PART.test(b.text)));
 }
 
 function textFromContent(content) {
@@ -288,7 +330,8 @@ function normalizeTimestamp(ts) {
   }
   const parsed = Date.parse(ts);
   if (Number.isFinite(parsed)) return parsed;
-  return Date.now();
+  // No host time: the SDK assigns a fallback once and reuses it on resends.
+  return undefined;
 }
 
 function safeJsonStringify(v) {
@@ -315,7 +358,7 @@ export function lastTurn(messages) {
       break;
     }
   }
-  if (startIdx === -1) return messages;
+  if (startIdx === -1) return [];
   return messages.slice(startIdx);
 }
 
@@ -342,4 +385,26 @@ export async function readSession({ sessionId, cwd }) {
   const lines = await readWireLines(path);
   if (lines.length === 0) return [];
   return extractAgentMessages(lines);
+}
+
+export async function readAgentSessions({ sessionId, cwd, includeMain = true }) {
+  const agentsDir = join(resolveWorkDir(cwd), String(sessionId || ""), "agents");
+  let entries;
+  try {
+    entries = readdirSync(agentsDir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const sessions = [];
+  for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+    if (!entry.isDirectory() || (!includeMain && entry.name === "main")) continue;
+    const path = join(agentsDir, entry.name, "wire.jsonl");
+    const lines = await readWireLines(path);
+    if (!lines.length) continue;
+    sessions.push({
+      agentId: entry.name,
+      messages: extractAgentMessages(lines, { subagent: entry.name !== "main" }),
+    });
+  }
+  return sessions;
 }

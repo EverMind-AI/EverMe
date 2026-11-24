@@ -12,9 +12,10 @@ If you're on:
 
 ```
 mem_context        durable user Profile snapshot only (no search, no episodes)
-mem_search         hybrid memory search (text + vector)
-mem_save_fact      durable user fact → long-term profile
-mem_save_turn      realtime trajectory write to /mem/agent-memory (no records)
+mem_search         hybrid memory search (text + vector), optionally bounded
+                   to a conversation time window
+mem_skill          full text of one agent skill, by the id printed in its
+                   search-result line (served from the local skill cache)
 ```
 
 Each tool's MCP `description` carries its own trigger so the host LLM
@@ -24,6 +25,16 @@ server also advertises the same protocol via MCP `instructions` for
 hosts that surface it. `mem_search` is guided to keep its `query` short
 — a few keywords, not the whole conversation pasted in — and to use the
 default `topK` (10), so requests stay small and search quality stays high.
+
+`mem_search` also takes optional `startTime` / `endTime` (ISO 8601), which
+compile into the gateway's `filters.timestamp` as `gte` / `lte`. Either bound
+may stand alone. They bound **when the conversation happened**, not when the
+subject of it happened, and the description tells the model to omit them
+unless the user named a window that resolves to exact dates — a wrong bound
+returns zero rows, which reads exactly like a topic that was never discussed.
+A bound with no offset is completed in the host machine's own timezone, so
+the model never has to guess where the user is. The applied window is echoed
+back in the result so a miscomputed date is visible in the same response.
 
 ## Wire it into a host's mcpServers config
 
@@ -69,6 +80,12 @@ Or run the published executable without a global install:
 EVERME_API_BASE=https://api.everme.evermind.ai \
 npx -y -p @everme/memory-mcp everme-memory-mcp-http
 ```
+
+Hosted mode needs Node.js 20 or later. On Node.js 18, every `POST /mcp` request
+fails with `crypto is not defined`: the MCP SDK's Streamable HTTP transport uses
+the global Web Crypto object, which Node.js 18 does not expose. The stdio server,
+`GET /sse` and `POST /messages` work on Node.js 18 (tested on 18.20.8,
+2026-10-30).
 
 Terminate TLS at the production load balancer or reverse proxy. Do not pass an
 `emk_*` account key or a cloud-memory provider key to these endpoints; the
@@ -134,6 +151,12 @@ token and invalidates the previous configuration.
 ## Architecture
 
 Thin adapter on top of [`@everme/agent-sdk`](https://www.npmjs.com/package/@everme/agent-sdk). This package owns the MCP framing (stdio, stateless Streamable HTTP, or HTTP+SSE), tool list, and dispatch. Everything else — the EverMe BFF client, realtime agent-memory writes, search/context calls, retry, and redaction — comes from the SDK.
+
+## Where memory is kept
+
+Without EverMe Desktop, this plugin saves memory in the EverMe cloud. To keep memory only on this Mac, install EverMe Desktop and turn on local memory. The plugin then sends memory to the local memory gateway that EverMe Desktop runs (it reads `~/.everme/memory/route.json` on each request).
+
+Each EverMe account keeps its memory in one place: the cloud, or one Mac. If your account keeps its memory on another Mac, the cloud refuses memory from this computer, and the error names that Mac. To save memory from here, switch the account back to the cloud on that Mac, or on the web if that Mac is gone.
 
 ## Tests
 

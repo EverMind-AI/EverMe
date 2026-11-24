@@ -1,43 +1,52 @@
-import { requestMeta } from "../client.js";
+import { boundedDiagnostic, requestMeta } from "../client.js";
+import { PROFILE_MAX_CHARS, PROFILE_MAX_ITEMS } from "../prompt.js";
+import { profileTag } from "../brand.js";
 
-export async function runSessionStart({ client, log }) {
+export async function runSessionStart({ client, config, log }) {
   const { result, requestId } = await requestMeta(client, "POST", "/mem/context", {});
   const profile = result?.profile;
   const count = profileItemCount(profile);
   // One line per profile injection so a SessionStart can be located in ELK
   // by its trace id — errors already carry it via the degraded diagnostic.
-  log?.info?.(`[everme] SessionStart profile: items=${count} requestId=${requestId}`);
+  log?.info?.(`[everme] memory-context stage=complete result=success items=${count} requestId=${boundedDiagnostic(requestId, 128)}`);
   return {
-    block: renderProfileBlock(profile),
+    block: renderProfileBlock(profile, config?.brand),
     count,
     requestId,
   };
 }
 
-export function renderProfileBlock(profile) {
+export function renderProfileBlock(profile, brand) {
   if (!profile) return "";
   const explicit = Array.isArray(profile.explicit_info) ? profile.explicit_info : [];
   const implicit = Array.isArray(profile.implicit_traits) ? profile.implicit_traits : [];
   if (!explicit.length && !implicit.length) return "";
 
-  const lines = ["<everme_profile>"];
-  if (explicit.length) {
+  // One budget shared by both sections, spent facts-first. A profile large
+  // enough to starve the traits section is far beyond anything observed;
+  // the cap exists so a runaway profile cannot dominate the session prompt.
+  const shownExplicit = explicit.slice(0, PROFILE_MAX_ITEMS);
+  const shownImplicit = implicit.slice(0, Math.max(0, PROFILE_MAX_ITEMS - shownExplicit.length));
+
+  const tag = profileTag(brand);
+  const lines = [`<${tag}>`];
+  if (shownExplicit.length) {
     lines.push("Profile facts:");
-    for (const item of explicit.slice(0, 12)) {
+    for (const item of shownExplicit) {
       const description = item?.description || item?.evidence || "";
       if (!description) continue;
       const category = item.category ? `[${item.category}] ` : "";
-      lines.push(`- ${category}${truncate(description, 240)}`);
+      lines.push(`- ${category}${truncate(description, PROFILE_MAX_CHARS)}`);
     }
   }
-  if (implicit.length) {
+  if (shownImplicit.length) {
     lines.push("Implicit traits:");
-    for (const item of implicit.slice(0, 6)) {
+    for (const item of shownImplicit) {
       const name = item?.trait || item?.name || "trait";
-      lines.push(`- ${name}: ${truncate(item?.description || "", 200)}`);
+      lines.push(`- ${name}: ${truncate(item?.description || "", PROFILE_MAX_CHARS)}`);
     }
   }
-  lines.push("</everme_profile>");
+  lines.push(`</${tag}>`);
   return lines.join("\n");
 }
 

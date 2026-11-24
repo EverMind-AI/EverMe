@@ -1,0 +1,17 @@
+{"timestamp":1749002000000,"type":"session_meta","payload":{"id":"clean-session","history_mode":"paginated","thread_source":"user","parent_thread_id":null}}
+{"timestamp":1749002001000,"type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"<app-context>internal system prompt</app-context>"}]}}
+{"timestamp":1749002002000,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<recommended_plugins>internal plugins</recommended_plugins>"},{"type":"input_text","text":"# AGENTS.md instructions for /repo\n<INSTRUCTIONS>internal scoped rules</INSTRUCTIONS>"},{"type":"input_text","text":"# AGENTS.md instructions\n\n<INSTRUCTIONS>internal unscoped rules</INSTRUCTIONS>"},{"type":"input_text","text":"<environment_context>internal environment</environment_context>"}]}}
+{"timestamp":1749002003000,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"agent activity before the first user"}]}}
+{"timestamp":1749002004000,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<command-message>inspect</command-message>\n<command-name>/inspect</command-name>\n<command-args>config.json</command-args>"}]}}
+{"timestamp":1749002005000,"type":"response_item","payload":{"type":"custom_tool_call","call_id":"call_exec","name":"exec","input":"cat config.json"}}
+{"timestamp":1749002006000,"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call_exec","output":[{"type":"input_text","text":"enabled=true"}]}}
+{"timestamp":1749002007000,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<task-notification><status>completed</status></task-notification>"}]}}
+{"timestamp":1749002007500,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<command-message>malformed internal command</command-message>"}]}}
+{"timestamp":1749002008000,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"The config is enabled."}]}}
+{"timestamp":1749002009000,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"为什么用户提到 <app-context> 和字面量 # AGENTS.md instructions\n<INSTRUCTIONS>example</INSTRUCTIONS> 时不能被误删？"}]}}
+{"timestamp":1749002010000,"type":"response_item","payload":{"type":"function_call","call_id":"call_read","name":"read_file","arguments":"{\"path\":\"config.json\"}"}}
+{"timestamp":1749002011000,"type":"response_item","payload":{"type":"function_call_output","call_id":"call_read","output":[{"type":"input_text","text":"token=sk-abcdefghijklmnop"}]}}
+{"timestamp":1749002012000,"type":"response_item","payload":{"type":"web_search_call","action":{"type":"search","query":"codex rollout schema"}}}
+{"timestamp":1749002013000,"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"标签只是用户讨论的正文。"}]}}
+{"timestamp":1749002014000,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<command-name>/model</command-name>"}]}}
+{"timestamp":1749002015000,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<local-command-stdout>model changed</local-command-stdout>"}]}}

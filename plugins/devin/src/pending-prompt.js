@@ -23,34 +23,42 @@ function entryPath(trajectoryId, options) {
   return path.join(stateDirOf(options), `devin-prompt-${safe}.json`);
 }
 
+// Devin Local pairs a prompt with its answer by prompt_id; the session id
+// keeps two sessions that reuse a prompt id apart.
+export function promptKey(sessionId, promptId) {
+  if (typeof sessionId !== "string" || !sessionId.trim()) return "";
+  if (typeof promptId !== "string" || !promptId.trim()) return "";
+  return `${sessionId}.${promptId}`;
+}
+
 export async function stashPrompt(trajectoryId, prompt, options = {}) {
   const text = typeof prompt === "string" ? prompt.trim() : "";
-  if (!trajectoryId || !text) return;
+  if (typeof trajectoryId !== "string" || !trajectoryId.trim() || !text) return;
   const dir = stateDirOf(options);
   await mkdir(dir, { recursive: true, mode: 0o700 });
   // The prompt is user content: keep it owner-only.
-  await writeFile(entryPath(trajectoryId, options), JSON.stringify({ prompt: text }), {
+  await writeFile(entryPath(trajectoryId, options), JSON.stringify({ prompt: text, timestamp: options.timestamp }), {
     encoding: "utf8",
     mode: 0o600,
   });
 }
 
 export async function takePrompt(trajectoryId, options = {}) {
-  if (!trajectoryId) return "";
+  if (typeof trajectoryId !== "string" || !trajectoryId.trim()) return null;
   const file = entryPath(trajectoryId, options);
   let raw;
   try {
     raw = await readFile(file, "utf8");
   } catch {
-    return "";
+    return null;
   }
   // Consume it either way: a prompt that cannot be parsed must not stay
   // behind to mislabel the next answer.
   await rm(file, { force: true }).catch(() => {});
   try {
-    const prompt = JSON.parse(raw)?.prompt;
-    return typeof prompt === "string" ? prompt : "";
+    const entry = JSON.parse(raw);
+    return typeof entry?.prompt === "string" ? entry : null;
   } catch {
-    return "";
+    return null;
   }
 }

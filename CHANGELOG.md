@@ -52,6 +52,19 @@ the open-source home for EverMe CLI and agent plugins.
 
 ### Plugins
 
+- Sync the protocol packages to the 0.7.13 release, and the Codex marketplace
+  plugin (`plugins/everme`) with them.
+- Open-source `@everme/opencode` (OpenCode and Kilo Code) and `@everme/copilot`
+  (GitHub Copilot CLI).
+- Add `plugins/agent-plugin`: the `everme-memory` plugin for Cursor and GitHub
+  Copilot CLI. The repository root now has a Cursor marketplace
+  (`.cursor-plugin/marketplace.json`) and a Copilot CLI marketplace
+  (`.github/plugin/marketplace.json`). In Cursor the plugin adds the hosted
+  EverMe MCP server, which signs in with OAuth.
+- Add `plugins/codex-directory`: the EverMe package for the ChatGPT and Codex
+  app directory.
+- `@everme/openclaw` declares the OpenClaw plugin API and build version that
+  ClawHub requires, and ships an icon.
 - Release the protocol packages at 0.6.1 (from 0.4.2).
 - Open-source four more host plugins: `@everme/kimicode`, `@everme/cursor`,
   `@everme/devin`, and `@everme/dsh` (DeepSeek Harness), each with its own test

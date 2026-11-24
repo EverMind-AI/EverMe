@@ -1,0 +1,24 @@
+{
+  "mcpServers": {
+    "everme-memory": {
+      "url": "https://api.everme.evermind.ai/mcp",
+      "extensions": {
+        "com.openai": {
+          "auth": {
+            "type": "oauth",
+            "client": {
+              "mode": "dcr"
+            },
+            "baseScopes": [
+              "mem:read",
+              "mem:search",
+              "mem:write",
+              "openid",
+              "email"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

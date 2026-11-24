@@ -1,10 +1,11 @@
 import { afterEach, describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { cursorAdapter } from "../src/adapter.js";
+import { sanitizeSessionId } from "../../agent-sdk/src/hooks/state.js";
 
 const fixtures = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
 const transcriptPath = path.join(fixtures, "cursor-transcript.jsonl");
@@ -22,6 +23,72 @@ async function newStateDir() {
 }
 
 describe("Cursor hook adapter", () => {
+  test("existing spool entries with missing name are rejected while valid neighbors survive", async () => {
+    const stateDir = await newStateDir();
+    const sessionId = "existing-spool";
+    const event = { id: "old-call", input: "{}", output: "", ts: 1788672000000 };
+    await writeFile(path.join(stateDir, `${sanitizeSessionId(sessionId)}.toolbuf.jsonl`), [event, { ...event, id: "valid-call", name: "Shell" }].map(value => JSON.stringify(value)).join("\n") + "\n");
+    const warnings = [];
+    const previous = process.stderr.write;
+    let messages;
+    process.stderr.write = value => { warnings.push(String(value)); return true; };
+    try {
+      messages = await cursorAdapter.readLastTurn({ sessionId }, { stateDir });
+    } finally {
+      process.stderr.write = previous;
+    }
+    assert.equal(messages.length, 2);
+    assert.equal(messages[0].toolCalls[0].id, "valid-call");
+    assert.equal(messages[1].toolCallId, "valid-call");
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /invalid_tool_name: dropped_events=1/);
+  });
+
+  test("official postToolUse keeps native ID and exact empty or long tool bodies", async () => {
+    for (const size of [0, 8000, 8001, 16001]) {
+      const stateDir = await newStateDir();
+      const raw = { conversation_id: "native-contract", generation_id: "generation-1", transcript_path: null, tool_use_id: `native-${size}`, tool_name: "Shell", tool_input: { command: "x".repeat(9000) }, tool_output: "x".repeat(size) };
+      const input = cursorAdapter.normalizeInput(raw, "postToolUse");
+      await cursorAdapter.bufferToolUse(input, { stateDir });
+      const messages = await cursorAdapter.readLastTurn(input, { stateDir });
+      assert.equal(messages.length, 2);
+      assert.equal(messages[0].toolCalls[0].id, raw.tool_use_id);
+      assert.deepEqual(JSON.parse(messages[0].toolCalls[0].arguments), raw.tool_input);
+      assert.equal(messages[1].toolCallId, raw.tool_use_id);
+      assert.equal(messages[1].content, raw.tool_output);
+    }
+  });
+
+  test("malformed native tool fields are counted and excluded without invented pairs", async () => {
+    for (const [field, value] of [["tool_use_id", undefined], ["tool_use_id", 42], ["tool_use_id", " "], ["tool_name", undefined], ["tool_name", 42], ["tool_input", undefined], ["tool_input", "{}"], ["tool_output", undefined], ["tool_output", {}]]) {
+      const stateDir = await newStateDir();
+      const warnings = [];
+      const input = cursorAdapter.normalizeInput({ conversation_id: "native-contract", tool_use_id: "native-id", tool_name: "Shell", tool_input: {}, tool_output: "", [field]: value }, "postToolUse");
+      const result = await cursorAdapter.bufferToolUse(input, { stateDir, warn: value => warnings.push(value) });
+      assert.equal(result.count, 0, field);
+      assert.deepEqual(await cursorAdapter.readLastTurn(input, { stateDir }), []);
+      assert.equal(warnings.length, 1);
+      assert.match(warnings[0], /dropped_events=1/);
+      assert.ok(warnings[0].length < 160);
+    }
+  });
+
+  test("redaction keeps JSON syntax, large numbers, and the literal unknown name", async () => {
+    const stateDir = await newStateDir();
+    const token = "emk_" + "a".repeat(32);
+    const output = '{ "n":9007199254740993, "url":"https://example.com/?X-Amz-Signature=abcdef", "token":"' + token + '" }';
+    const input = cursorAdapter.normalizeInput({ conversation_id: "native-redaction", tool_use_id: "native-call", tool_name: "unknown", tool_input: { command: token }, tool_output: output }, "postToolUse");
+    await cursorAdapter.bufferToolUse(input, { stateDir });
+    const messages = await cursorAdapter.readLastTurn(input, { stateDir });
+    assert.equal(messages[0].toolCalls[0].name, "unknown");
+    assert.doesNotMatch(messages[0].toolCalls[0].arguments, new RegExp(token));
+    assert.doesNotThrow(() => JSON.parse(messages[0].toolCalls[0].arguments));
+    assert.match(messages[1].content, /9007199254740993/);
+    assert.doesNotThrow(() => JSON.parse(messages[1].content));
+    assert.doesNotMatch(messages[1].content, new RegExp(token));
+    assert.doesNotMatch(messages[1].content, /Signature=abcdef/);
+  });
+
   test("maps only supported native lifecycle events", () => {
     assert.equal(cursorAdapter.mapEvent("sessionStart"), "SessionStart");
     assert.equal(cursorAdapter.mapEvent("stop"), "Stop");
@@ -30,15 +97,23 @@ describe("Cursor hook adapter", () => {
     assert.equal(cursorAdapter.mapEvent("beforeSubmitPrompt"), "beforeSubmitPrompt");
   });
 
+  test("stores the turn at sessionEnd when no stop stored one", () => {
+    // cursor-agent -p (2026.11.17) fires sessionEnd but never stop.
+    assert.equal(cursorAdapter.mapEvent("sessionEnd"), "SessionEnd");
+    assert.equal(cursorAdapter.storeAtSessionEndWithoutStop, true);
+  });
+
   test("normalizes the tool payload for postToolUse", async () => {
     const input = await cursorAdapter.normalizeInput({
       conversation_id: "cursor-conversation",
       generation_id: "cursor-generation",
       tool_name: "shell",
+      tool_use_id: "native-call",
       tool_input: { command: "npm test" },
       tool_output: "all green",
     }, "postToolUse");
     assert.deepEqual(input.tool, {
+      id: "native-call",
       name: "shell",
       input: { command: "npm test" },
       output: "all green",
@@ -79,7 +154,7 @@ describe("Cursor hook adapter", () => {
     const stateDir = await newStateDir();
     const input = { sessionId: "cursor-conversation", turnId: "gen-1", transcriptPath };
     await cursorAdapter.bufferToolUse(
-      { ...input, tool: { name: "shell", input: { command: "npm test" }, output: "all green" } },
+      { ...input, tool: { id: "native-call", name: "shell", input: { command: "npm test" }, output: "all green" } },
       { stateDir },
     );
 
@@ -107,7 +182,7 @@ describe("Cursor hook adapter", () => {
     const stateDir = await newStateDir();
     const warnings = [];
     const options = { stateDir, maxBytes: 1, warn: (line) => warnings.push(line) };
-    const tool = { name: "shell", input: { command: "npm test" }, output: "all green" };
+    const tool = { id: "native-call", name: "shell", input: { command: "npm test" }, output: "all green" };
 
     const first = await cursorAdapter.bufferToolUse(
       { sessionId: "cursor-conversation", turnId: "gen-1", tool },
@@ -128,7 +203,7 @@ describe("Cursor hook adapter", () => {
     const stateDir = await newStateDir();
     const input = { sessionId: "cursor-conversation", turnId: "gen-2", transcriptPath: toolEventsPath };
     await cursorAdapter.bufferToolUse(
-      { ...input, tool: { name: "shell", input: { command: "npm test" }, output: "exit 0" } },
+      { ...input, tool: { id: "native-call", name: "shell", input: { command: "npm test" }, output: "exit 0" } },
       { stateDir },
     );
 
@@ -169,5 +244,15 @@ describe("Cursor hook adapter", () => {
       if (previous === undefined) delete process.env.EVERME_ENV_FILE_PATH;
       else process.env.EVERME_ENV_FILE_PATH = previous;
     }
+  });
+});
+
+describe("L1-2 population", () => {
+  test("cursor is a per-turn writer", () => {
+    // One host event maps to Stop and generation_id keys the turn, so cursor
+    // is in both halves of L1-2: it claims channel="hook" and it reports
+    // lost turns. Dropping this declaration would take it out of the
+    // numerator while its losses kept landing in the denominator.
+    assert.equal(cursorAdapter.turnBoundary, "stop");
   });
 });
