@@ -11,7 +11,7 @@ import (
 // make install hand back a nil writer/detector at runtime.
 func TestDefaultRegistry_NewHostsRegistered(t *testing.T) {
 	r := DefaultRegistry()
-	for _, p := range []Platform{PlatformDSH, PlatformDevin, PlatformOpenCode, PlatformWorkBuddy} {
+	for _, p := range []Platform{PlatformDSH, PlatformDevin, PlatformOpenCode, PlatformWorkBuddy, PlatformSeekMoon} {
 		assert.True(t, r.Has(p), "detector missing for %s", p)
 		assert.NotNil(t, r.writer(p), "writer missing for %s", p)
 		assert.NotNil(t, r.detector(p), "detector nil for %s", p)
@@ -22,4 +22,5 @@ func TestDefaultRegistry_NewHostsRegistered(t *testing.T) {
 	assert.Contains(t, supported, PlatformDevin)
 	assert.Contains(t, supported, PlatformOpenCode)
 	assert.Contains(t, supported, PlatformWorkBuddy)
+	assert.Contains(t, supported, PlatformSeekMoon)
 }

@@ -87,13 +87,14 @@ evercli plugin install kimicode
 evercli plugin install opencode
 evercli plugin install openclaw
 evercli plugin install raven
+evercli plugin install seekmoon
 evercli plugin install workbuddy
 
 # 4. Verify
 evercli doctor
 ```
 
-Kimi Code needs one final host-owned step after staging: run `/plugins install ~/.kimi-code/everme` inside its TUI. WorkBuddy asks you to trust the new MCP server in its MCP management dialog.
+Kimi Code needs one final host-owned step after staging: run `/plugins install ~/.kimi-code/everme` inside its TUI. WorkBuddy asks you to trust the new MCP server in its MCP management dialog. SeekMoon connects its MCP servers when a conversation starts, so open a new conversation (or relaunch the app) to get `everme-memory`.
 
 Once installed, open your Agent and ask "what do you remember about me?" — it will use the MCP `mem://profile` resource to recall.
 
@@ -137,6 +138,7 @@ Each Agent has its own configuration surface. `evercli plugin install <agent>` a
 | **OpenCode** | `evercli plugin install opencode` | `~/.config/opencode/opencode.json` MCP entry |
 | **OpenClaw** | `evercli plugin install openclaw` | OpenClaw plugin registration |
 | **Raven** | `evercli plugin install raven` | `~/.raven/config.json` + embedded MemoryBackend |
+| **SeekMoon** | `evercli plugin install seekmoon` | App runtime dir `host-mcp.json` MCP entry + new-conversation step |
 | **WorkBuddy** | `evercli plugin install workbuddy` | `~/.workbuddy/mcp.json` + first-connection trust step |
 
 The memory each Agent reads and writes lives in **one shared memory pool** keyed to your account — so context follows *you*, not the app.
