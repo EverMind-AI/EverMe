@@ -9,6 +9,17 @@ the open-source home for EverMe CLI and agent plugins.
 
 ### CLI
 
+- Add a SeekMoon reader to `evercli import conversations`. SeekMoon keeps one
+  transcript per conversation inside the workspace it belongs to
+  (`<workspace>/.openseek/sessions/<session-id>/openseek_session-<session-id>.jsonl`),
+  so the scan roots come from SeekMoon's own `workspaces.json` rather than a
+  home directory. `user`, `assistant` (with its tool calls) and `tool_result`
+  records are imported; `runtime_notice`, `terminal` and the assistant's
+  `reasoning_content` are skipped as app bookkeeping. Uploading needs the
+  platform's agent token from SeekMoon's `host-mcp.json`, which
+  `plugin install seekmoon` writes.
+- Derive the "Use one of: …" platform hint from the registry instead of
+  repeating the list at each call site.
 - Sync the `cli/` Go tree to the `evercli` v0.32.0 release. Earlier public
   snapshots trailed the published binaries; the tree now matches what
   `npm install -g @everme/cli` and the release archives ship.

@@ -474,7 +474,7 @@ Use --path to override the scan root for a specific platform.`,
 			} else {
 				ids, perr := conversation.ParsePlatforms(requested)
 				if perr != nil {
-					return deps.Out.Err(output.Invalid(perr.Error(), "Use one of: claude-code, codex, hermes, openclaw, markdown, kimicode, raven, workbuddy"))
+					return deps.Out.Err(output.Invalid(perr.Error(), "Use one of: "+conversation.PlatformList()))
 				}
 				platformIDs = ids
 			}
@@ -652,7 +652,7 @@ Flags:
 			} else {
 				ids, perr := conversation.ParsePlatforms(effectivePlatforms)
 				if perr != nil {
-					return deps.Out.Err(output.Invalid(perr.Error(), "Use one of: claude-code, codex, hermes, openclaw, markdown, kimicode, raven, workbuddy"))
+					return deps.Out.Err(output.Invalid(perr.Error(), "Use one of: "+conversation.PlatformList()))
 				}
 				platformIDs = ids
 			}

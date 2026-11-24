@@ -22,6 +22,7 @@ func DefaultRegistry() *Registry {
 			NewKimicodeScanner(),
 			NewRavenScanner(),
 			NewWorkBuddyScanner(),
+			NewSeekMoonScanner(),
 		},
 	}
 }
@@ -75,6 +76,10 @@ func DefaultRoots(p PlatformID) []string {
 		// env var name, so the two doors into ~/.workbuddy agree.
 		base := envOr("EVERCLI_WORKBUDDY_CONFIG_DIR", filepath.Join(home, ".workbuddy"))
 		return []string{filepath.Join(base, "projects")}
+	case PlatformSeekMoon:
+		// SeekMoon keeps sessions with their workspace, not in one home dir:
+		// the roots come from the desktop's own workspace registry.
+		return seekMoonSessionRoots()
 	case PlatformMarkdown:
 		// A markdown file's owning agent is the agent whose local folder
 		// contains it; scan the agent home dirs (not generic doc dirs) so md
