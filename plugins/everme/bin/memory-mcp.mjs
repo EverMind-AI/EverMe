@@ -17114,7 +17114,7 @@ function brandStrings(value, brand) {
 // ../agent-sdk/src/config.js
 var DEFAULT_API_BASE = "https://api.everme.evermind.ai";
 var API_PATH_PREFIX = "/api/v1";
-var DEFAULT_LOCAL_GATEWAY = "http://127.0.0.1:18790";
+var CLOSED_GATEWAY = "http://127.0.0.1:0";
 var LOOPBACK_HOSTS = /* @__PURE__ */ new Set(["127.0.0.1", "localhost", "[::1]"]);
 var TIMEOUT_MS = 3e4;
 function resolveConfig(host = {}) {
@@ -17168,19 +17168,19 @@ function readDeviceRoute(env = process.env) {
     raw = readFileSync(join(home, "route.json"), "utf8");
   } catch (err) {
     if (err?.code === "ENOENT" || err?.code === "ENOTDIR") return null;
-    return { baseUrl: DEFAULT_LOCAL_GATEWAY + API_PATH_PREFIX };
+    return { baseUrl: CLOSED_GATEWAY + API_PATH_PREFIX };
   }
   let route;
   try {
     route = JSON.parse(raw);
   } catch {
-    return { baseUrl: DEFAULT_LOCAL_GATEWAY + API_PATH_PREFIX };
+    return { baseUrl: CLOSED_GATEWAY + API_PATH_PREFIX };
   }
   if (!route || typeof route !== "object" || Array.isArray(route)) {
-    return { baseUrl: DEFAULT_LOCAL_GATEWAY + API_PATH_PREFIX };
+    return { baseUrl: CLOSED_GATEWAY + API_PATH_PREFIX };
   }
   if (route.mode !== "local") return null;
-  const apiBase = isLoopbackBase(route.apiBase) ? trimSlash(route.apiBase) : DEFAULT_LOCAL_GATEWAY;
+  const apiBase = isLoopbackBase(route.apiBase) ? trimSlash(route.apiBase) : CLOSED_GATEWAY;
   const floor = route.injectMinScore;
   return {
     baseUrl: apiBase + API_PATH_PREFIX,
@@ -17236,8 +17236,19 @@ function boundedDiagnostic(value, maxChars = 240) {
 var MEMORY_ROUTE_HEADER = "X-EverMe-Memory-Route";
 var MEMORY_STORED_ON_DEVICE = 42501;
 function storedOnDeviceMessage(deviceName) {
-  const name = typeof deviceName === "string" && deviceName.trim() ? deviceName.trim() : "another device";
-  return `This account keeps its memory on “${name}”, so EverMe refuses memory from this computer. Switch it back to the cloud on that Mac (or on the web, if that Mac is gone) to save memory from here.`;
+  return `This account keeps its memory on “${deviceLabel(deviceName)}”, so EverMe refuses memory from this computer. Switch it back to the cloud on that Mac (or on the web, if that Mac is gone) to save memory from here.`;
+}
+var MEMORY_DEVICE_UNREACHABLE = 42510;
+function deviceUnreachableMessage(deviceName) {
+  return `This account keeps its memory on “${deviceLabel(deviceName)}”, which EverMe cannot reach now (EverMe is closed there, or that Mac is offline), so this memory was not saved.`;
+}
+function deviceLabel(deviceName) {
+  return typeof deviceName === "string" && deviceName.trim() ? deviceName.trim() : "another device";
+}
+function refusalMessage(code, env) {
+  if (code === MEMORY_STORED_ON_DEVICE) return storedOnDeviceMessage(env?.result?.deviceName);
+  if (code === MEMORY_DEVICE_UNREACHABLE) return deviceUnreachableMessage(env?.result?.deviceName);
+  return "";
 }
 var EvermeError = class extends Error {
   constructor({ message, status = 0, code = 0, requestId = "", type = "upstream" }) {
@@ -17305,7 +17316,7 @@ function createClient(cfg, log = noop) {
       return await execWithRetry(url, init, boundedTimeoutMs(timeoutMs, cfg.deadlineAt), log, requestId);
     } catch (err) {
       if (route && err instanceof EvermeError && err.type === "upstream" && !err.httpStatus) {
-        const fix = cfg.brand === "everos" ? "run `evercli doctor`" : "open EverMe Desktop";
+        const fix = cfg.brand === "everos" ? "run `evercli doctor`" : "open EverMe Desktop or run `evercli memory status`";
         err.message = boundedDiagnostic(
           `local memory service is not reachable (${err.message}); ${fix}`,
           240
@@ -17446,7 +17457,7 @@ async function execOnce(url, init, timeoutMs, requestId = "") {
   const code = Number(env?.status) || 0;
   const errType = code >= 3e4 && code < 30300 && code !== 30104 ? "auth" : "upstream";
   throw new EvermeError({
-    message: code === MEMORY_STORED_ON_DEVICE ? storedOnDeviceMessage(env?.result?.deviceName) : env?.error || `HTTP ${res.status}`,
+    message: refusalMessage(code, env) || env?.error || `HTTP ${res.status}`,
     status: res.status,
     code,
     requestId: env?.requestId || requestId,
@@ -17951,7 +17962,7 @@ function formatQueryStats(stats) {
 }
 
 // ../memory-mcp/src/mcp.js
-var PKG_VERSION = true ? "0.7.13" : createRequire(import.meta.url)("../package.json").version;
+var PKG_VERSION = true ? "0.7.14" : createRequire(import.meta.url)("../package.json").version;
 var EVERME_MCP_INSTRUCTIONS = [
   "EverMe is the user's long-term memory across sessions.",
   "",
